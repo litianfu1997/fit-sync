@@ -2,6 +2,7 @@ package com.fitsync.app.ui.screens
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,6 +32,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,6 +43,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -51,6 +56,7 @@ import com.fitsync.app.ui.components.StatusPill
 import com.fitsync.app.ui.components.StatusTone
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun SettingsScreen() {
@@ -59,21 +65,30 @@ fun SettingsScreen() {
     val current = settings ?: AppSettingsEntity()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val snackbarHostState = androidx.compose.runtime.remember { SnackbarHostState() }
 
     fun save(next: AppSettingsEntity) {
-        scope.launch(Dispatchers.IO) {
-            app.database.appSettingsDao().upsert(next)
-            SyncScheduler.schedule(context, next.autoSyncEnabled, next.syncIntervalMinutes)
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    app.database.appSettingsDao().upsert(next)
+                    SyncScheduler.schedule(context, next.autoSyncEnabled, next.syncIntervalMinutes)
+                }
+            }
+            result.exceptionOrNull()?.let {
+                snackbarHostState.showSnackbar("保存失败：${it.message ?: "请稍后重试"}")
+            }
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = "设置", subtitle = "同步频率、本地文件和隐私")
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            AppTopBar(title = "偏好设置", subtitle = "自动化、存储与隐私")
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
             item {
                 SettingsCard(Icons.Default.AutoAwesome, "自动同步", "Android 会根据网络和电量安排后台任务") {
                     SettingSwitchRow(
@@ -99,6 +114,7 @@ fun SettingsScreen() {
                     ) {
                         listOf(30, 90, 180, 365).forEach { days ->
                             FilterChip(
+                                modifier = Modifier.height(44.dp),
                                 selected = current.initialHistoryDays == days,
                                 onClick = { save(current.copy(initialHistoryDays = days)) },
                                 label = { Text("$days 天") },
@@ -153,7 +169,19 @@ fun SettingsScreen() {
                         onClick = { save(current.copy(storagePolicy = FitStoragePolicy.DELETE_AFTER_SYNC)) },
                     )
                     Button(
-                        onClick = { scope.launch(Dispatchers.IO) { app.fitFileStore.cleanupTemporaryFiles() } },
+                        onClick = {
+                            scope.launch {
+                                val result = withContext(Dispatchers.IO) {
+                                    runCatching { app.fitFileStore.cleanupTemporaryFiles() }
+                                }
+                                snackbarHostState.showSnackbar(
+                                    result.fold(
+                                        onSuccess = { "临时下载文件已清理" },
+                                        onFailure = { "清理失败：${it.message ?: "请稍后重试"}" },
+                                    ),
+                                )
+                            }
+                        },
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                     ) {
                         Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -162,7 +190,10 @@ fun SettingsScreen() {
                 }
             }
             item {
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF151A22)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(16.dp),
                         verticalAlignment = Alignment.Top,
@@ -170,18 +201,18 @@ fun SettingsScreen() {
                     ) {
                         Box(
                             modifier = Modifier.size(44.dp).clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.14f)),
+                                .background(Color(0xFF22C55E).copy(alpha = 0.16f)),
                             contentAlignment = Alignment.Center,
                         ) {
-                            Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
+                            Icon(Icons.Default.Security, contentDescription = null, tint = Color(0xFF6EE7A0))
                         }
                         Column(Modifier.weight(1f)) {
-                            Text("隐私优先的本地架构", style = MaterialTheme.typography.titleMedium)
+                            Text("隐私优先的本地架构", style = MaterialTheme.typography.titleMedium, color = Color.White)
                             Text(
                                 "FitSync 不保存平台账号密码，不使用自建服务器。Cookie、加密令牌、活动库与 FIT 文件都只存在应用沙箱，系统备份也已关闭。",
                                 modifier = Modifier.padding(top = 4.dp),
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                color = Color.White.copy(alpha = 0.66f),
                             )
                         }
                     }
@@ -196,6 +227,11 @@ fun SettingsScreen() {
                 )
             }
         }
+        }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
     }
 }
 
@@ -208,9 +244,12 @@ private fun SettingsCard(
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
-        Column(Modifier.padding(16.dp)) {
+        Column(
+            Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.large)
+                .padding(16.dp),
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Box(
                     modifier = Modifier.size(38.dp).clip(CircleShape)

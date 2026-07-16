@@ -1,5 +1,8 @@
 package com.fitsync.app.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
@@ -17,6 +20,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -44,8 +48,8 @@ private data class MainDestination(
 private val destinations = listOf(
     MainDestination("home", "首页", Icons.Default.Home),
     MainDestination("activities", "活动", Icons.AutoMirrored.Filled.List),
-    MainDestination("rules", "规则", Icons.Default.SyncAlt),
-    MainDestination("platforms", "平台", Icons.Default.Devices),
+    MainDestination("rules", "自动化", Icons.Default.SyncAlt),
+    MainDestination("platforms", "连接", Icons.Default.Devices),
     MainDestination("settings", "设置", Icons.Default.Settings),
 )
 
@@ -60,31 +64,37 @@ fun FitSyncAppRoot() {
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             if (showBottomBar) {
-                NavigationBar(
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    tonalElevation = 8.dp,
+                Box(
+                    modifier = Modifier.background(MaterialTheme.colorScheme.background)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                 ) {
-                    destinations.forEach { destination ->
-                        val selected = current == destination.route
-                        NavigationBarItem(
-                            selected = selected,
-                            onClick = {
-                                navController.navigate(destination.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
-                            icon = { Icon(destination.icon, contentDescription = destination.label) },
-                            label = { Text(destination.label, style = MaterialTheme.typography.labelMedium) },
-                            colors = NavigationBarItemDefaults.colors(
-                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
-                                selectedIconColor = MaterialTheme.colorScheme.primary,
-                                selectedTextColor = MaterialTheme.colorScheme.primary,
-                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            ),
-                        )
+                    NavigationBar(
+                        modifier = Modifier.height(70.dp).clip(MaterialTheme.shapes.large),
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 0.dp,
+                    ) {
+                        destinations.forEach { destination ->
+                            val selected = current == destination.route
+                            NavigationBarItem(
+                                selected = selected,
+                                onClick = {
+                                    navController.navigate(destination.route) {
+                                        popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                },
+                                icon = { Icon(destination.icon, contentDescription = destination.label) },
+                                label = { Text(destination.label, style = MaterialTheme.typography.labelMedium) },
+                                colors = NavigationBarItemDefaults.colors(
+                                    indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                                    selectedTextColor = MaterialTheme.colorScheme.primary,
+                                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                ),
+                            )
+                        }
                     }
                 }
             }
@@ -99,6 +109,8 @@ fun FitSyncAppRoot() {
                 HomeScreen(
                     onOpenActivities = { navController.navigate("activities") },
                     onOpenJobs = { filter -> navController.navigate("jobs/${filter.routeValue}") },
+                    onOpenPlatforms = { navController.navigate("platforms") },
+                    onOpenRules = { navController.navigate("rules") },
                 )
             }
             composable("activities") {

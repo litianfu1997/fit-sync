@@ -54,7 +54,8 @@ import com.fitsync.app.ui.components.StatusPill
 import com.fitsync.app.ui.components.StatusTone
 import com.fitsync.app.ui.components.deliveryStatusText
 import com.fitsync.app.ui.components.deliveryStatusTone
-import com.fitsync.app.ui.theme.FitBlue
+import com.fitsync.app.ui.theme.FitOrange
+import com.fitsync.app.ui.theme.FitOrangeSoft
 import com.fitsync.app.web.PlatformWebActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -159,10 +160,18 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                                     enabled = !copyExists && existingJob == null,
                                     onClick = {
                                         scope.launch(Dispatchers.IO) {
-                                            val id = app.syncCoordinator.planner.enqueueManual(activityId, account.id)
-                                            SyncScheduler.enqueueNow(context)
+                                            val result = runCatching {
+                                                val id = app.syncCoordinator.planner.enqueueManual(activityId, account.id)
+                                                SyncScheduler.enqueueNow(context)
+                                                id
+                                            }
                                             withContext(Dispatchers.Main) {
-                                                actionMessage = if (id > 0) "已加入 ${account.platform.displayName} 队列" else "该平台已有副本或任务"
+                                                actionMessage = result.fold(
+                                                    onSuccess = { id ->
+                                                        if (id > 0) "已加入 ${account.platform.displayName} 队列" else "该平台已有副本或任务"
+                                                    },
+                                                    onFailure = { "补发失败：${it.message ?: "请稍后重试"}" },
+                                                )
                                             }
                                         }
                                     },
@@ -245,8 +254,16 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                                                 OutlinedButton(
                                                     onClick = {
                                                         scope.launch(Dispatchers.IO) {
-                                                            app.syncCoordinator.retryJob(job.id)
-                                                            SyncScheduler.enqueueNow(context)
+                                                            val result = runCatching {
+                                                                app.syncCoordinator.retryJob(job.id)
+                                                                SyncScheduler.enqueueNow(context)
+                                                            }
+                                                            withContext(Dispatchers.Main) {
+                                                                actionMessage = result.fold(
+                                                                    onSuccess = { "已重新加入同步队列" },
+                                                                    onFailure = { "重试失败：${it.message ?: "请稍后重试"}" },
+                                                                )
+                                                            }
                                                         }
                                                     },
                                                     modifier = Modifier.padding(top = 6.dp),
@@ -272,15 +289,16 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
 private fun ActivitySummary(activity: CanonicalActivityEntity, dateFormat: SimpleDateFormat) {
     Box(
         modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large)
-            .background(Brush.linearGradient(listOf(Color(0xFF315DE8), Color(0xFF1787CE))))
-            .padding(20.dp),
+            .background(Brush.linearGradient(listOf(Color(0xFF111827), Color(0xFF28180D), Color(0xFF48220A))))
+            .padding(22.dp),
     ) {
         Column {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(
-                    modifier = Modifier.size(48.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.18f)),
+                    modifier = Modifier.size(48.dp).clip(MaterialTheme.shapes.medium)
+                        .background(FitOrange.copy(alpha = 0.2f)),
                     contentAlignment = Alignment.Center,
-                ) { Icon(sportIcon(activity.sportType), contentDescription = null, tint = Color.White) }
+                ) { Icon(sportIcon(activity.sportType), contentDescription = null, tint = FitOrangeSoft) }
                 Column {
                     Text(
                         activity.title?.takeIf { it.isNotBlank() } ?: sportLabel(activity.sportType),
@@ -296,6 +314,7 @@ private fun ActivitySummary(activity: CanonicalActivityEntity, dateFormat: Simpl
             ) {
                 SummaryStat("距离", activity.distanceMeters?.let { "%.1f km".format(it / 1000) } ?: "--")
                 SummaryStat("时长", activity.elapsedSeconds?.let(::formatDuration) ?: "--")
+                SummaryStat("均心率", activity.avgHeartRate?.let { "$it bpm" } ?: "--")
                 SummaryStat("爬升", activity.elevationGain?.let { "%.0f m".format(it) } ?: "--")
             }
         }

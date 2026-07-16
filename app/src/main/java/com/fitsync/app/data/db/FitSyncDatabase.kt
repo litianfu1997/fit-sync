@@ -35,7 +35,7 @@ import com.fitsync.app.domain.model.FitStoragePolicy
         ImportJobEntity::class,
         AppSettingsEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 @TypeConverters(Converters::class)
@@ -61,7 +61,7 @@ abstract class FitSyncDatabase : RoomDatabase() {
 
         private fun build(context: Context): FitSyncDatabase {
             return Room.databaseBuilder(context, FitSyncDatabase::class.java, "fitsync.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .addCallback(
                     object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
@@ -106,6 +106,13 @@ abstract class FitSyncDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE app_settings ADD COLUMN initialHistoryDays INTEGER NOT NULL DEFAULT 90")
                 db.execSQL("ALTER TABLE app_settings ADD COLUMN syncIntervalMinutes INTEGER NOT NULL DEFAULT 15")
                 db.execSQL("ALTER TABLE app_settings ADD COLUMN notificationsEnabled INTEGER NOT NULL DEFAULT 1")
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE canonical_activity ADD COLUMN avgHeartRate INTEGER")
+                db.execSQL("ALTER TABLE app_settings ADD COLUMN fitParserVersion INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

@@ -42,7 +42,7 @@ class Migration1To2Test {
         }
 
         database = Room.databaseBuilder(context, FitSyncDatabase::class.java, dbName)
-            .addMigrations(FitSyncDatabase.MIGRATION_1_2)
+            .addMigrations(FitSyncDatabase.MIGRATION_1_2, FitSyncDatabase.MIGRATION_2_3)
             .build()
         val settings = database!!.appSettingsDao().get()
 
@@ -50,6 +50,7 @@ class Migration1To2Test {
         assertThat(settings!!.initialHistoryDays).isEqualTo(90)
         assertThat(settings.syncIntervalMinutes).isEqualTo(15)
         assertThat(settings.notificationsEnabled).isTrue()
+        assertThat(settings.fitParserVersion).isEqualTo(0)
         assertThat(settings.storagePolicy.name).isEqualTo("KEEP_FOREVER")
     }
 

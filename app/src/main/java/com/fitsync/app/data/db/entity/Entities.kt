@@ -49,6 +49,7 @@ data class CanonicalActivityEntity(
     val movingSeconds: Int? = null,
     val distanceMeters: Double? = null,
     val elevationGain: Double? = null,
+    val avgHeartRate: Int? = null,
     val title: String? = null,
     val activityFingerprint: String? = null,
     val dedupStatus: DedupStatus = DedupStatus.UNIQUE,
@@ -172,4 +173,5 @@ data class AppSettingsEntity(
     @ColumnInfo(defaultValue = "90") val initialHistoryDays: Int = 90,
     @ColumnInfo(defaultValue = "15") val syncIntervalMinutes: Int = 15,
     @ColumnInfo(defaultValue = "1") val notificationsEnabled: Boolean = true,
+    @ColumnInfo(defaultValue = "0") val fitParserVersion: Int = 0,
 )

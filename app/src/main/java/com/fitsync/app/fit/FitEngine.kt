@@ -169,10 +169,12 @@ class FitEngine {
     )
 
     private data class FieldDef(val fieldNum: Int, val size: Int, val baseType: Int)
+    private data class DeveloperFieldDef(val size: Int)
     private data class MesgDef(
         val localNum: Int,
         val globalMesgNum: Int,
         val fields: List<FieldDef>,
+        val developerFields: List<DeveloperFieldDef>,
         val littleEndian: Boolean,
     )
 
@@ -200,6 +202,14 @@ class FitEngine {
         var avgHr: Int? = null
         var avgPwr: Int? = null
         var avgCad: Int? = null
+        var lastTimestampRaw: Long? = null
+        var recordDistance: Double? = null
+        var lapAscent = 0.0
+        var hasLapAscent = false
+        var recordAscent = 0.0
+        var previousAltitude: Double? = null
+        var heartRateSum = 0L
+        var heartRateCount = 0
 
         // FIT epoch: 1989-12-31 00:00:00 UTC
         val fitEpochOffsetMs = 631065600000L
@@ -212,16 +222,10 @@ class FitEngine {
         while (offset < end) {
             val header = bytes[offset].toInt() and 0xFF
             offset++
-            val isDefinition = header and 0x40 != 0
             val isCompressedTs = header and 0x80 != 0
-            if (isCompressedTs) {
-                // Skip compressed timestamp header records when def missing.
-                val local = (header shr 5) and 0x03
-                val def = defs[local] ?: break
-                offset += def.fields.sumOf { it.size }
-                continue
-            }
-            val localNum = header and 0x0F
+            val isDefinition = !isCompressedTs && header and 0x40 != 0
+            val localNum = if (isCompressedTs) (header shr 5) and 0x03 else header and 0x0F
+            val compressedTimeOffset = if (isCompressedTs) header and 0x1F else null
             if (isDefinition) {
                 if (offset + 5 > end) break
                 val architecture = bytes[offset + 1].toInt() and 0xFF
@@ -249,20 +253,40 @@ class FitEngine {
                 }
                 if (!ok) break
                 // Developer fields
+                val developerFields = ArrayList<DeveloperFieldDef>()
                 if (header and 0x20 != 0) {
                     if (offset >= end) break
                     val devCount = bytes[offset].toInt() and 0xFF
                     offset++
-                    offset += devCount * 3
+                    if (offset + devCount * 3 > end) break
+                    repeat(devCount) {
+                        developerFields += DeveloperFieldDef(
+                            size = bytes[offset + 1].toInt() and 0xFF,
+                        )
+                        offset += 3
+                    }
                 }
-                defs[localNum] = MesgDef(localNum, global, fields, littleEndian)
+                defs[localNum] = MesgDef(localNum, global, fields, developerFields, littleEndian)
             } else {
                 val def = defs[localNum] ?: break
-                val mesgSize = def.fields.sumOf { it.size }
+                val nativeSize = def.fields.sumOf { it.size }
+                val mesgSize = nativeSize + def.developerFields.sumOf { it.size }
                 if (offset + mesgSize > end) break
-                val mesgBytes = bytes.copyOfRange(offset, offset + mesgSize)
+                val mesgBytes = bytes.copyOfRange(offset, offset + nativeSize)
                 offset += mesgSize
                 val values = readFields(mesgBytes, def)
+                val explicitTimestamp = values[253]
+                val messageTimestamp = when {
+                    explicitTimestamp != null -> explicitTimestamp
+                    compressedTimeOffset != null && lastTimestampRaw != null -> {
+                        val previous = lastTimestampRaw
+                        val previousOffset = (previous and 0x1F).toInt()
+                        (previous and 0xFFFFFFE0L) + compressedTimeOffset +
+                            if (compressedTimeOffset < previousOffset) 0x20 else 0
+                    }
+                    else -> null
+                }
+                if (messageTimestamp != null) lastTimestampRaw = messageTimestamp
 
                 when (def.globalMesgNum) {
                     0 -> { // FileId
@@ -289,9 +313,16 @@ class FitEngine {
                         values[16]?.let { avgHr = it.toInt() }
                         values[18]?.let { avgCad = it.toInt() }
                         values[20]?.let { avgPwr = it.toInt() }
-                        values[22]?.let { elev = it / 5.0 } // enhanced or total_ascent often uint16
+                        values[22]?.let { elev = it.toDouble() } // total_ascent, metres
+                        messageTimestamp?.let { readTimestamp(it) }?.let { endMs = it }
                     }
-                    19 -> hasLaps = true // Lap
+                    19 -> { // Lap
+                        hasLaps = true
+                        values[22]?.let {
+                            lapAscent += it.toDouble()
+                            hasLapAscent = true
+                        }
+                    }
                     20 -> { // Record
                         recordCount++
                         val lat = values[0]
@@ -306,7 +337,24 @@ class FitEngine {
                         if (values[3] != null) hasHr = true
                         if (values[4] != null) hasCad = true
                         if (values[7] != null) hasPwr = true
-                        values[253]?.let { ts ->
+                        values[3]?.let {
+                            heartRateSum += it
+                            heartRateCount++
+                        }
+                        values[5]?.let {
+                            val currentDistance = it / 100.0
+                            recordDistance = maxOf(recordDistance ?: currentDistance, currentDistance)
+                        }
+                        val altitude = values[78]?.let { it / 5.0 - 500.0 }
+                            ?: values[2]?.let { it / 5.0 - 500.0 }
+                        altitude?.let { current ->
+                            previousAltitude?.let { previous ->
+                                val gain = current - previous
+                                if (gain > 0.5) recordAscent += gain
+                            }
+                            previousAltitude = current
+                        }
+                        messageTimestamp?.let { ts ->
                             val t = readTimestamp(ts)
                             if (t != null) {
                                 if (startMs == null) startMs = t
@@ -324,10 +372,23 @@ class FitEngine {
         }
 
         val startSnapshot = startMs
-        val elapsedSnapshot = elapsed
-        if (endMs == null && startSnapshot != null && elapsedSnapshot != null) {
-            endMs = startSnapshot + elapsedSnapshot * 1000L
+        val endSnapshot = endMs
+        val elapsedResolved = elapsed ?: if (startSnapshot != null && endSnapshot != null && endSnapshot >= startSnapshot) {
+            ((endSnapshot - startSnapshot) / 1000L).toInt()
+        } else {
+            null
         }
+        if (endMs == null && startSnapshot != null && elapsedResolved != null) {
+            endMs = startSnapshot + elapsedResolved * 1000L
+        }
+        val averageHeartRate = avgHr ?: if (heartRateCount > 0) {
+            (heartRateSum.toDouble() / heartRateCount).toInt()
+        } else {
+            null
+        }
+        val elevationGain = elev
+            ?: lapAscent.takeIf { hasLapAscent }
+            ?: recordAscent.takeIf { it > 0.0 }
 
         return Decoded(
             fileType = fileType,
@@ -338,18 +399,18 @@ class FitEngine {
             sportType = sport,
             startTimeEpochMs = startMs,
             endTimeEpochMs = endMs,
-            elapsedSeconds = elapsed,
+            elapsedSeconds = elapsedResolved,
             movingSeconds = moving,
-            distanceMeters = distance,
-            elevationGain = elev,
+            distanceMeters = distance ?: recordDistance,
+            elevationGain = elevationGain,
             hasSession = hasSession,
             hasLaps = hasLaps,
-            hasHeartRate = hasHr || avgHr != null,
+            hasHeartRate = hasHr || averageHeartRate != null,
             hasCadence = hasCad || avgCad != null,
             hasPower = hasPwr || avgPwr != null,
             recordCount = recordCount,
             trackSample = sampleTrack(track),
-            avgHeartRate = avgHr,
+            avgHeartRate = averageHeartRate,
             avgPower = avgPwr,
             avgCadence = avgCad,
         )
@@ -364,26 +425,51 @@ class FitEngine {
             val slice = mesgBytes.copyOfRange(pos, pos + field.size)
             pos += field.size
             val base = field.baseType and 0x1F
-            val value: Long? = when {
-                field.size == 1 && base in listOf(0, 1, 2, 10, 13) ->
-                    (slice[0].toInt() and 0xFF).toLong().takeUnless { it == 0xFFL }
-                field.size == 2 -> {
-                    val v = ByteBuffer.wrap(slice).order(order).short.toInt() and 0xFFFF
-                    v.toLong().takeUnless { it == 0xFFFFL }
-                }
-                field.size == 4 -> {
-                    val v = ByteBuffer.wrap(slice).order(order).int.toLong() and 0xFFFFFFFFL
-                    v.takeUnless { it == 0xFFFFFFFFL }
-                }
-                field.size == 8 -> ByteBuffer.wrap(slice).order(order).long
-                else -> null
-            }
+            val value = readScalar(slice, base, order)
             if (value != null) map[field.fieldNum] = value
         }
         return map
     }
 
-    private fun semicirclesToDegrees(semi: Int): Double = semi * (180.0 / Int.MAX_VALUE.toDouble())
+    private fun readScalar(slice: ByteArray, base: Int, order: ByteOrder): Long? = when (base) {
+        0, 2, 13 -> if (slice.size == 1) {
+            (slice[0].toInt() and 0xFF).toLong().takeUnless { it == 0xFFL }
+        } else null
+        1 -> if (slice.size == 1) slice[0].toLong().takeUnless { it == 0x7FL } else null
+        3 -> if (slice.size == 2) {
+            ByteBuffer.wrap(slice).order(order).short.toLong().takeUnless { it == 0x7FFFL }
+        } else null
+        4 -> if (slice.size == 2) {
+            (ByteBuffer.wrap(slice).order(order).short.toInt() and 0xFFFF).toLong()
+                .takeUnless { it == 0xFFFFL }
+        } else null
+        5 -> if (slice.size == 4) {
+            ByteBuffer.wrap(slice).order(order).int.toLong().takeUnless { it == 0x7FFFFFFFL }
+        } else null
+        6 -> if (slice.size == 4) {
+            (ByteBuffer.wrap(slice).order(order).int.toLong() and 0xFFFFFFFFL)
+                .takeUnless { it == 0xFFFFFFFFL }
+        } else null
+        10 -> if (slice.size == 1) (slice[0].toInt() and 0xFF).toLong().takeUnless { it == 0L } else null
+        11 -> if (slice.size == 2) {
+            (ByteBuffer.wrap(slice).order(order).short.toInt() and 0xFFFF).toLong().takeUnless { it == 0L }
+        } else null
+        12 -> if (slice.size == 4) {
+            (ByteBuffer.wrap(slice).order(order).int.toLong() and 0xFFFFFFFFL).takeUnless { it == 0L }
+        } else null
+        14 -> if (slice.size == 8) {
+            ByteBuffer.wrap(slice).order(order).long.takeUnless { it == Long.MAX_VALUE }
+        } else null
+        15 -> if (slice.size == 8) {
+            ByteBuffer.wrap(slice).order(order).long.takeUnless { it == -1L }
+        } else null
+        16 -> if (slice.size == 8) {
+            ByteBuffer.wrap(slice).order(order).long.takeUnless { it == 0L }
+        } else null
+        else -> null
+    }
+
+    private fun semicirclesToDegrees(semi: Int): Double = semi * (180.0 / 2147483648.0)
 
     private fun mapSport(code: Int): SportType = when (code) {
         2 -> SportType.CYCLING
