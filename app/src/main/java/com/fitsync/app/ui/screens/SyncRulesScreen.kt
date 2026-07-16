@@ -1,39 +1,52 @@
 package com.fitsync.app.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.fitsync.app.FitSyncApp
@@ -44,7 +57,7 @@ import com.fitsync.app.sync.SyncScheduler
 import com.fitsync.app.ui.components.AppTopBar
 import com.fitsync.app.ui.components.EmptyState
 import com.fitsync.app.ui.components.PlatformAvatar
-import com.fitsync.app.ui.components.StatusPill
+import com.fitsync.app.ui.components.SectionHeader
 import com.fitsync.app.ui.components.StatusTone
 import com.fitsync.app.ui.components.executionText
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +66,12 @@ import kotlinx.coroutines.withContext
 
 private data class RouteKey(val source: Platform, val destinationId: Long)
 
+private data class HistoryConfirmation(
+    val source: Platform,
+    val destinationId: Long,
+    val destinationName: String,
+)
+
 @Composable
 fun SyncRulesScreen() {
     val app = FitSyncApp.instance
@@ -60,141 +79,275 @@ fun SyncRulesScreen() {
     val rules by app.database.syncRuleDao().observeAll().collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
     val connectedAccounts = accounts.filter { it.status != AccountStatus.DISABLED }
-    val sources = listOf(Platform.LOCAL_IMPORT) + connectedAccounts.map { it.platform }
+    val sources = (listOf(Platform.LOCAL_IMPORT) + connectedAccounts.map { it.platform }).distinct()
+    var selectedSource by rememberSaveable { mutableStateOf(Platform.LOCAL_IMPORT) }
     var busyRoute by remember { mutableStateOf<RouteKey?>(null) }
+    var historyConfirmation by remember { mutableStateOf<HistoryConfirmation?>(null) }
+
+    LaunchedEffect(sources) {
+        if (selectedSource !in sources) selectedSource = sources.firstOrNull() ?: Platform.LOCAL_IMPORT
+    }
 
     fun updateRule(source: Platform, destinationId: Long, enabled: Boolean, includeHistory: Boolean) {
         val key = RouteKey(source, destinationId)
         busyRoute = key
-        scope.launch(Dispatchers.IO) {
-            runCatching {
-                app.syncCoordinator.planner.setRule(source, destinationId, enabled, includeHistory)
-                SyncScheduler.enqueueNow(context)
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    app.syncCoordinator.planner.setRule(source, destinationId, enabled, includeHistory)
+                    SyncScheduler.enqueueNow(context)
+                }
             }
-            withContext(Dispatchers.Main) { busyRoute = null }
+            busyRoute = null
+            snackbarHostState.showSnackbar(
+                result.fold(
+                    onSuccess = {
+                        when {
+                            !enabled -> "自动化已关闭"
+                            includeHistory -> "规则已保存，历史活动正在加入队列"
+                            else -> "自动化已开启"
+                        }
+                    },
+                    onFailure = { "保存失败：${it.message ?: "请稍后重试"}" },
+                ),
+            )
         }
     }
 
-    Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = "同步规则", subtitle = "决定活动从哪里来、要发送到哪里")
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item {
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Box(
-                            modifier = Modifier.size(42.dp).clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.14f)),
-                            contentAlignment = Alignment.Center,
-                        ) { Icon(Icons.Default.Shield, contentDescription = null, tint = MaterialTheme.colorScheme.secondary) }
-                        Column(Modifier.weight(1f)) {
-                            Text("启用规则即授权自动上传", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "默认只发送规则开启后的新活动；历史活动需单独开启回填。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+    val destinations = connectedAccounts.filter { account ->
+        account.platform != selectedSource &&
+            PlatformCapabilityRegistry.capabilities(account.platform).canUploadActivity
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            AppTopBar(title = "同步自动化", subtitle = "先选择来源，再决定活动去向")
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                item {
+                    AutomationSummary(
+                        enabledCount = rules.count { it.enabled },
+                        connectedCount = connectedAccounts.size,
+                    )
+                }
+                if (connectedAccounts.isEmpty()) {
+                    item {
+                        EmptyState(
+                            title = "先连接一个平台",
+                            body = "连接账号后，就能把本地导入或平台活动自动发送到其他平台。",
+                            icon = Icons.Default.Link,
+                        )
+                    }
+                } else {
+                    item { SectionHeader("活动从哪里来", "一次只配置一个来源，路径更清楚") }
+                    item {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            sources.forEach { source ->
+                                FilterChip(
+                                    modifier = Modifier.height(44.dp),
+                                    selected = selectedSource == source,
+                                    onClick = { selectedSource = source },
+                                    label = { Text(source.displayName) },
+                                )
+                            }
+                        }
+                    }
+                    item {
+                        SourceRouteHeader(
+                            source = selectedSource,
+                            enabledCount = rules.count { it.sourcePlatform == selectedSource && it.enabled },
+                        )
+                    }
+                    if (destinations.isEmpty()) {
+                        item {
+                            EmptyState(
+                                title = "没有可用目标",
+                                body = "再连接一个支持上传 FIT 的平台，即可创建自动同步路径。",
+                                icon = Icons.Default.Route,
                             )
                         }
-                        StatusPill("已启用 ${rules.count { it.enabled }}", StatusTone.SUCCESS)
+                    } else {
+                        items(destinations, key = { "${selectedSource.name}-${it.id}" }) { destination ->
+                            val rule = rules.firstOrNull {
+                                it.sourcePlatform == selectedSource && it.destinationAccountId == destination.id
+                            }
+                            val key = RouteKey(selectedSource, destination.id)
+                            RouteCard(
+                                source = selectedSource,
+                                destination = destination.platform,
+                                enabled = rule != null,
+                                includeHistory = rule?.includeHistory == true,
+                                busy = busyRoute == key,
+                                onEnabledChange = { enabled ->
+                                    updateRule(selectedSource, destination.id, enabled, false)
+                                },
+                                onHistoryChange = { include ->
+                                    if (include) {
+                                        historyConfirmation = HistoryConfirmation(
+                                            selectedSource,
+                                            destination.id,
+                                            destination.platform.displayName,
+                                        )
+                                    } else {
+                                        updateRule(selectedSource, destination.id, true, false)
+                                    }
+                                },
+                            )
+                        }
                     }
                 }
             }
-            if (connectedAccounts.isEmpty()) {
-                item {
-                    EmptyState(
-                        title = "先连接一个平台",
-                        body = "连接账号后，就能配置“来源 → 目标”的自动同步通道。",
-                        icon = Icons.Default.Link,
+        }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
+    }
+
+    historyConfirmation?.let { confirmation ->
+        AlertDialog(
+            onDismissRequest = { historyConfirmation = null },
+            title = { Text("同时补发历史活动？") },
+            text = {
+                Text("现有的 ${confirmation.source.displayName} 活动会批量加入 ${confirmation.destinationName} 队列。数量较多时需要一些时间。")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        historyConfirmation = null
+                        updateRule(confirmation.source, confirmation.destinationId, true, true)
+                    },
+                ) { Text("确认补发") }
+            },
+            dismissButton = { TextButton(onClick = { historyConfirmation = null }) { Text("取消") } },
+        )
+    }
+}
+
+@Composable
+private fun AutomationSummary(enabledCount: Int, connectedCount: Int) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF151A22)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Box(
+                modifier = Modifier.size(46.dp).clip(MaterialTheme.shapes.medium)
+                    .background(Color(0xFFF97316).copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Default.Shield, contentDescription = null, tint = Color(0xFFFFB067))
+            }
+            Column(Modifier.weight(1f)) {
+                Text("$enabledCount 条路径正在运行", style = MaterialTheme.typography.titleMedium, color = Color.White)
+                Text(
+                    "$connectedCount 个平台可参与同步 · 启用即授权自动上传",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.62f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceRouteHeader(source: Platform, enabledCount: Int) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        PlatformAvatar(source, 48.dp)
+        Column(Modifier.weight(1f)) {
+            Text("${source.displayName} 的去向", style = MaterialTheme.typography.titleMedium)
+            Text("选择需要自动补齐的平台", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        com.fitsync.app.ui.components.StatusPill(
+            "$enabledCount 已开启",
+            if (enabledCount > 0) StatusTone.SUCCESS else StatusTone.NEUTRAL,
+        )
+    }
+}
+
+@Composable
+private fun RouteCard(
+    source: Platform,
+    destination: Platform,
+    enabled: Boolean,
+    includeHistory: Boolean,
+    busy: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    onHistoryChange: (Boolean) -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth()
+                .border(
+                    1.dp,
+                    if (enabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                    else MaterialTheme.colorScheme.outlineVariant,
+                    MaterialTheme.shapes.large,
+                )
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                PlatformAvatar(source, 36.dp)
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = null,
+                    tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+                PlatformAvatar(destination, 42.dp)
+                Column(Modifier.weight(1f)) {
+                    Text(destination.displayName, style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "${executionText(PlatformCapabilityRegistry.capabilities(destination).uploadFitMode)}上传",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-            } else {
-                items(sources.distinct(), key = { "source-${it.name}" }) { source ->
-                    val destinations = connectedAccounts.filter { account ->
-                        account.platform != source && PlatformCapabilityRegistry.capabilities(account.platform).canUploadActivity
+                if (busy) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                else Switch(checked = enabled, onCheckedChange = onEnabledChange)
+            }
+            if (enabled) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(
+                        Icons.Default.History,
+                        contentDescription = null,
+                        tint = if (includeHistory) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Column(Modifier.weight(1f)) {
+                        Text("补发现有历史", style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            if (includeHistory) "历史活动已加入投递队列" else "默认只同步开启后的新活动",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-                    ) {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                PlatformAvatar(source, 46.dp)
-                                Column(Modifier.weight(1f)) {
-                                    Text(source.displayName, style = MaterialTheme.typography.titleMedium)
-                                    Text("活动来源", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                                val enabledCount = rules.count { it.sourcePlatform == source && it.enabled }
-                                StatusPill("$enabledCount 个目标", if (enabledCount > 0) StatusTone.INFO else StatusTone.NEUTRAL)
-                            }
-                            if (destinations.isEmpty()) {
-                                Text("没有其他可上传的平台", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            destinations.forEach { destination ->
-                                val rule = rules.firstOrNull {
-                                    it.sourcePlatform == source && it.destinationAccountId == destination.id
-                                }
-                                val key = RouteKey(source, destination.id)
-                                val isBusy = busyRoute == key
-                                Column(
-                                    modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
-                                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.58f))
-                                        .padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                                        PlatformAvatar(destination.platform, 36.dp)
-                                        Column(Modifier.weight(1f)) {
-                                            Text(destination.platform.displayName, style = MaterialTheme.typography.titleSmall)
-                                            Text(
-                                                "上传方式：${executionText(PlatformCapabilityRegistry.capabilities(destination.platform).uploadFitMode)}",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                        }
-                                        if (isBusy) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                                        else Switch(
-                                            checked = rule != null,
-                                            onCheckedChange = { enabled ->
-                                                updateRule(source, destination.id, enabled, rule?.includeHistory ?: false)
-                                            },
-                                        )
-                                    }
-                                    if (rule != null) {
-                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                            Icon(
-                                                Icons.Default.History,
-                                                contentDescription = null,
-                                                tint = if (rule.includeHistory) MaterialTheme.colorScheme.tertiary
-                                                else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            )
-                                            Column(Modifier.weight(1f)) {
-                                                Text("回填已有历史", style = MaterialTheme.typography.labelLarge)
-                                                Text(
-                                                    if (rule.includeHistory) "已加入历史活动投递任务" else "关闭时只处理以后出现的新活动",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                )
-                                            }
-                                            Switch(
-                                                checked = rule.includeHistory,
-                                                onCheckedChange = { include -> updateRule(source, destination.id, true, include) },
-                                                enabled = !isBusy,
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Switch(checked = includeHistory, onCheckedChange = onHistoryChange, enabled = !busy)
                 }
             }
         }

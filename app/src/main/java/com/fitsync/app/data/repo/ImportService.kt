@@ -3,6 +3,7 @@ package com.fitsync.app.data.repo
 import android.net.Uri
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.ActivityVariantEntity
+import com.fitsync.app.data.db.entity.AppSettingsEntity
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
 import com.fitsync.app.data.db.entity.ImportJobEntity
 import com.fitsync.app.data.file.FitFileStore
@@ -16,6 +17,7 @@ import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SportType
 import com.fitsync.app.domain.model.ValidationStatus
 import com.fitsync.app.fit.FitEngine
+import com.fitsync.app.fit.FitParseResult
 import com.fitsync.app.fit.LatLng
 import org.json.JSONArray
 import org.json.JSONObject
@@ -44,7 +46,7 @@ class ImportService(
         )
 
         return try {
-            val stored = fileStore.copyFromUri(uri, displayName)
+            var stored = fileStore.copyFromUri(uri, displayName)
             importDao.update(
                 importDao.getById(jobId)!!.copy(
                     status = ImportJobStatus.VALIDATING,
@@ -87,15 +89,26 @@ class ImportService(
                 return ImportOutcome.Invalid(jobId, parsed.validationStatus, parsed.errorMessage)
             }
 
+            val resolvedSportType = parsed.sportType.takeUnless { it == SportType.UNKNOWN }
+                ?: SportType.CYCLING
+            val start = parsed.startTimeEpochMs ?: System.currentTimeMillis()
+            stored = fileStore.renameForActivity(
+                storedFile = stored,
+                platform = sourcePlatform ?: Platform.LOCAL_IMPORT,
+                startTimeEpochMs = start,
+                sportType = resolvedSportType,
+            )
+
             importDao.update(
                 importDao.getById(jobId)!!.copy(
+                    displayName = stored.displayName,
                     status = ImportJobStatus.DEDUPLICATING,
+                    localFilePath = stored.file.absolutePath,
                     validationStatus = parsed.validationStatus,
                     updatedAtEpochMs = System.currentTimeMillis(),
                 ),
             )
 
-            val start = parsed.startTimeEpochMs ?: System.currentTimeMillis()
             val all = db.canonicalActivityDao().getAll()
             val candidates = dedupEngine.filterCandidates(
                 all = all,
@@ -114,14 +127,14 @@ class ImportService(
                 DedupDecision.Action.CREATE_NEW -> {
                     db.canonicalActivityDao().insert(
                         CanonicalActivityEntity(
-                            sportType = parsed.sportType.takeUnless { it == SportType.UNKNOWN }
-                                ?: SportType.CYCLING,
+                            sportType = resolvedSportType,
                             startTimeEpochMs = start,
                             endTimeEpochMs = parsed.endTimeEpochMs,
                             elapsedSeconds = parsed.elapsedSeconds,
                             movingSeconds = parsed.movingSeconds,
                             distanceMeters = parsed.distanceMeters,
                             elevationGain = parsed.elevationGain,
+                            avgHeartRate = parsed.avgHeartRate,
                             title = displayName?.substringBeforeLast('.'),
                             activityFingerprint = ActivityFingerprint.compute(parsed),
                             dedupStatus = DedupStatus.UNIQUE,
@@ -132,7 +145,9 @@ class ImportService(
                     val id = decision.matchedCanonicalId!!
                     val existing = db.canonicalActivityDao().getById(id)!!
                     db.canonicalActivityDao().update(
-                        existing.copy(dedupStatus = DedupStatus.AUTO_MERGED),
+                        existing.withMissingMetricsFrom(parsed).copy(
+                            dedupStatus = DedupStatus.AUTO_MERGED,
+                        ),
                     )
                     id
                 }
@@ -140,14 +155,14 @@ class ImportService(
                     // Keep as separate canonical but flag needs review; user can merge later.
                     val id = db.canonicalActivityDao().insert(
                         CanonicalActivityEntity(
-                            sportType = parsed.sportType.takeUnless { it == SportType.UNKNOWN }
-                                ?: SportType.CYCLING,
+                            sportType = resolvedSportType,
                             startTimeEpochMs = start,
                             endTimeEpochMs = parsed.endTimeEpochMs,
                             elapsedSeconds = parsed.elapsedSeconds,
                             movingSeconds = parsed.movingSeconds,
                             distanceMeters = parsed.distanceMeters,
                             elevationGain = parsed.elevationGain,
+                            avgHeartRate = parsed.avgHeartRate,
                             title = displayName?.substringBeforeLast('.'),
                             activityFingerprint = ActivityFingerprint.compute(parsed),
                             dedupStatus = DedupStatus.NEEDS_REVIEW,
@@ -234,6 +249,60 @@ class ImportService(
         remoteActivityId = remoteActivityId,
     )
 
+    suspend fun reparseStoredActivitiesIfNeeded() {
+        val settingsDao = db.appSettingsDao()
+        val settings = settingsDao.get() ?: AppSettingsEntity()
+        if (settings.fitParserVersion >= CURRENT_PARSER_VERSION) return
+
+        db.canonicalActivityDao().getAll().forEach { canonical ->
+            val reparsed = db.activityVariantDao().findByCanonical(canonical.id).mapNotNull { variant ->
+                val file = File(variant.localFilePath)
+                if (!file.isFile) return@mapNotNull null
+                val parsed = runCatching { fitEngine.parseFile(file) }.getOrNull() ?: return@mapNotNull null
+                if (!parsed.isActivityFile) return@mapNotNull null
+
+                db.activityVariantDao().update(
+                    variant.copy(
+                        recordingManufacturer = parsed.manufacturer,
+                        recordingProduct = parsed.product,
+                        deviceSerial = parsed.deviceSerial,
+                        qualityScore = parsed.qualityScore,
+                        validationStatus = parsed.validationStatus,
+                        hasGps = parsed.hasGps,
+                        hasHeartRate = parsed.hasHeartRate,
+                        hasCadence = parsed.hasCadence,
+                        hasPower = parsed.hasPower,
+                        recordCount = parsed.recordCount,
+                        trackSummaryJson = encodeTrack(parsed.trackSample),
+                    ),
+                )
+                ReparsedVariant(variant.id, parsed)
+            }
+            val preferred = reparsed.maxByOrNull { it.result.qualityScore } ?: return@forEach
+            val parsed = preferred.result
+            db.canonicalActivityDao().update(
+                canonical.copy(
+                    sportType = parsed.sportType.takeUnless { it == SportType.UNKNOWN } ?: canonical.sportType,
+                    startTimeEpochMs = parsed.startTimeEpochMs ?: canonical.startTimeEpochMs,
+                    endTimeEpochMs = parsed.endTimeEpochMs ?: canonical.endTimeEpochMs,
+                    elapsedSeconds = parsed.elapsedSeconds ?: canonical.elapsedSeconds,
+                    movingSeconds = parsed.movingSeconds ?: canonical.movingSeconds,
+                    distanceMeters = parsed.distanceMeters ?: canonical.distanceMeters,
+                    elevationGain = parsed.elevationGain ?: canonical.elevationGain,
+                    avgHeartRate = parsed.avgHeartRate ?: canonical.avgHeartRate,
+                    activityFingerprint = if (parsed.startTimeEpochMs != null) {
+                        ActivityFingerprint.compute(parsed)
+                    } else {
+                        canonical.activityFingerprint
+                    },
+                    primaryVariantId = preferred.variantId,
+                ),
+            )
+        }
+
+        settingsDao.upsert(settings.copy(fitParserVersion = CURRENT_PARSER_VERSION))
+    }
+
     private fun encodeTrack(points: List<LatLng>): String {
         val arr = JSONArray()
         points.forEach { p ->
@@ -255,6 +324,21 @@ class ImportService(
         } catch (_: Exception) {
             emptyList()
         }
+    }
+
+    private fun CanonicalActivityEntity.withMissingMetricsFrom(parsed: FitParseResult) = copy(
+        endTimeEpochMs = endTimeEpochMs ?: parsed.endTimeEpochMs,
+        elapsedSeconds = elapsedSeconds ?: parsed.elapsedSeconds,
+        movingSeconds = movingSeconds ?: parsed.movingSeconds,
+        distanceMeters = distanceMeters ?: parsed.distanceMeters,
+        elevationGain = elevationGain ?: parsed.elevationGain,
+        avgHeartRate = avgHeartRate ?: parsed.avgHeartRate,
+    )
+
+    private data class ReparsedVariant(val variantId: Long, val result: FitParseResult)
+
+    private companion object {
+        const val CURRENT_PARSER_VERSION = 2
     }
 }
 

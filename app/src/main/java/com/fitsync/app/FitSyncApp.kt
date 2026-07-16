@@ -68,6 +68,11 @@ class FitSyncApp : Application() {
             sessions = webSessionManager,
         )
         applicationScope.launch {
+            try {
+                importService.reparseStoredActivitiesIfNeeded()
+            } catch (_: Exception) {
+                // A failed metadata refresh must not prevent background sync scheduling.
+            }
             val settings = database.appSettingsDao().get()
             SyncScheduler.schedule(
                 this@FitSyncApp,

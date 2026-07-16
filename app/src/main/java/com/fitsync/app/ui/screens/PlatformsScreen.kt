@@ -1,12 +1,14 @@
 package com.fitsync.app.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,13 +22,17 @@ import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -72,36 +78,56 @@ fun PlatformsScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var busyPlatform by remember { mutableStateOf<Platform?>(null) }
+    var pendingDisconnect by remember { mutableStateOf<Platform?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
     val dateFormat = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
     val knownPlatforms = PlatformCapabilityRegistry.allKnownPlatforms()
+        .sortedBy { if (bound.containsKey(it)) 0 else 1 }
 
-    Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = "平台账号", subtitle = "登录状态保存在本机，不保存账号密码")
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            AppTopBar(title = "平台连接", subtitle = "连接状态与凭据仅保存在本机")
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
             item {
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                    ) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF151A22)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(18.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
                         Box(
                             modifier = Modifier.size(46.dp).clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                                .background(Color.White.copy(alpha = 0.1f)),
                             contentAlignment = Alignment.Center,
-                        ) { Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary) }
+                        ) { Icon(Icons.Default.Security, contentDescription = null, tint = Color(0xFFFFB067)) }
                         Column(Modifier.weight(1f)) {
-                            Text("已连接 ${bound.size} / ${knownPlatforms.size}", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "Cookie 保存在 WebView，必要令牌由 Android Keystore 加密。",
+                                "连接进度 ${bound.size} / ${knownPlatforms.size}",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.White,
+                            )
+                            Text(
+                                "登录态由 WebView 与 Android Keystore 安全托管",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                color = Color.White.copy(alpha = 0.62f),
                             )
                         }
+                    }
+                        LinearProgressIndicator(
+                            progress = {
+                                if (knownPlatforms.isEmpty()) 0f else bound.size.toFloat() / knownPlatforms.size
+                            },
+                            modifier = Modifier.fillMaxWidth().padding(top = 16.dp).clip(CircleShape),
+                            color = Color(0xFFF97316),
+                            trackColor = Color.White.copy(alpha = 0.12f),
+                        )
                     }
                 }
             }
@@ -112,9 +138,13 @@ fun PlatformsScreen() {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                 ) {
-                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Column(
+                        Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.large)
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             PlatformAvatar(platform, 48.dp)
                             Column(Modifier.weight(1f)) {
@@ -173,24 +203,29 @@ fun PlatformsScreen() {
                                 OutlinedButton(
                                     onClick = {
                                         busyPlatform = platform
-                                        scope.launch(Dispatchers.IO) {
-                                            runCatching { app.platformAccountRepository.validateAndPersist(platform) }
-                                            withContext(Dispatchers.Main) { busyPlatform = null }
+                                        scope.launch {
+                                            val result = withContext(Dispatchers.IO) {
+                                                runCatching { app.platformAccountRepository.validateAndPersist(platform) }
+                                            }
+                                            busyPlatform = null
+                                            snackbarHostState.showSnackbar(
+                                                result.fold(
+                                                    onSuccess = { "${platform.displayName} 登录状态已更新" },
+                                                    onFailure = { "验证失败：${it.message ?: "请稍后重试"}" },
+                                                ),
+                                            )
                                         }
                                     },
+                                    modifier = Modifier.size(48.dp),
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
                                     enabled = !isBusy,
                                 ) {
                                     if (isBusy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                                     else Icon(Icons.Default.Refresh, contentDescription = "重新验证", modifier = Modifier.size(18.dp))
                                 }
                                 TextButton(
-                                    onClick = {
-                                        busyPlatform = platform
-                                        scope.launch(Dispatchers.IO) {
-                                            runCatching { app.platformAccountRepository.disconnect(platform) }
-                                            withContext(Dispatchers.Main) { busyPlatform = null }
-                                        }
-                                    },
+                                    onClick = { pendingDisconnect = platform },
+                                    modifier = Modifier.height(48.dp),
                                     enabled = !isBusy,
                                 ) { Text("断开", color = MaterialTheme.colorScheme.error) }
                             }
@@ -199,6 +234,40 @@ fun PlatformsScreen() {
                 }
             }
         }
+        }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
+    }
+
+    pendingDisconnect?.let { platform ->
+        AlertDialog(
+            onDismissRequest = { pendingDisconnect = null },
+            title = { Text("断开 ${platform.displayName}？") },
+            text = { Text("登录状态和未完成任务将停止，但已经导入的本地活动不会删除。") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingDisconnect = null
+                        busyPlatform = platform
+                        scope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                runCatching { app.platformAccountRepository.disconnect(platform) }
+                            }
+                            busyPlatform = null
+                            snackbarHostState.showSnackbar(
+                                result.fold(
+                                    onSuccess = { "已断开 ${platform.displayName}" },
+                                    onFailure = { "断开失败：${it.message ?: "请稍后重试"}" },
+                                ),
+                            )
+                        }
+                    },
+                ) { Text("确认断开") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDisconnect = null }) { Text("取消") } },
+        )
     }
 }
 

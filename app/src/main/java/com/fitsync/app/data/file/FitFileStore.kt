@@ -2,6 +2,8 @@ package com.fitsync.app.data.file
 
 import android.content.Context
 import android.net.Uri
+import com.fitsync.app.domain.model.Platform
+import com.fitsync.app.domain.model.SportType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -63,6 +65,34 @@ class FitFileStore(private val context: Context) {
     suspend fun copyFromFile(file: File, displayName: String = file.name): StoredFitFile =
         file.inputStream().use { storeFromStream(it, displayName) }
 
+    suspend fun renameForActivity(
+        storedFile: StoredFitFile,
+        platform: Platform,
+        startTimeEpochMs: Long,
+        sportType: SportType,
+    ): StoredFitFile = withContext(Dispatchers.IO) {
+        require(storedFile.file.parentFile?.canonicalFile == fitsDir.canonicalFile) {
+            "只能重命名应用沙箱中的 FIT 文件"
+        }
+
+        repeat(MAX_NAME_ATTEMPTS) {
+            val displayName = FitFileNaming.create(platform, startTimeEpochMs, sportType)
+            val target = File(fitsDir, safeName(displayName))
+            if (target.exists()) return@repeat
+
+            if (!storedFile.file.renameTo(target)) {
+                storedFile.file.copyTo(target, overwrite = false)
+                check(storedFile.file.delete()) { "FIT 文件重命名后无法清理旧文件" }
+            }
+            return@withContext storedFile.copy(
+                file = target,
+                size = target.length(),
+                displayName = target.name,
+            )
+        }
+        error("无法生成不重复的 FIT 文件名")
+    }
+
     fun resolve(path: String): File = File(path)
 
     fun cleanupTemporaryFiles() {
@@ -87,9 +117,11 @@ class FitFileStore(private val context: Context) {
     }
 
     companion object {
+        private const val MAX_NAME_ATTEMPTS = 10
+
         private fun safeName(name: String): String =
             name.substringAfterLast('/').substringAfterLast('\\')
-                .replace(Regex("[^A-Za-z0-9._-]"), "_")
+                .replace(Regex("[^\\p{L}\\p{N}._-]"), "_")
                 .take(120)
                 .ifBlank { "activity.fit" }
 
