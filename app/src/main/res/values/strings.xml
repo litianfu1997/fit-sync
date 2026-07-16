@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">骑行记录搬家</string>
+    <string name="share_receiver_label">导入到骑行记录搬家</string>
+    <string name="nav_home">首页</string>
+    <string name="nav_activities">活动</string>
+    <string name="nav_platforms">平台</string>
+    <string name="nav_settings">设置</string>
+    <string name="home_title">今日同步</string>
+    <string name="stat_discovered">发现活动</string>
+    <string name="stat_synced">已同步</string>
+    <string name="stat_pending">待同步</string>
+    <string name="stat_review">疑似重复</string>
+    <string name="stat_failed">同步失败</string>
+    <string name="empty_hint">通过系统分享将 FIT 文件发送到本应用，或绑定平台账号后拉取活动。</string>
+    <string name="platforms_title">平台账号</string>
+    <string name="settings_title">设置</string>
+    <string name="activities_title">活动列表</string>
+    <string name="import_title">导入 FIT</string>
+    <string name="import_success">导入完成</string>
+    <string name="import_failed">导入失败</string>
+    <string name="capability_read_write">可读取和写入</string>
+    <string name="capability_read_only">仅可读取</string>
+    <string name="capability_write_only">仅可写入</string>
+    <string name="capability_share_only">仅分享导入</string>
+    <string name="capability_experimental">实验性连接</string>
+    <string name="capability_unbound">未绑定</string>
+</resources>

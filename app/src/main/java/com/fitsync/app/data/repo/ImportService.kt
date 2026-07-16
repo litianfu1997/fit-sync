@@ -1,0 +1,284 @@
+package com.fitsync.app.data.repo
+
+import android.net.Uri
+import com.fitsync.app.data.db.FitSyncDatabase
+import com.fitsync.app.data.db.entity.ActivityVariantEntity
+import com.fitsync.app.data.db.entity.CanonicalActivityEntity
+import com.fitsync.app.data.db.entity.ImportJobEntity
+import com.fitsync.app.data.file.FitFileStore
+import com.fitsync.app.domain.dedup.ActivityFingerprint
+import com.fitsync.app.domain.dedup.DedupDecision
+import com.fitsync.app.domain.dedup.DedupEngine
+import com.fitsync.app.domain.model.CollectorType
+import com.fitsync.app.domain.model.DedupStatus
+import com.fitsync.app.domain.model.ImportJobStatus
+import com.fitsync.app.domain.model.Platform
+import com.fitsync.app.domain.model.SportType
+import com.fitsync.app.domain.model.ValidationStatus
+import com.fitsync.app.fit.FitEngine
+import com.fitsync.app.fit.LatLng
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+
+class ImportService(
+    private val db: FitSyncDatabase,
+    private val fileStore: FitFileStore,
+    private val fitEngine: FitEngine = FitEngine(),
+    private val dedupEngine: DedupEngine = DedupEngine(),
+) {
+
+    suspend fun importFromUri(
+        uri: Uri,
+        displayName: String? = null,
+        sourcePlatform: Platform? = null,
+        collectorType: CollectorType = CollectorType.SHARE,
+        remoteActivityId: String? = null,
+    ): ImportOutcome {
+        val importDao = db.importJobDao()
+        val jobId = importDao.insert(
+            ImportJobEntity(
+                displayName = displayName,
+                status = ImportJobStatus.COPYING,
+            ),
+        )
+
+        return try {
+            val stored = fileStore.copyFromUri(uri, displayName)
+            importDao.update(
+                importDao.getById(jobId)!!.copy(
+                    status = ImportJobStatus.VALIDATING,
+                    localFilePath = stored.file.absolutePath,
+                    fileSha256 = stored.sha256,
+                    updatedAtEpochMs = System.currentTimeMillis(),
+                ),
+            )
+
+            val existingVariant = db.activityVariantDao().findBySha256(stored.sha256)
+            if (existingVariant != null) {
+                importDao.update(
+                    importDao.getById(jobId)!!.copy(
+                        status = ImportJobStatus.DUPLICATE_FILE,
+                        validationStatus = ValidationStatus.VALID,
+                        canonicalActivityId = existingVariant.canonicalActivityId,
+                        variantId = existingVariant.id,
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                    ),
+                )
+                return ImportOutcome.DuplicateFile(jobId, existingVariant.canonicalActivityId, existingVariant.id)
+            }
+
+            val parsed = fitEngine.parseFile(stored.file)
+            if (parsed.validationStatus in setOf(
+                    ValidationStatus.UNSUPPORTED,
+                    ValidationStatus.NOT_ACTIVITY,
+                    ValidationStatus.TRUNCATED,
+                    ValidationStatus.CRC_INVALID,
+                ) && parsed.startTimeEpochMs == null
+            ) {
+                importDao.update(
+                    importDao.getById(jobId)!!.copy(
+                        status = ImportJobStatus.INVALID,
+                        validationStatus = parsed.validationStatus,
+                        errorMessage = parsed.errorMessage,
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                    ),
+                )
+                return ImportOutcome.Invalid(jobId, parsed.validationStatus, parsed.errorMessage)
+            }
+
+            importDao.update(
+                importDao.getById(jobId)!!.copy(
+                    status = ImportJobStatus.DEDUPLICATING,
+                    validationStatus = parsed.validationStatus,
+                    updatedAtEpochMs = System.currentTimeMillis(),
+                ),
+            )
+
+            val start = parsed.startTimeEpochMs ?: System.currentTimeMillis()
+            val all = db.canonicalActivityDao().getAll()
+            val candidates = dedupEngine.filterCandidates(
+                all = all,
+                startTimeEpochMs = start,
+                distanceMeters = parsed.distanceMeters,
+                sportType = parsed.sportType,
+            )
+            val candidatePairs = candidates.map { c ->
+                val variants = db.activityVariantDao().findByCanonical(c.id)
+                val track = variants.firstNotNullOfOrNull { parseTrack(it.trackSummaryJson) } ?: emptyList()
+                c to track
+            }
+            val decision = dedupEngine.decide(parsed, candidatePairs)
+
+            val canonicalId = when (decision.action) {
+                DedupDecision.Action.CREATE_NEW -> {
+                    db.canonicalActivityDao().insert(
+                        CanonicalActivityEntity(
+                            sportType = parsed.sportType.takeUnless { it == SportType.UNKNOWN }
+                                ?: SportType.CYCLING,
+                            startTimeEpochMs = start,
+                            endTimeEpochMs = parsed.endTimeEpochMs,
+                            elapsedSeconds = parsed.elapsedSeconds,
+                            movingSeconds = parsed.movingSeconds,
+                            distanceMeters = parsed.distanceMeters,
+                            elevationGain = parsed.elevationGain,
+                            title = displayName?.substringBeforeLast('.'),
+                            activityFingerprint = ActivityFingerprint.compute(parsed),
+                            dedupStatus = DedupStatus.UNIQUE,
+                        ),
+                    )
+                }
+                DedupDecision.Action.AUTO_MERGE -> {
+                    val id = decision.matchedCanonicalId!!
+                    val existing = db.canonicalActivityDao().getById(id)!!
+                    db.canonicalActivityDao().update(
+                        existing.copy(dedupStatus = DedupStatus.AUTO_MERGED),
+                    )
+                    id
+                }
+                DedupDecision.Action.NEEDS_REVIEW -> {
+                    // Keep as separate canonical but flag needs review; user can merge later.
+                    val id = db.canonicalActivityDao().insert(
+                        CanonicalActivityEntity(
+                            sportType = parsed.sportType.takeUnless { it == SportType.UNKNOWN }
+                                ?: SportType.CYCLING,
+                            startTimeEpochMs = start,
+                            endTimeEpochMs = parsed.endTimeEpochMs,
+                            elapsedSeconds = parsed.elapsedSeconds,
+                            movingSeconds = parsed.movingSeconds,
+                            distanceMeters = parsed.distanceMeters,
+                            elevationGain = parsed.elevationGain,
+                            title = displayName?.substringBeforeLast('.'),
+                            activityFingerprint = ActivityFingerprint.compute(parsed),
+                            dedupStatus = DedupStatus.NEEDS_REVIEW,
+                        ),
+                    )
+                    id
+                }
+            }
+
+            val variantId = db.activityVariantDao().insert(
+                ActivityVariantEntity(
+                    canonicalActivityId = canonicalId,
+                    collectorType = collectorType,
+                    sourcePlatform = sourcePlatform ?: Platform.LOCAL_IMPORT,
+                    remoteActivityId = remoteActivityId,
+                    localFilePath = stored.file.absolutePath,
+                    fileSha256 = stored.sha256,
+                    fileSize = stored.size,
+                    recordingManufacturer = parsed.manufacturer,
+                    recordingProduct = parsed.product,
+                    deviceSerial = parsed.deviceSerial,
+                    qualityScore = parsed.qualityScore,
+                    validationStatus = parsed.validationStatus,
+                    hasGps = parsed.hasGps,
+                    hasHeartRate = parsed.hasHeartRate,
+                    hasCadence = parsed.hasCadence,
+                    hasPower = parsed.hasPower,
+                    recordCount = parsed.recordCount,
+                    trackSummaryJson = encodeTrack(parsed.trackSample),
+                ),
+            )
+
+            val canonical = db.canonicalActivityDao().getById(canonicalId)!!
+            if (canonical.primaryVariantId == null ||
+                (canonical.primaryVariantId.let { db.activityVariantDao().getById(it)?.qualityScore ?: 0 } < parsed.qualityScore)
+            ) {
+                db.canonicalActivityDao().update(canonical.copy(primaryVariantId = variantId))
+            }
+
+            val finalStatus = when (decision.action) {
+                DedupDecision.Action.NEEDS_REVIEW -> ImportJobStatus.NEEDS_REVIEW
+                else -> ImportJobStatus.READY
+            }
+            importDao.update(
+                importDao.getById(jobId)!!.copy(
+                    status = finalStatus,
+                    canonicalActivityId = canonicalId,
+                    variantId = variantId,
+                    updatedAtEpochMs = System.currentTimeMillis(),
+                ),
+            )
+
+            ImportOutcome.Success(
+                jobId = jobId,
+                canonicalActivityId = canonicalId,
+                variantId = variantId,
+                dedupAction = decision.action,
+                qualityScore = parsed.qualityScore,
+                validationStatus = parsed.validationStatus,
+            )
+        } catch (t: Throwable) {
+            importDao.update(
+                importDao.getById(jobId)!!.copy(
+                    status = ImportJobStatus.INVALID,
+                    errorMessage = t.message,
+                    updatedAtEpochMs = System.currentTimeMillis(),
+                ),
+            )
+            ImportOutcome.Failed(jobId, t.message)
+        }
+    }
+
+    suspend fun importFromFile(
+        file: File,
+        displayName: String = file.name,
+        sourcePlatform: Platform,
+        collectorType: CollectorType = CollectorType.CLOUD,
+        remoteActivityId: String? = null,
+    ): ImportOutcome = importFromUri(
+        uri = Uri.fromFile(file),
+        displayName = displayName,
+        sourcePlatform = sourcePlatform,
+        collectorType = collectorType,
+        remoteActivityId = remoteActivityId,
+    )
+
+    private fun encodeTrack(points: List<LatLng>): String {
+        val arr = JSONArray()
+        points.forEach { p ->
+            arr.put(JSONObject().put("lat", p.lat).put("lon", p.lon))
+        }
+        return arr.toString()
+    }
+
+    private fun parseTrack(json: String?): List<LatLng> {
+        if (json.isNullOrBlank()) return emptyList()
+        return try {
+            val arr = JSONArray(json)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    add(LatLng(o.getDouble("lat"), o.getDouble("lon")))
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+}
+
+sealed class ImportOutcome {
+    data class Success(
+        val jobId: Long,
+        val canonicalActivityId: Long,
+        val variantId: Long,
+        val dedupAction: DedupDecision.Action,
+        val qualityScore: Int,
+        val validationStatus: ValidationStatus,
+    ) : ImportOutcome()
+
+    data class DuplicateFile(
+        val jobId: Long,
+        val canonicalActivityId: Long,
+        val variantId: Long,
+    ) : ImportOutcome()
+
+    data class Invalid(
+        val jobId: Long,
+        val validationStatus: ValidationStatus,
+        val message: String?,
+    ) : ImportOutcome()
+
+    data class Failed(val jobId: Long, val message: String?) : ImportOutcome()
+}
