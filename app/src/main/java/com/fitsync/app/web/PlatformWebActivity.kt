@@ -21,6 +21,7 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.background
@@ -80,6 +81,7 @@ class PlatformWebActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         platform = intent.getStringExtra(EXTRA_PLATFORM)?.let(Platform::valueOf)
             ?: run { finish(); return }
         jobId = intent.getLongExtra(EXTRA_JOB_ID, -1)

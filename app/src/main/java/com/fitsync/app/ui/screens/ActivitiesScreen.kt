@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -63,7 +64,10 @@ private enum class ActivityFilter(val label: String) {
 }
 
 @Composable
-fun ActivitiesScreen(onOpenActivity: (Long) -> Unit = {}) {
+fun ActivitiesScreen(
+    onOpenActivity: (Long) -> Unit = {},
+    onOpenPlatforms: () -> Unit = {},
+) {
     val activities by FitSyncApp.instance.database.canonicalActivityDao().observeAll()
         .collectAsState(initial = emptyList())
     var query by rememberSaveable { mutableStateOf("") }
@@ -134,6 +138,10 @@ fun ActivitiesScreen(onOpenActivity: (Long) -> Unit = {}) {
                             selected = filter == option,
                             onClick = { filter = option },
                             label = { Text(option.label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                            ),
                         )
                     }
                 }
@@ -144,6 +152,8 @@ fun ActivitiesScreen(onOpenActivity: (Long) -> Unit = {}) {
                         title = if (activities.isEmpty()) "还没有活动" else "没有匹配结果",
                         body = if (activities.isEmpty()) "从平台拉取，或把 FIT 文件分享到 FitSync。" else "试试其他关键词或筛选条件。",
                         icon = Icons.Default.Route,
+                        actionLabel = if (activities.isEmpty()) "连接平台" else null,
+                        onAction = if (activities.isEmpty()) onOpenPlatforms else null,
                     )
                 }
             } else {

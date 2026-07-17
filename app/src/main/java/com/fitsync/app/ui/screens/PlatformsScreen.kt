@@ -75,6 +75,9 @@ fun PlatformsScreen() {
     val app = FitSyncApp.instance
     val accounts by app.database.platformAccountDao().observeAll().collectAsState(initial = emptyList())
     val bound = accounts.filter { it.status != AccountStatus.DISABLED }.associateBy { it.platform }
+    val activeCount = accounts.count {
+        it.status == AccountStatus.ACTIVE || it.status == AccountStatus.EXPERIMENTAL
+    }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var busyPlatform by remember { mutableStateOf<Platform?>(null) }
@@ -109,7 +112,7 @@ fun PlatformsScreen() {
                         ) { Icon(Icons.Default.Security, contentDescription = null, tint = Color(0xFFFFB067)) }
                         Column(Modifier.weight(1f)) {
                             Text(
-                                "连接进度 ${bound.size} / ${knownPlatforms.size}",
+                                "连接进度 $activeCount / ${knownPlatforms.size}",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = Color.White,
                             )
@@ -122,7 +125,7 @@ fun PlatformsScreen() {
                     }
                         LinearProgressIndicator(
                             progress = {
-                                if (knownPlatforms.isEmpty()) 0f else bound.size.toFloat() / knownPlatforms.size
+                                if (knownPlatforms.isEmpty()) 0f else activeCount.toFloat() / knownPlatforms.size
                             },
                             modifier = Modifier.fillMaxWidth().padding(top = 16.dp).clip(CircleShape),
                             color = Color(0xFFF97316),

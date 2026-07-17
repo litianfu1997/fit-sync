@@ -114,9 +114,14 @@ fun FitSyncAppRoot() {
                 )
             }
             composable("activities") {
-                ActivitiesScreen { id -> navController.navigate("activity/$id") }
+                ActivitiesScreen(
+                    onOpenActivity = { id -> navController.navigate("activity/$id") },
+                    onOpenPlatforms = { navController.navigate("platforms") },
+                )
             }
-            composable("rules") { SyncRulesScreen() }
+            composable("rules") {
+                SyncRulesScreen(onOpenPlatforms = { navController.navigate("platforms") })
+            }
             composable("platforms") { PlatformsScreen() }
             composable("settings") { SettingsScreen() }
             composable(

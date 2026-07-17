@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">骑行记录搬家</string>
-    <string name="share_receiver_label">导入到骑行记录搬家</string>
+    <string name="app_name">FitSync</string>
+    <string name="share_receiver_label">导入到 FitSync</string>
     <string name="nav_home">首页</string>
     <string name="nav_activities">活动</string>
     <string name="nav_platforms">平台</string>

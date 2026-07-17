@@ -34,11 +34,14 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -65,6 +68,7 @@ import com.fitsync.app.ui.theme.FitRed
 import com.fitsync.app.ui.theme.FitTeal
 import com.fitsync.app.web.PlatformWebActivity
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -92,19 +96,27 @@ fun HomeScreen(
     val accounts by db.platformAccountDao().observeAll().collectAsState(initial = emptyList())
     val settings by db.appSettingsDao().observe().collectAsState(initial = null)
     val dateFormat = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
-    Column(Modifier.fillMaxSize()) {
-        AppTopBar(title = "FitSync", subtitle = "本地优先的骑行数据中枢")
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            AppTopBar(title = "FitSync", subtitle = "本地优先的骑行数据中枢")
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
             item {
                 SyncHero(
                     autoSyncEnabled = settings?.autoSyncEnabled != false,
                     waitingCount = waitingJobs.size,
-                    onSync = { SyncScheduler.enqueueNow(context) },
+                    onSync = {
+                        SyncScheduler.enqueueNow(context)
+                        scope.launch {
+                            snackbarHostState.showSnackbar("同步任务已开始，将在后台检查所有平台")
+                        }
+                    },
                 )
             }
             item {
@@ -223,7 +235,12 @@ fun HomeScreen(
                     }
                 }
             }
+            }
         }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
     }
 }
 

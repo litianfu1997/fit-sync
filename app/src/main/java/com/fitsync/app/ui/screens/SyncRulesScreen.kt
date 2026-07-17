@@ -27,6 +27,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
@@ -73,14 +74,21 @@ private data class HistoryConfirmation(
 )
 
 @Composable
-fun SyncRulesScreen() {
+fun SyncRulesScreen(onOpenPlatforms: () -> Unit = {}) {
     val app = FitSyncApp.instance
     val accounts by app.database.platformAccountDao().observeAll().collectAsState(initial = emptyList())
     val rules by app.database.syncRuleDao().observeAll().collectAsState(initial = emptyList())
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
-    val connectedAccounts = accounts.filter { it.status != AccountStatus.DISABLED }
+    val referencedAccountIds = rules.mapTo(mutableSetOf()) { it.destinationAccountId }
+    val referencedSources = rules.mapTo(mutableSetOf()) { it.sourcePlatform }
+    val connectedAccounts = accounts.filter {
+        it.status == AccountStatus.ACTIVE ||
+            it.status == AccountStatus.EXPERIMENTAL ||
+            it.id in referencedAccountIds ||
+            it.platform in referencedSources
+    }
     val sources = (listOf(Platform.LOCAL_IMPORT) + connectedAccounts.map { it.platform }).distinct()
     var selectedSource by rememberSaveable { mutableStateOf(Platform.LOCAL_IMPORT) }
     var busyRoute by remember { mutableStateOf<RouteKey?>(null) }
@@ -141,6 +149,8 @@ fun SyncRulesScreen() {
                             title = "先连接一个平台",
                             body = "连接账号后，就能把本地导入或平台活动自动发送到其他平台。",
                             icon = Icons.Default.Link,
+                            actionLabel = "去连接平台",
+                            onAction = onOpenPlatforms,
                         )
                     }
                 } else {
@@ -156,6 +166,10 @@ fun SyncRulesScreen() {
                                     selected = selectedSource == source,
                                     onClick = { selectedSource = source },
                                     label = { Text(source.displayName) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                        selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    ),
                                 )
                             }
                         }

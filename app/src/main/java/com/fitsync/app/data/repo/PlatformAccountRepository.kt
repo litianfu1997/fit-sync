@@ -15,9 +15,17 @@ class PlatformAccountRepository(
 ) {
     suspend fun validateAndPersist(platform: Platform): SessionState {
         val connector = connectors.get(platform) ?: return SessionState.NOT_CONNECTED
-        val state = connector.validateSession()
+        val detectedState = connector.validateSession()
         val now = System.currentTimeMillis()
         val existing = db.platformAccountDao().getByPlatform(platform)
+        val state = if (
+            detectedState == SessionState.EXPIRED &&
+            (existing == null || existing.status == AccountStatus.DISABLED)
+        ) {
+            SessionState.NOT_CONNECTED
+        } else {
+            detectedState
+        }
         val status = when (state) {
             SessionState.AUTHENTICATED -> AccountStatus.ACTIVE
             SessionState.EXPIRED -> AccountStatus.AUTH_EXPIRED
