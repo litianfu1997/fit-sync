@@ -4,6 +4,7 @@ import com.fitsync.app.connectors.ConnectorRegistry
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.PlatformAccountEntity
 import com.fitsync.app.domain.model.AccountStatus
+import com.fitsync.app.domain.model.ConnectorExecution
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SessionState
 import com.fitsync.app.web.WebSessionManager
@@ -58,6 +59,14 @@ class PlatformAccountRepository(
                 updatedAtEpochMs = now,
             ),
         )
+        if (state == SessionState.AUTHENTICATED &&
+            capabilities.uploadFitMode == ConnectorExecution.BACKGROUND
+        ) {
+            // 登录（或重新登录）成功：把因 AUTH_EXPIRED 卡在 WAITING_USER 的后台投递任务
+            // 重新入队，下次同步后台重试。仅对支持后台上传的平台；前台上传平台保持 WAITING_USER。
+            // RETRY_WAIT 的退避不被触碰（resume 只动 WAITING_USER）。
+            db.deliveryJobDao().resumeJobsForForeground(platform, now)
+        }
         return state
     }
 

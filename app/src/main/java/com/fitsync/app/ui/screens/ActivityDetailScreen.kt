@@ -287,9 +287,13 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                                     Column(Modifier.weight(1f)) {
                                         Text(account?.platform?.displayName ?: "未知平台", style = MaterialTheme.typography.titleSmall)
                                         Text(
-                                            job.errorMessage ?: "尝试 ${job.attemptCount} 次",
+                                            deliveryJobDetail(job),
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = if (job.status == DeliveryJobStatus.FAILED) MaterialTheme.colorScheme.error
+                                            color = if (
+                                                job.status == DeliveryJobStatus.FAILED ||
+                                                job.status == DeliveryJobStatus.RETRY_WAIT ||
+                                                job.status == DeliveryJobStatus.WAITING_USER
+                                            ) MaterialTheme.colorScheme.error
                                             else MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }

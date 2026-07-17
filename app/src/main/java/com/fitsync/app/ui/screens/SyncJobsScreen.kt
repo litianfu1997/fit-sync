@@ -76,16 +76,19 @@ enum class SyncJobFilter(
 
     fun includes(status: DeliveryJobStatus): Boolean = when (this) {
         WAITING -> status in WAITING_STATUSES
-        COMPLETED -> status == DeliveryJobStatus.SUCCEEDED
-        FAILED -> status == DeliveryJobStatus.FAILED
+        COMPLETED -> status == DeliveryJobStatus.SUCCEEDED || status == DeliveryJobStatus.DUPLICATE_REMOTE
+        FAILED -> status in PROBLEM_STATUSES
     }
 
     companion object {
         private val WAITING_STATUSES = setOf(
             DeliveryJobStatus.PENDING,
             DeliveryJobStatus.UPLOADING,
-            DeliveryJobStatus.WAITING_USER,
             DeliveryJobStatus.WAITING_REMOTE_PROCESS,
+        )
+        private val PROBLEM_STATUSES = setOf(
+            DeliveryJobStatus.FAILED,
+            DeliveryJobStatus.WAITING_USER,
             DeliveryJobStatus.RETRY_WAIT,
         )
 
@@ -189,10 +192,10 @@ private fun SyncJobCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    job.errorMessage ?: if (job.attemptCount > 0) "已尝试 ${job.attemptCount} 次" else "等待系统自动处理",
+                    deliveryJobDetail(job),
                     modifier = Modifier.padding(top = 4.dp),
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (job.status == DeliveryJobStatus.FAILED) {
+                    color = if (job.status in problemDeliveryStatuses) {
                         MaterialTheme.colorScheme.error
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -206,5 +209,21 @@ private fun SyncJobCard(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+    }
+}
+
+private val problemDeliveryStatuses = setOf(
+    DeliveryJobStatus.FAILED,
+    DeliveryJobStatus.WAITING_USER,
+    DeliveryJobStatus.RETRY_WAIT,
+)
+
+internal fun deliveryJobDetail(job: DeliveryJobEntity): String {
+    val reason = listOfNotNull(
+        job.errorCode?.takeIf { it.isNotBlank() }?.let { "错误码 $it" },
+        job.errorMessage?.takeIf { it.isNotBlank() },
+    ).joinToString(" · ")
+    return reason.ifBlank {
+        if (job.attemptCount > 0) "已尝试 ${job.attemptCount} 次" else "等待系统自动处理"
     }
 }

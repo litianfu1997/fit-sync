@@ -30,19 +30,12 @@ object PlatformWebConfigs {
         )
         Platform.GARMIN -> PlatformWebConfig(
             platform,
-            loginUrl = "https://connect.garmin.com/signin/?service=https%3A%2F%2Fconnect.garmin.com%2Fapp%2Fimport-data",
-            uploadUrl = "https://connect.garmin.com/app/import-data",
-            // 含中国镜像 connect.garmin.cn / sso.garmin.cn：服务端会把中国 IP 从 .com 重定向到 .cn
-            allowedDomainSuffixes = setOf("garmin.com", "garmin.cn"),
+            loginUrl = "https://connect.garmin.cn/signin/?service=https%3A%2F%2Fconnect.garmin.cn%2Fapp%2Fimport-data",
+            uploadUrl = "https://connect.garmin.cn/app/import-data",
+            allowedDomainSuffixes = setOf("garmin.cn"),
             origins = setOf(
-                "https://connect.garmin.com",
-                "https://sso.garmin.com",
-                "https://connectapi.garmin.com",
-                "https://www.garmin.com",
-                "https://accounts.garmin.com",
                 "https://connect.garmin.cn",
                 "https://sso.garmin.cn",
-                "https://connectapi.garmin.cn",
                 "https://www.garmin.cn",
             ),
         )

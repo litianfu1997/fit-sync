@@ -24,9 +24,10 @@ class PlatformWebConfigsTest {
 
     @Test
     fun vendorAuthenticationRedirects_areAllowed() {
-        assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "sso.garmin.com")).isTrue()
         assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "connect.garmin.cn")).isTrue()
         assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "sso.garmin.cn")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "connect.garmin.com")).isFalse()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "sso.garmin.com")).isFalse()
         assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "login.passport.igpsport.com")).isTrue()
         assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "app.igpsport.cn")).isTrue()
         assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "login.passport.igpsport.cn")).isTrue()

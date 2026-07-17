@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.fitsync.app.FitSyncApp
+import com.fitsync.app.domain.model.DeliveryJobStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SessionState
 import com.fitsync.app.sync.SyncScheduler
@@ -77,8 +78,11 @@ class PlatformWebActivity : ComponentActivity() {
     private var initialUrl: String = ""
     private var webView: WebView? = null
     private var fileCallback: ValueCallback<Array<Uri>>? = null
+    private var grantedUploadUri: Uri? = null
     private var mainFrameLoadFailed = false
     private var statusText by mutableStateOf("请在平台网页中登录，App 不会保存账号密码")
+    private var uploadFileProvided by mutableStateOf(false)
+    private var uploadConfirmationBusy by mutableStateOf(false)
 
     private val filePicker = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         fileCallback?.onReceiveValue(uris.takeIf { it.isNotEmpty() }?.toTypedArray())
@@ -92,14 +96,7 @@ class PlatformWebActivity : ComponentActivity() {
             ?: run { finish(); return }
         jobId = intent.getLongExtra(EXTRA_JOB_ID, -1)
         val config = PlatformWebConfigs.get(platform)
-        initialUrl = if (platform == Platform.GARMIN && jobId > 0) {
-            config.loginUrl
-        } else {
-            intent.getStringExtra(EXTRA_URL) ?: config.loginUrl
-        }
-        if (platform == Platform.GARMIN && jobId > 0) {
-            statusText = "请恢复 Garmin 登录并验证，FitSync 会自动重试，无需手动上传 FIT"
-        }
+        initialUrl = intent.getStringExtra(EXTRA_URL) ?: config.loginUrl
 
         setContent {
             FitSyncTheme {
@@ -108,7 +105,6 @@ class PlatformWebActivity : ComponentActivity() {
                         title = platform.displayName,
                         subtitle = when {
                             jobId <= 0 -> "安全网页登录"
-                            platform == Platform.GARMIN -> "恢复自动同步"
                             else -> "网页上传任务"
                         },
                         navigationIcon = {
@@ -151,14 +147,27 @@ class PlatformWebActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxWidth().padding(12.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Button(onClick = { validateAndSave() }, modifier = Modifier.weight(1f)) {
+                            // Garmin 已改为后台上传：登录页只保留「验证并保存登录」（捕获 JWT_WEB 后后台自动续跑），
+                            // 不再显示前台上传专用的「核对上传结果」按钮。
+                            val showForegroundUpload = jobId > 0 && platform != Platform.GARMIN
+                            Button(
+                                onClick = { validateAndSave() },
+                                modifier = if (showForegroundUpload) Modifier.weight(1f) else Modifier.fillMaxWidth(),
+                            ) {
                                 Icon(Icons.Default.CheckCircle, contentDescription = null)
                                 Text("验证并保存登录", modifier = Modifier.padding(start = 6.dp))
                             }
-                            if (jobId > 0 && platform != Platform.GARMIN) {
-                                OutlinedButton(onClick = { confirmUpload() }, modifier = Modifier.weight(1f)) {
+                            if (showForegroundUpload) {
+                                OutlinedButton(
+                                    onClick = { confirmUpload() },
+                                    enabled = uploadFileProvided && !uploadConfirmationBusy,
+                                    modifier = Modifier.weight(1f),
+                                ) {
                                     Icon(Icons.Default.UploadFile, contentDescription = null)
-                                    Text("完成上传", modifier = Modifier.padding(start = 6.dp))
+                                    Text(
+                                        if (uploadConfirmationBusy) "正在核对" else "完成上传",
+                                        modifier = Modifier.padding(start = 6.dp),
+                                    )
                                 }
                             }
                         }
@@ -181,7 +190,14 @@ class PlatformWebActivity : ComponentActivity() {
             mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
             setSupportMultipleWindows(true)
             javaScriptCanOpenWindowsAutomatically = true
-            userAgentString = "$userAgentString FitSync/1.0"
+            if (platform == Platform.GARMIN) {
+                // Garmin 官方仅提供桌面网页导入入口；移动 UA 可能隐藏 Import Data 文件控件。
+                userAgentString = GARMIN_DESKTOP_USER_AGENT
+                useWideViewPort = true
+                loadWithOverviewMode = true
+            } else {
+                userAgentString = "$userAgentString FitSync/1.0"
+            }
         }
         CookieManager.getInstance().apply {
             setAcceptCookie(true)
@@ -190,7 +206,7 @@ class PlatformWebActivity : ComponentActivity() {
         view.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 mainFrameLoadFailed = false
-                statusText = "正在打开 ${platform.displayName} 登录页…"
+                statusText = "正在打开 ${platform.displayName} 网页…"
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -209,7 +225,17 @@ class PlatformWebActivity : ComponentActivity() {
                 CookieManager.getInstance().flush()
                 FitSyncApp.instance.webSessionManager.rememberWebViewUrl(platform, url)
                 if (!mainFrameLoadFailed) {
-                    statusText = "页面已加载；登录完成后点击“验证并保存登录”"
+                    statusText = if (jobId > 0) {
+                        if (platform == Platform.GARMIN && isGarminLoginUrl(url)) {
+                            "请先完成 Garmin 登录；登录后页面会自动返回 Import Data"
+                        } else if (platform == Platform.GARMIN) {
+                            "请点击网页中的文件选择按钮，应用会提供本任务的 FIT；导入后点击底部“核对上传结果”"
+                        } else {
+                            "请点击网页中的文件选择按钮，应用会提供本任务的 FIT；导入成功后点击底部“完成上传”"
+                        }
+                    } else {
+                        "页面已加载；登录完成后点击“验证并保存登录”"
+                    }
                 }
             }
 
@@ -250,7 +276,12 @@ class PlatformWebActivity : ComponentActivity() {
             ): Boolean {
                 fileCallback?.onReceiveValue(null)
                 fileCallback = filePathCallback
-                if (jobId > 0) providePendingFitFile() else filePicker.launch(arrayOf("application/vnd.ant.fit", "application/octet-stream"))
+                uploadFileProvided = false
+                if (jobId > 0) {
+                    providePendingFitFile()
+                } else {
+                    filePicker.launch(arrayOf("application/vnd.ant.fit", "application/octet-stream"))
+                }
                 return true
             }
 
@@ -349,17 +380,14 @@ class PlatformWebActivity : ComponentActivity() {
             val page = webView?.url?.let { runCatching { java.net.URI(it).host }.getOrNull() } ?: "?"
             statusText = when (state) {
                 SessionState.AUTHENTICATED -> "登录状态有效，已经保存"
-                SessionState.EXPIRED -> "登录已失效，请重新登录（页面 $page；$cookieInfo）"
+                SessionState.EXPIRED -> "登录授权已失效，请重新登录（页面 $page；$cookieInfo）"
                 SessionState.NOT_CONNECTED ->
                     "未检测到有效登录。请确认已登录并跳转到 Connect 主站后再点验证（页面 $page；$cookieInfo）"
                 SessionState.NEEDS_USER_ACTION ->
-                    "网页会话可能有效，但后台校验未通过，请在页面完成验证码/二次确认后重试（页面 $page；$cookieInfo）"
+                    "网页会话校验未通过，请在页面完成验证码/二次确认后重试（页面 $page；$cookieInfo）"
             }
             if (state == SessionState.AUTHENTICATED) {
                 SyncScheduler.enqueueContinuation(this@PlatformWebActivity)
-                if (platform == Platform.GARMIN && jobId > 0) {
-                    statusText = "Garmin 登录已恢复，自动同步任务已重新加入队列"
-                }
             }
         }
     }
@@ -386,69 +414,19 @@ class PlatformWebActivity : ComponentActivity() {
         } ?: done()
     }
 
-    /**
-     * 在 WebView 页面上下文中用同步 XHR 探活（自动携带浏览器 Cookie），
-     * 避免 OkHttp 与 WebView Cookie/风控不一致导致的误报「未登录」。
-     */
+    /** Garmin 登录页成功跳回中国站 Connect 后即可确认；不依赖厂商可能随时改名的 Cookie。 */
     private fun validateGarminFromWebView() {
         val script = """
             (function(){
-              function metaCsrf(){
-                var m=document.querySelector('meta[name="csrf-token"]');
-                return (m && m.getAttribute('content')) || '';
-              }
-              function pickCsrf(){
-                return metaCsrf()
-                  || (window.__CSRF_TOKEN__ || window.csrfToken || '')
-                  || localStorage.getItem('csrfToken')
-                  || localStorage.getItem('csrf-token')
-                  || sessionStorage.getItem('csrfToken')
-                  || '';
-              }
-              function probe(url){
-                try {
-                  var xhr = new XMLHttpRequest();
-                  xhr.open('GET', url, false);
-                  xhr.withCredentials = true;
-                  xhr.setRequestHeader('NK', 'NT');
-                  xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-                  xhr.setRequestHeader('Accept', 'application/json, */*');
-                  xhr.send(null);
-                  return {url:url, status:xhr.status, ok:(xhr.status>=200 && xhr.status<300)};
-                } catch(e) {
-                  return {url:url, status:0, ok:false, error:String(e)};
-                }
-              }
-              var csrf = pickCsrf();
               var host = location.host || '';
-              var onSso = /sso\.garmin\.(com|cn)/i.test(host);
-              var onConnect = /connect\.garmin\.(com|cn)/i.test(host);
-              var origins = [];
-              if (onConnect) origins.push(location.origin);
-              origins.push('https://connect.garmin.cn');
-              origins.push('https://connect.garmin.com');
-              // 去重
-              origins = origins.filter(function(v,i,a){return a.indexOf(v)===i;});
-              var probes = [];
-              var authed = false;
-              var authedHost = '';
-              for (var i=0;i<origins.length;i++){
-                var r = probe(origins[i] + '/gc-api/userprofile-service/socialProfile');
-                probes.push(r);
-                if (r.ok) { authed = true; authedHost = origins[i]; break; }
-              }
-              var cookieLen = (document.cookie || '').length;
+              var path = location.pathname || '';
+              var onSso = /sso\.garmin\.cn/i.test(host);
+              var onConnect = /connect\.garmin\.cn/i.test(host);
+              var onLoginPage = /\/signin\/?$/i.test(path) || /\/portal\/sso\//i.test(path);
               return JSON.stringify({
-                ok: authed,
-                authedByApi: authed,
-                authedHost: authedHost,
-                href: location.href || '',
-                host: host,
+                ok: onConnect && !onLoginPage,
                 onSso: onSso,
-                onConnect: onConnect,
-                cookieLen: cookieLen,
-                csrf: csrf,
-                probes: probes
+                csrf: (document.querySelector('meta[name="csrf-token"]') || {}).content || ''
               });
             })()
         """.trimIndent()
@@ -465,60 +443,212 @@ class PlatformWebActivity : ComponentActivity() {
                 val jsonText = JSONArray("[$encoded]").getString(0)
                 JSONObject(jsonText)
             }.getOrNull()
-            val capturedSession = if (proof != null) {
-                val csrf = proof.optString("csrf").takeIf { it.isNotBlank() && it != "null" }
-                val detectedOrigin = proof.optString("authedHost").takeIf { it.isNotBlank() }
-                    ?: view.url?.let { url ->
-                        runCatching {
-                            java.net.URI(url).let { uri -> "${uri.scheme}://${uri.host}" }
-                        }.getOrNull()
-                    }
-                sessions.captureGarminWebSession(detectedOrigin, csrf)
-            } else {
-                false
-            }
-            val webOk = proof?.optBoolean("ok") == true && capturedSession
+            val pageReady = proof?.optBoolean("ok") == true
             val onSso = proof?.optBoolean("onSso") == true
-            val hasAny = sessions.hasSession(platform)
-            val override = when {
-                webOk -> SessionState.AUTHENTICATED
-                onSso -> SessionState.EXPIRED
-                hasAny -> SessionState.NEEDS_USER_ACTION
-                else -> SessionState.NOT_CONNECTED
+            when {
+                pageReady -> {
+                    val captured = captureGarminSession(proof?.optString("csrf"))
+                    persistDetectedState(
+                        detectedOverride = if (captured) SessionState.AUTHENTICATED
+                        else SessionState.NEEDS_USER_ACTION,
+                    )
+                }
+                onSso -> persistDetectedState(detectedOverride = SessionState.EXPIRED)
+                sessions.hasSession(platform) -> persistDetectedState(detectedOverride = SessionState.NEEDS_USER_ACTION)
+                else -> persistDetectedState(detectedOverride = SessionState.NOT_CONNECTED)
             }
-            persistDetectedState(detectedOverride = override)
         }
+    }
+
+    /** 抓取并持久化 Garmin 会话；成功返回 true，未抓到 JWT_WEB 返回 false
+     * （调用方据此把登录判定降级为 NEEDS_USER_ACTION，避免「标记已登录实则无凭据」）。 */
+    private fun captureGarminSession(connectCsrf: String?): Boolean {
+        val sessions = FitSyncApp.instance.webSessionManager
+        val cookieHeader = sequenceOf(
+            "https://connect.garmin.cn/",
+            "https://connect.garmin.com/",
+            webView?.url,
+        ).mapNotNull { CookieManager.getInstance().getCookie(it) }.joinToString("; ")
+        val jwtWeb = cookieValue(cookieHeader, "JWT_WEB") ?: return false
+        // Connect-Csrf-Token 来自登录页 <meta name="csrf-token">（gc-api 写操作强制要求），由调用方从 JS 传入。
+        val csrf = connectCsrf?.takeIf { it.isNotBlank() } ?: sessions.garminCsrf()
+        val host = runCatching { java.net.URI(webView?.url.orEmpty()).host }.getOrNull().orEmpty()
+        val domain = if (host.endsWith("garmin.com")) "garmin.com" else "garmin.cn"
+        sessions.saveGarminSession(jwtWeb, csrf, domain, webView?.settings?.userAgentString, cookieHeader)
+        return true
     }
 
     private fun providePendingFitFile() {
         lifecycleScope.launch {
-            val uri = withContext(Dispatchers.IO) {
-                val job = FitSyncApp.instance.database.deliveryJobDao().getById(jobId) ?: return@withContext null
-                val variant = FitSyncApp.instance.database.activityVariantDao().getById(job.sourceVariantId)
-                    ?: return@withContext null
-                val file = File(variant.localFilePath).takeIf(File::isFile) ?: return@withContext null
-                FileProvider.getUriForFile(
-                    this@PlatformWebActivity,
-                    "$packageName.files",
-                    file,
-                )
+            statusText = "正在校验待上传 FIT…"
+            val preparation = withContext(Dispatchers.IO) {
+                val app = FitSyncApp.instance
+                val job = app.database.deliveryJobDao().getById(jobId)
+                    ?: return@withContext GarminUploadPreparation.Rejected(
+                        "GARMIN_JOB_MISSING",
+                        "同步任务已不存在",
+                    )
+                if (job.status != DeliveryJobStatus.WAITING_USER) {
+                    return@withContext GarminUploadPreparation.Rejected(
+                        "GARMIN_JOB_NOT_READY",
+                        "同步任务当前不能执行网页上传",
+                    )
+                }
+                val variant = app.database.activityVariantDao().getById(job.sourceVariantId)
+                    ?: return@withContext GarminUploadPreparation.Rejected(
+                        "GARMIN_VARIANT_MISSING",
+                        "待上传的活动文件记录已不存在",
+                    )
+                if (platform == Platform.GARMIN) {
+                    app.garminUploadFilePreparer.prepare(jobId, variant)
+                } else {
+                    val file = File(variant.localFilePath).takeIf(File::isFile)
+                        ?: return@withContext GarminUploadPreparation.Rejected(
+                            "FOREGROUND_FILE_MISSING",
+                            "找不到待上传的本地 FIT 文件",
+                        )
+                    GarminUploadPreparation.Ready(file, variant.recordCount ?: 0)
+                }
             }
-            fileCallback?.onReceiveValue(uri?.let { arrayOf(it) })
+            when (preparation) {
+                is GarminUploadPreparation.Ready -> deliverPreparedFile(preparation)
+                is GarminUploadPreparation.Rejected -> {
+                    fileCallback?.onReceiveValue(null)
+                    fileCallback = null
+                    uploadFileProvided = false
+                    statusText = preparation.message
+                    if (platform == Platform.GARMIN) {
+                        withContext(Dispatchers.IO) {
+                            FitSyncApp.instance.syncCoordinator.failForegroundJob(
+                                jobId,
+                                preparation.code,
+                                preparation.message,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun deliverPreparedFile(preparation: GarminUploadPreparation.Ready) {
+        val callback = fileCallback
+        if (callback == null) {
+            if (platform == Platform.GARMIN) FitSyncApp.instance.garminUploadFilePreparer.cleanup(jobId)
+            return
+        }
+        val uri = runCatching {
+            FileProvider.getUriForFile(this, "$packageName.files", preparation.file)
+        }.getOrElse { error ->
+            callback.onReceiveValue(null)
             fileCallback = null
-            if (uri == null) statusText = "找不到待上传的本地 FIT 文件"
+            statusText = error.message ?: "无法授权 Garmin 读取 FIT 文件"
+            return
+        }
+        grantedUploadUri?.takeIf { it != uri }?.let { previous ->
+            runCatching { revokeUriPermission(previous, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            grantedUploadUri = null
+        }
+        val webViewPackage = WebView.getCurrentWebViewPackage()?.packageName
+        val readable = runCatching {
+            if (webViewPackage.isNullOrBlank()) return@runCatching false
+            grantUriPermission(webViewPackage, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            contentResolver.openInputStream(uri)?.use { input ->
+                val header = ByteArray(12)
+                input.read(header) == header.size && String(header, 8, 4, Charsets.US_ASCII) == ".FIT"
+            } == true
+        }.getOrDefault(false)
+        if (!readable) {
+            runCatching { revokeUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            callback.onReceiveValue(null)
+            fileCallback = null
+            statusText = "WebView 无法读取待上传 FIT，请重试"
+            return
+        }
+        grantedUploadUri = uri
+        callback.onReceiveValue(arrayOf(uri))
+        fileCallback = null
+        uploadFileProvided = true
+        statusText = buildString {
+            append("FIT 已交给 Garmin 网页")
+            if (preparation.recordCount > 0) append("（${preparation.recordCount} 个数据点）")
+            append("；请点击网页中的 Import/导入并等待结果，然后点“核对上传结果”")
         }
     }
 
     private fun confirmUpload() {
+        if (!uploadFileProvided) {
+            statusText = "请先在网页中选择并导入本任务的 FIT"
+            return
+        }
+        if (platform != Platform.GARMIN) {
+            completeForegroundJob(GarminImportEvidence(GarminImportEvidenceType.SUCCESS))
+            return
+        }
+        val view = webView ?: run {
+            statusText = "网页已关闭，无法核对 Garmin 结果"
+            return
+        }
+        uploadConfirmationBusy = true
+        statusText = "正在核对 Garmin 网页导入结果…"
+        view.evaluateJavascript(GARMIN_IMPORT_EVIDENCE_SCRIPT) { encoded ->
+            val snapshot = runCatching {
+                val jsonText = JSONArray("[$encoded]").getString(0)
+                JSONObject(jsonText)
+            }.getOrNull()
+            val evidence = classifyGarminImportPage(
+                pageUrl = snapshot?.optString("href"),
+                pageText = snapshot?.optString("text"),
+                activityUrl = snapshot?.optString("activityUrl"),
+            )
+            uploadConfirmationBusy = false
+            when (evidence.type) {
+                GarminImportEvidenceType.SUCCESS,
+                GarminImportEvidenceType.DUPLICATE,
+                -> completeForegroundJob(evidence)
+
+                GarminImportEvidenceType.FAILURE -> {
+                    statusText = "Garmin 网页显示导入失败，请按页面提示处理后重新选择 FIT"
+                }
+
+                GarminImportEvidenceType.UNKNOWN -> showUnverifiedGarminResultDialog()
+            }
+        }
+    }
+
+    private fun showUnverifiedGarminResultDialog() {
+        statusText = "尚未检测到 Garmin 的成功或重复提示"
+        AlertDialog.Builder(this)
+            .setTitle("尚未检测到导入成功")
+            .setMessage("请先在 Garmin 网页点击 Import/导入并等待结果。只有页面已经明确显示导入成功时，才选择“页面已显示成功”。")
+            .setPositiveButton("页面已显示成功") { _, _ ->
+                completeForegroundJob(GarminImportEvidence(GarminImportEvidenceType.SUCCESS))
+            }
+            .setNegativeButton("继续等待", null)
+            .show()
+    }
+
+    private fun completeForegroundJob(evidence: GarminImportEvidence) {
+        uploadConfirmationBusy = true
         lifecycleScope.launch(Dispatchers.IO) {
-            val confirmed = FitSyncApp.instance.syncCoordinator.confirmForegroundJob(jobId)
+            val confirmed = FitSyncApp.instance.syncCoordinator.confirmForegroundJob(
+                jobId = jobId,
+                duplicate = evidence.type == GarminImportEvidenceType.DUPLICATE,
+                remoteActivityId = evidence.remoteActivityId,
+                remoteUrl = evidence.remoteUrl,
+            )
             withContext(Dispatchers.Main) {
-                Toast.makeText(
-                    this@PlatformWebActivity,
-                    if (confirmed) "已记录为完成" else "本地活动或同步任务已不存在",
-                    Toast.LENGTH_SHORT,
-                ).show()
-                finish()
+                uploadConfirmationBusy = false
+                if (confirmed) {
+                    Toast.makeText(
+                        this@PlatformWebActivity,
+                        if (evidence.type == GarminImportEvidenceType.DUPLICATE) "Garmin 已存在该活动" else "Garmin 导入已确认",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    finish()
+                } else {
+                    statusText = "同步任务状态已变化，未记录为完成"
+                }
             }
         }
     }
@@ -541,6 +671,13 @@ class PlatformWebActivity : ComponentActivity() {
 
     override fun onDestroy() {
         fileCallback?.onReceiveValue(null)
+        grantedUploadUri?.let { uri ->
+            runCatching { revokeUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        }
+        grantedUploadUri = null
+        if (::platform.isInitialized && platform == Platform.GARMIN && jobId > 0) {
+            FitSyncApp.instance.garminUploadFilePreparer.cleanup(jobId)
+        }
         webView?.apply {
             stopLoading()
             webChromeClient = null
@@ -554,6 +691,33 @@ class PlatformWebActivity : ComponentActivity() {
         private const val EXTRA_PLATFORM = "platform"
         private const val EXTRA_JOB_ID = "job_id"
         private const val EXTRA_URL = "url"
+        private const val GARMIN_DESKTOP_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        private const val GARMIN_IMPORT_EVIDENCE_SCRIPT = """
+            (function(){
+              var text = ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').slice(0, 30000);
+              var activityUrl = '';
+              var links = document.querySelectorAll('a[href]');
+              for (var i = 0; i < links.length; i++) {
+                var href = links[i].href || '';
+                if (/https:\/\/connect\.garmin\.cn\/(?:modern\/|app\/)?activity\/\d+/i.test(href)) {
+                  activityUrl = href;
+                  break;
+                }
+              }
+              return JSON.stringify({href: location.href || '', text: text, activityUrl: activityUrl});
+            })()
+        """
+
+        private fun isGarminLoginUrl(url: String): Boolean = runCatching {
+            val uri = java.net.URI(url)
+            val host = uri.host.orEmpty()
+            val path = uri.path.orEmpty()
+            host.equals("sso.garmin.cn", ignoreCase = true) ||
+                path.contains("/signin", ignoreCase = true) ||
+                path.contains("/portal/sso", ignoreCase = true)
+        }.getOrDefault(false)
 
         fun createIntent(
             context: Context,

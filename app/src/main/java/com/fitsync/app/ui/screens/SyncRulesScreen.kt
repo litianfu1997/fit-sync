@@ -89,7 +89,13 @@ fun SyncRulesScreen(onOpenPlatforms: () -> Unit = {}) {
             it.id in referencedAccountIds ||
             it.platform in referencedSources
     }
-    val sources = (listOf(Platform.LOCAL_IMPORT) + connectedAccounts.map { it.platform }).distinct()
+    val sources = (
+        listOf(Platform.LOCAL_IMPORT) + connectedAccounts.map { it.platform }.filter { platform ->
+            PlatformCapabilityRegistry.capabilities(platform).let {
+                it.canListActivities && it.canDownloadOriginalFit
+            }
+        }
+    ).distinct()
     var selectedSource by rememberSaveable { mutableStateOf(Platform.LOCAL_IMPORT) }
     var busyRoute by remember { mutableStateOf<RouteKey?>(null) }
     var historyConfirmation by remember { mutableStateOf<HistoryConfirmation?>(null) }
