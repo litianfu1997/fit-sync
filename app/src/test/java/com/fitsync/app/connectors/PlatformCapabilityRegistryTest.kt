@@ -17,8 +17,17 @@ class PlatformCapabilityRegistryTest {
     }
 
     @Test
-    fun otherVendors_doNotClaimUnverifiedBackgroundAccess() {
-        listOf(Platform.GARMIN, Platform.COROS, Platform.IGPSPORT).forEach { platform ->
+    fun garmin_supportsBackgroundUploadButKeepsWebExport() {
+        val capabilities = PlatformCapabilityRegistry.capabilities(Platform.GARMIN)
+
+        assertThat(capabilities.listActivitiesMode).isEqualTo(ConnectorExecution.FOREGROUND_WEB)
+        assertThat(capabilities.downloadFitMode).isEqualTo(ConnectorExecution.FOREGROUND_WEB)
+        assertThat(capabilities.uploadFitMode).isEqualTo(ConnectorExecution.BACKGROUND)
+    }
+
+    @Test
+    fun corosAndIgpsport_doNotClaimUnverifiedBackgroundAccess() {
+        listOf(Platform.COROS, Platform.IGPSPORT).forEach { platform ->
             val capabilities = PlatformCapabilityRegistry.capabilities(platform)
             assertThat(capabilities.listActivitiesMode).isNotEqualTo(ConnectorExecution.BACKGROUND)
             assertThat(capabilities.uploadFitMode).isNotEqualTo(ConnectorExecution.BACKGROUND)

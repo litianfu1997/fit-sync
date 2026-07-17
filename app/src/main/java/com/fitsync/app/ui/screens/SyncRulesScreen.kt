@@ -104,7 +104,7 @@ fun SyncRulesScreen(onOpenPlatforms: () -> Unit = {}) {
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    app.syncCoordinator.planner.setRule(source, destinationId, enabled, includeHistory)
+                    app.syncCoordinator.setRule(source, destinationId, enabled, includeHistory)
                     SyncScheduler.enqueueNow(context)
                 }
             }

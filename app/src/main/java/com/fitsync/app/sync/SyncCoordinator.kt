@@ -2,10 +2,14 @@ package com.fitsync.app.sync
 
 import com.fitsync.app.connectors.ConnectorRegistry
 import com.fitsync.app.connectors.ConnectorResult
+import com.fitsync.app.connectors.PlatformConnector
 import com.fitsync.app.connectors.RemoteActivitySummary
 import com.fitsync.app.connectors.SyncCursor
 import com.fitsync.app.data.db.FitSyncDatabase
+import com.fitsync.app.data.db.entity.CanonicalActivityEntity
+import com.fitsync.app.data.db.entity.DeliveryJobEntity
 import com.fitsync.app.data.db.entity.PlatformCopyEntity
+import com.fitsync.app.data.repo.ActivityMutationGate
 import com.fitsync.app.data.repo.ImportOutcome
 import com.fitsync.app.data.repo.ImportService
 import com.fitsync.app.domain.model.AccountStatus
@@ -26,12 +30,13 @@ class SyncCoordinator(
     private val connectors: ConnectorRegistry,
     val planner: DeliveryPlanner,
     private val notifications: SyncNotificationManager,
+    private val mutationGate: ActivityMutationGate = ActivityMutationGate(),
 ) {
-    private val mutex = Mutex()
+    private val syncMutex = Mutex()
 
-    suspend fun runSync(force: Boolean = false): SyncRunSummary = mutex.withLock {
+    suspend fun runSync(force: Boolean = false): SyncRunSummary = syncMutex.withLock sync@{
         val settings = db.appSettingsDao().get()
-        if (!force && settings?.autoSyncEnabled == false) return@withLock SyncRunSummary()
+        if (!force && settings?.autoSyncEnabled == false) return@sync SyncRunSummary()
         var pulled = 0
         var queued = 0
         db.platformAccountDao().getAll()
@@ -71,7 +76,7 @@ class SyncCoordinator(
         )
     }
 
-    suspend fun runDeliveryBatch(): SyncRunSummary = mutex.withLock {
+    suspend fun runDeliveryBatch(): SyncRunSummary = syncMutex.withLock {
         val delivered = processDeliveryJobs()
         SyncRunSummary(
             completedDeliveries = delivered,
@@ -79,108 +84,130 @@ class SyncCoordinator(
         )
     }
 
-    suspend fun onImported(outcome: ImportOutcome, sourcePlatform: Platform): Int {
+    suspend fun onImported(outcome: ImportOutcome, sourcePlatform: Platform): Int = mutationGate.withLock {
         val canonicalId = when (outcome) {
             is ImportOutcome.Success -> outcome.canonicalActivityId
             is ImportOutcome.DuplicateFile -> outcome.canonicalActivityId
-            else -> return 0
+            else -> return@withLock 0
         }
-        return planner.planForActivity(canonicalId, sourcePlatform)
+        planner.planForActivity(canonicalId, sourcePlatform)
     }
 
     suspend fun processDeliveryJobs(): Int {
         var completed = 0
         val now = System.currentTimeMillis()
-        db.deliveryJobDao().findRunnable(now).forEach { job ->
-            val account = db.platformAccountDao().getById(job.destinationAccountId)
-            val activity = db.canonicalActivityDao().getById(job.canonicalActivityId)
-            val connector = account?.let { connectors.get(it.platform) }
-            if (account == null || activity == null || connector == null) {
+        // 登录已恢复时自动续跑旧版遗留或授权失效产生的 Garmin 等待任务。
+        // 真正失效的会话会立即把账号改为 AUTH_EXPIRED，后续批次不会反复重置。
+        db.deliveryJobDao().upgradeWaitingForegroundJobs(Platform.GARMIN, now)
+        db.deliveryJobDao().findRunnable(now).forEach { candidateJob ->
+            val prepared = mutationGate.withLock {
+                val currentJob = db.deliveryJobDao().getById(candidateJob.id) ?: return@withLock null
+                val account = db.platformAccountDao().getById(currentJob.destinationAccountId)
+                val activity = db.canonicalActivityDao().getById(currentJob.canonicalActivityId)
+                val connector = account?.let { connectors.get(it.platform) }
+                if (account == null || activity == null || connector == null) {
+                    db.deliveryJobDao().update(
+                        currentJob.copy(
+                            status = DeliveryJobStatus.DISABLED,
+                            errorMessage = "目标账号或本地活动已不存在",
+                            updatedAtEpochMs = now,
+                        ),
+                    )
+                    return@withLock null
+                }
+                val currentMode = connector.detectCapabilities().uploadFitMode
+                if (currentMode != ConnectorExecution.BACKGROUND) {
+                    waitForUser(currentJob.id, account.platform, PlatformWebConfigs.get(account.platform).uploadUrl, "请在网页中完成 FIT 上传")
+                    return@withLock null
+                }
                 db.deliveryJobDao().update(
-                    job.copy(
-                        status = DeliveryJobStatus.DISABLED,
-                        errorMessage = "目标账号或本地活动已不存在",
+                    currentJob.copy(
+                        status = DeliveryJobStatus.UPLOADING,
+                        executionMode = currentMode,
+                        attemptCount = currentJob.attemptCount + 1,
                         updatedAtEpochMs = now,
                     ),
                 )
-                return@forEach
-            }
+                PreparedDelivery(currentJob.copy(executionMode = currentMode), account.id, activity, connector)
+            } ?: return@forEach
 
-            if (job.executionMode != ConnectorExecution.BACKGROUND) {
-                waitForUser(job.id, account.platform, PlatformWebConfigs.get(account.platform).uploadUrl, "请在网页中完成 FIT 上传")
-                return@forEach
-            }
-
-            db.deliveryJobDao().update(
-                job.copy(
-                    status = DeliveryJobStatus.UPLOADING,
-                    attemptCount = job.attemptCount + 1,
-                    updatedAtEpochMs = now,
-                ),
-            )
-            when (val result = connector.uploadFit(activity)) {
-                is ConnectorResult.Success -> {
-                    saveRemoteCopy(job.canonicalActivityId, account.id, job.sourceVariantId, result.value)
-                    db.deliveryJobDao().update(
+            val result = prepared.connector.uploadFit(prepared.activity)
+            mutationGate.withLock {
+                val currentJob = db.deliveryJobDao().getById(prepared.job.id)
+                val currentActivity = db.canonicalActivityDao().getById(prepared.job.canonicalActivityId)
+                if (currentJob == null || currentActivity == null || currentJob.status != DeliveryJobStatus.UPLOADING) {
+                    return@withLock
+                }
+                val job = prepared.job
+                val accountId = prepared.accountId
+                when (result) {
+                    is ConnectorResult.Success -> {
+                        saveRemoteCopy(job.canonicalActivityId, accountId, job.sourceVariantId, result.value)
+                        db.deliveryJobDao().update(
+                            job.copy(
+                                status = DeliveryJobStatus.SUCCEEDED,
+                                attemptCount = job.attemptCount + 1,
+                                remoteActivityId = result.value.remoteActivityId,
+                                errorCode = null,
+                                errorMessage = null,
+                                updatedAtEpochMs = System.currentTimeMillis(),
+                            ),
+                        )
+                        completed++
+                    }
+                    is ConnectorResult.Duplicate -> {
+                        result.value?.let { saveRemoteCopy(job.canonicalActivityId, accountId, job.sourceVariantId, it) }
+                        db.deliveryJobDao().update(
+                            job.copy(
+                                status = DeliveryJobStatus.DUPLICATE_REMOTE,
+                                attemptCount = job.attemptCount + 1,
+                                remoteActivityId = result.value?.remoteActivityId,
+                                updatedAtEpochMs = System.currentTimeMillis(),
+                            ),
+                        )
+                        completed++
+                    }
+                    is ConnectorResult.RequiresLogin -> {
+                        markAccountNeedsAction(accountId, true)
+                        val platform = db.platformAccountDao().getById(accountId)?.platform ?: return@withLock
+                        waitForUser(job.id, platform, result.url, result.message)
+                    }
+                    is ConnectorResult.RequiresUserAction -> {
+                        val platform = db.platformAccountDao().getById(accountId)?.platform ?: return@withLock
+                        waitForUser(job.id, platform, result.url, result.message)
+                    }
+                    is ConnectorResult.RetryableFailure -> {
+                        val attempt = job.attemptCount + 1
+                        val delay = min(6 * 60 * 60_000L, 15 * 60_000L * 2.0.pow((attempt - 1).coerceAtMost(5)).toLong())
+                        db.deliveryJobDao().update(
+                            job.copy(
+                                status = DeliveryJobStatus.RETRY_WAIT,
+                                attemptCount = attempt,
+                                nextRetryAtEpochMs = System.currentTimeMillis() + delay,
+                                errorCode = result.code,
+                                errorMessage = result.message,
+                                updatedAtEpochMs = System.currentTimeMillis(),
+                            ),
+                        )
+                    }
+                    is ConnectorResult.PermanentFailure -> db.deliveryJobDao().update(
                         job.copy(
-                            status = DeliveryJobStatus.SUCCEEDED,
+                            status = DeliveryJobStatus.FAILED,
                             attemptCount = job.attemptCount + 1,
-                            remoteActivityId = result.value.remoteActivityId,
-                            errorCode = null,
-                            errorMessage = null,
-                            updatedAtEpochMs = System.currentTimeMillis(),
-                        ),
-                    )
-                    completed++
-                }
-                is ConnectorResult.Duplicate -> {
-                    result.value?.let { saveRemoteCopy(job.canonicalActivityId, account.id, job.sourceVariantId, it) }
-                    db.deliveryJobDao().update(
-                        job.copy(
-                            status = DeliveryJobStatus.DUPLICATE_REMOTE,
-                            attemptCount = job.attemptCount + 1,
-                            remoteActivityId = result.value?.remoteActivityId,
-                            updatedAtEpochMs = System.currentTimeMillis(),
-                        ),
-                    )
-                    completed++
-                }
-                is ConnectorResult.RequiresLogin -> {
-                    markAccountNeedsAction(account.id, true)
-                    waitForUser(job.id, account.platform, result.url, result.message)
-                }
-                is ConnectorResult.RequiresUserAction ->
-                    waitForUser(job.id, account.platform, result.url, result.message)
-                is ConnectorResult.RetryableFailure -> {
-                    val attempt = job.attemptCount + 1
-                    val delay = min(6 * 60 * 60_000L, 15 * 60_000L * 2.0.pow((attempt - 1).coerceAtMost(5)).toLong())
-                    db.deliveryJobDao().update(
-                        job.copy(
-                            status = DeliveryJobStatus.RETRY_WAIT,
-                            attemptCount = attempt,
-                            nextRetryAtEpochMs = System.currentTimeMillis() + delay,
                             errorCode = result.code,
                             errorMessage = result.message,
                             updatedAtEpochMs = System.currentTimeMillis(),
                         ),
                     )
                 }
-                is ConnectorResult.PermanentFailure -> db.deliveryJobDao().update(
-                    job.copy(
-                        status = DeliveryJobStatus.FAILED,
-                        attemptCount = job.attemptCount + 1,
-                        errorCode = result.code,
-                        errorMessage = result.message,
-                        updatedAtEpochMs = System.currentTimeMillis(),
-                    ),
-                )
             }
         }
         return completed
     }
 
-    suspend fun confirmForegroundJob(jobId: Long) {
-        val job = db.deliveryJobDao().getById(jobId) ?: return
+    suspend fun confirmForegroundJob(jobId: Long): Boolean = mutationGate.withLock {
+        val job = db.deliveryJobDao().getById(jobId) ?: return@withLock false
+        if (db.canonicalActivityDao().getById(job.canonicalActivityId) == null) return@withLock false
         db.deliveryJobDao().update(
             job.copy(
                 status = DeliveryJobStatus.SUCCEEDED,
@@ -190,10 +217,12 @@ class SyncCoordinator(
             ),
         )
         notifications.cancel(jobId)
+        true
     }
 
-    suspend fun retryJob(jobId: Long) {
-        val job = db.deliveryJobDao().getById(jobId) ?: return
+    suspend fun retryJob(jobId: Long) = mutationGate.withLock {
+        val job = db.deliveryJobDao().getById(jobId) ?: return@withLock
+        if (db.canonicalActivityDao().getById(job.canonicalActivityId) == null) return@withLock
         db.deliveryJobDao().update(
             job.copy(
                 status = DeliveryJobStatus.PENDING,
@@ -204,6 +233,27 @@ class SyncCoordinator(
             ),
         )
     }
+
+    suspend fun enqueueManual(activityId: Long, destinationAccountId: Long): Long = mutationGate.withLock {
+        if (db.canonicalActivityDao().getById(activityId) == null) return@withLock -1L
+        planner.enqueueManual(activityId, destinationAccountId)
+    }
+
+    suspend fun setRule(
+        source: Platform,
+        destinationAccountId: Long,
+        enabled: Boolean,
+        includeHistory: Boolean,
+    ) = mutationGate.withLock {
+        planner.setRule(source, destinationAccountId, enabled, includeHistory)
+    }
+
+    private data class PreparedDelivery(
+        val job: DeliveryJobEntity,
+        val accountId: Long,
+        val activity: CanonicalActivityEntity,
+        val connector: PlatformConnector,
+    )
 
     private suspend fun hasRunnableDeliveries(): Boolean =
         db.deliveryJobDao().countRunnable(System.currentTimeMillis()) > 0
@@ -234,7 +284,10 @@ class SyncCoordinator(
                         when (val imported = downloadAndImport(account.id, account.platform, connector, remote)) {
                             is ConnectorResult.Success -> {
                                 pulled++
-                                queued += planner.planForActivity(imported.value, account.platform)
+                                queued += mutationGate.withLock {
+                                    if (db.canonicalActivityDao().getById(imported.value) == null) 0
+                                    else planner.planForActivity(imported.value, account.platform)
+                                }
                             }
                             is ConnectorResult.RequiresLogin -> {
                                 markAccountNeedsAction(account.id, true)
@@ -342,17 +395,22 @@ class SyncCoordinator(
                     )
                     is ImportOutcome.Failed -> return ConnectorResult.RetryableFailure(null, outcome.message ?: "FIT 导入失败")
                 }
-                db.platformCopyDao().insert(
-                    PlatformCopyEntity(
-                        canonicalActivityId = ids.first,
-                        platformAccountId = accountId,
-                        remoteActivityId = remote.remoteActivityId,
-                        remoteUrl = remote.metadata["remote_url"],
-                        fileSha256 = downloaded.value.sha256,
-                        sourceVariantId = ids.second,
-                    ),
-                )
-                ConnectorResult.Success(ids.first)
+                mutationGate.withLock {
+                    if (db.canonicalActivityDao().getById(ids.first) == null) {
+                        return@withLock ConnectorResult.PermanentFailure(null, "本地活动已删除")
+                    }
+                    db.platformCopyDao().insert(
+                        PlatformCopyEntity(
+                            canonicalActivityId = ids.first,
+                            platformAccountId = accountId,
+                            remoteActivityId = remote.remoteActivityId,
+                            remoteUrl = remote.metadata["remote_url"],
+                            fileSha256 = downloaded.value.sha256,
+                            sourceVariantId = ids.second,
+                        ),
+                    )
+                    ConnectorResult.Success(ids.first)
+                }
             }
             is ConnectorResult.Duplicate -> ConnectorResult.PermanentFailure(null, "平台返回了重复下载结果")
             is ConnectorResult.RequiresLogin -> downloaded

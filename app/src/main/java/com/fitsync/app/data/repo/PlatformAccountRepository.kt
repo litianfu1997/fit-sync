@@ -13,18 +13,27 @@ class PlatformAccountRepository(
     private val connectors: ConnectorRegistry,
     private val sessions: WebSessionManager,
 ) {
-    suspend fun validateAndPersist(platform: Platform): SessionState {
+    /**
+     * @param detectedOverride WebView 内同源校验等路径已得到的状态；非空时跳过 connector 网络探测。
+     */
+    suspend fun validateAndPersist(
+        platform: Platform,
+        detectedOverride: SessionState? = null,
+    ): SessionState {
         val connector = connectors.get(platform) ?: return SessionState.NOT_CONNECTED
-        val detectedState = connector.validateSession()
+        val detectedState = detectedOverride ?: connector.validateSession()
         val now = System.currentTimeMillis()
         val existing = db.platformAccountDao().getByPlatform(platform)
-        val state = if (
-            detectedState == SessionState.EXPIRED &&
-            (existing == null || existing.status == AccountStatus.DISABLED)
-        ) {
-            SessionState.NOT_CONNECTED
-        } else {
-            detectedState
+        val firstBind = existing == null || existing.status == AccountStatus.DISABLED
+        val state = when {
+            // WebView 同源校验结果直接落库，不再二次改写
+            detectedOverride != null -> detectedOverride
+            // 无 Cookie：首次绑定显示为未连接
+            detectedState == SessionState.EXPIRED && firstBind && !sessions.hasSession(platform) ->
+                SessionState.NOT_CONNECTED
+            // 有 Cookie 但后台探活失败：首次绑定勿伪装成「未登录」，引导用户在网页完成校验
+            detectedState == SessionState.EXPIRED && firstBind -> SessionState.NEEDS_USER_ACTION
+            else -> detectedState
         }
         val status = when (state) {
             SessionState.AUTHENTICATED -> AccountStatus.ACTIVE

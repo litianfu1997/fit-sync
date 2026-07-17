@@ -18,4 +18,21 @@ class WebSessionManagerTest {
         assertThat(authorizationHeaderValue(Platform.GARMIN, "Bearer existing"))
             .isEqualTo("Bearer existing")
     }
+
+    @Test
+    fun sessionCookieScore_boostsSessionLikeNames() {
+        assertThat(sessionCookieScore("SESSIONID=a; path=/")).isGreaterThan(
+            sessionCookieScore("locale=zh; consent=1"),
+        )
+        assertThat(sessionCookieScore("")).isEqualTo(0)
+    }
+
+    @Test
+    fun cookieValue_extractsJwtWebCaseInsensitively() {
+        val header = "locale=zh; jwt_web=header.payload.signature; consent=1"
+
+        assertThat(cookieValue(header, "JWT_WEB")).isEqualTo("header.payload.signature")
+        assertThat(cookieValue(header, "missing")).isNull()
+        assertThat(cookieValue(null, "JWT_WEB")).isNull()
+    }
 }

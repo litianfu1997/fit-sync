@@ -34,7 +34,7 @@ object PlatformCapabilityRegistry {
             shareImportSupported = true,
             listActivitiesMode = ConnectorExecution.FOREGROUND_WEB,
             downloadFitMode = ConnectorExecution.FOREGROUND_WEB,
-            uploadFitMode = ConnectorExecution.FOREGROUND_WEB,
+            uploadFitMode = ConnectorExecution.BACKGROUND,
         )
         Platform.IGPSPORT -> ConnectorCapabilities(
             shareImportSupported = true,

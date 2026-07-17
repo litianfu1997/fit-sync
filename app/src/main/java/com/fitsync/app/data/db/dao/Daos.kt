@@ -47,7 +47,44 @@ interface PlatformAccountDao {
 
 @Dao
 interface CanonicalActivityDao {
-    @Query("SELECT * FROM canonical_activity ORDER BY startTimeEpochMs DESC")
+    @Query(
+        """
+        SELECT activity.id,
+               activity.sportType,
+               activity.startTimeEpochMs,
+               activity.endTimeEpochMs,
+               activity.elapsedSeconds,
+               activity.movingSeconds,
+               activity.distanceMeters,
+               activity.elevationGain,
+               activity.avgHeartRate,
+               COALESCE(
+                   (
+                       SELECT imported_name.displayName
+                       FROM import_job AS imported_name
+                       WHERE imported_name.canonicalActivityId = activity.id
+                         AND imported_name.displayName IS NOT NULL
+                       ORDER BY imported_name.createdAtEpochMs DESC, imported_name.id DESC
+                       LIMIT 1
+                   ),
+                   activity.title
+               ) AS title,
+               activity.activityFingerprint,
+               activity.dedupStatus,
+               activity.primaryVariantId,
+               activity.createdAtEpochMs
+        FROM canonical_activity AS activity
+        ORDER BY COALESCE(
+                     (
+                         SELECT MAX(imported_at.createdAtEpochMs)
+                         FROM import_job AS imported_at
+                         WHERE imported_at.canonicalActivityId = activity.id
+                     ),
+                     activity.createdAtEpochMs
+                 ) DESC,
+                 activity.id DESC
+        """,
+    )
     fun observeAll(): Flow<List<CanonicalActivityEntity>>
 
     @Query("SELECT * FROM canonical_activity ORDER BY startTimeEpochMs DESC")
@@ -61,6 +98,9 @@ interface CanonicalActivityDao {
 
     @Query("SELECT * FROM canonical_activity WHERE id = :id")
     suspend fun getById(id: Long): CanonicalActivityEntity?
+
+    @Query("SELECT * FROM canonical_activity WHERE id = :id")
+    fun observeById(id: Long): Flow<CanonicalActivityEntity?>
 
     @Query(
         """
@@ -76,6 +116,9 @@ interface CanonicalActivityDao {
 
     @Update
     suspend fun update(entity: CanonicalActivityEntity)
+
+    @Query("DELETE FROM canonical_activity WHERE id = :id")
+    suspend fun delete(id: Long)
 }
 
 @Dao
@@ -97,6 +140,9 @@ interface ActivityVariantDao {
 
     @Update
     suspend fun update(entity: ActivityVariantEntity)
+
+    @Query("DELETE FROM activity_variant WHERE canonicalActivityId = :canonicalId")
+    suspend fun deleteByCanonical(canonicalId: Long)
 }
 
 @Dao
@@ -127,6 +173,9 @@ interface PlatformCopyDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(entity: PlatformCopyEntity): Long
+
+    @Query("DELETE FROM platform_copy WHERE canonicalActivityId = :canonicalId")
+    suspend fun deleteByCanonical(canonicalId: Long)
 }
 
 @Dao
@@ -151,6 +200,9 @@ interface DeliveryJobDao {
 
     @Query("SELECT * FROM delivery_job WHERE canonicalActivityId = :canonicalId ORDER BY createdAtEpochMs DESC")
     fun observeByCanonical(canonicalId: Long): Flow<List<DeliveryJobEntity>>
+
+    @Query("SELECT * FROM delivery_job WHERE canonicalActivityId = :canonicalId")
+    suspend fun findByCanonical(canonicalId: Long): List<DeliveryJobEntity>
 
     @Query("SELECT COUNT(*) FROM delivery_job WHERE status = :status")
     fun observeCountByStatus(status: DeliveryJobStatus): Flow<Int>
@@ -189,6 +241,27 @@ interface DeliveryJobDao {
 
     @Query("UPDATE delivery_job SET status = 'DISABLED', updatedAtEpochMs = :now WHERE destinationAccountId = :accountId AND status != 'SUCCEEDED' AND status != 'DUPLICATE_REMOTE'")
     suspend fun disableForAccount(accountId: Long, now: Long = System.currentTimeMillis())
+
+    @Query(
+        """
+        UPDATE delivery_job
+        SET status = 'PENDING', executionMode = 'BACKGROUND', userActionUrl = NULL,
+            errorCode = NULL, errorMessage = NULL, nextRetryAtEpochMs = NULL,
+            updatedAtEpochMs = :now
+        WHERE status = 'WAITING_USER'
+          AND destinationAccountId IN (
+              SELECT id FROM platform_account
+              WHERE platform = :platform AND status = 'ACTIVE'
+          )
+        """,
+    )
+    suspend fun upgradeWaitingForegroundJobs(
+        platform: Platform,
+        now: Long = System.currentTimeMillis(),
+    )
+
+    @Query("DELETE FROM delivery_job WHERE canonicalActivityId = :canonicalId")
+    suspend fun deleteByCanonical(canonicalId: Long)
 }
 
 @Dao
@@ -233,6 +306,12 @@ interface ImportJobDao {
 
     @Query("SELECT * FROM import_job WHERE id = :id")
     suspend fun getById(id: Long): ImportJobEntity?
+
+    @Query("SELECT * FROM import_job WHERE canonicalActivityId = :canonicalId")
+    suspend fun findByCanonical(canonicalId: Long): List<ImportJobEntity>
+
+    @Query("DELETE FROM import_job WHERE canonicalActivityId = :canonicalId")
+    suspend fun deleteByCanonical(canonicalId: Long)
 }
 
 @Dao

@@ -20,11 +20,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudSync
-import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
@@ -53,6 +51,7 @@ import com.fitsync.app.FitSyncApp
 import com.fitsync.app.domain.model.DedupStatus
 import com.fitsync.app.domain.model.DeliveryJobStatus
 import com.fitsync.app.domain.model.ImportJobStatus
+import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.sync.SyncScheduler
 import com.fitsync.app.ui.components.AppTopBar
 import com.fitsync.app.ui.components.EmptyState
@@ -77,8 +76,6 @@ import java.util.Locale
 fun HomeScreen(
     onOpenActivities: () -> Unit = {},
     onOpenJobs: (SyncJobFilter) -> Unit = {},
-    onOpenPlatforms: () -> Unit = {},
-    onOpenRules: () -> Unit = {},
 ) {
     val db = FitSyncApp.instance.database
     val context = LocalContext.current
@@ -126,31 +123,8 @@ fun HomeScreen(
                     onOpenJobs = onOpenJobs,
                 )
             }
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    SectionHeader("快速开始", "两步完成自动同步")
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        QuickAction(
-                            title = "连接平台",
-                            subtitle = "登录并验证账号",
-                            icon = Icons.Default.Devices,
-                            accent = FitBlue,
-                            modifier = Modifier.weight(1f),
-                            onClick = onOpenPlatforms,
-                        )
-                        QuickAction(
-                            title = "同步自动化",
-                            subtitle = "配置来源与目标",
-                            icon = Icons.Default.Route,
-                            accent = FitOrange,
-                            modifier = Modifier.weight(1f),
-                            onClick = onOpenRules,
-                        )
-                    }
-                }
-            }
             if (waitingJobs.isNotEmpty()) {
-                item { SectionHeader("需要你处理", "登录、验证码或网页上传需要确认") }
+                item { SectionHeader("需要你处理", "登录、验证码或前台网页流程需要确认") }
                 items(waitingJobs.take(4), key = { "waiting-${it.id}" }) { job ->
                     val account = accounts.firstOrNull { it.id == job.destinationAccountId }
                     Card(
@@ -181,7 +155,7 @@ fun HomeScreen(
                                     context.startActivity(
                                         PlatformWebActivity.createIntent(context, account.platform, job.id, job.userActionUrl),
                                     )
-                                }) { Text("继续") }
+                                }) { Text(if (account.platform == Platform.GARMIN) "登录" else "继续") }
                             }
                         }
                     }
@@ -321,42 +295,6 @@ private fun StatCell(
         Column {
             Text(value, style = MaterialTheme.typography.titleLarge)
             Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun QuickAction(
-    title: String,
-    subtitle: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    accent: Color,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    Card(
-        modifier = modifier.clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(0.dp),
-    ) {
-        Column(
-            modifier = Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium)
-                .padding(15.dp),
-        ) {
-            Box(
-                modifier = Modifier.size(38.dp).clip(MaterialTheme.shapes.small)
-                    .background(accent.copy(alpha = 0.13f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(icon, contentDescription = null, tint = accent, modifier = Modifier.size(20.dp))
-            }
-            Text(title, modifier = Modifier.padding(top = 14.dp), style = MaterialTheme.typography.titleSmall)
-            Text(
-                subtitle,
-                modifier = Modifier.padding(top = 2.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }

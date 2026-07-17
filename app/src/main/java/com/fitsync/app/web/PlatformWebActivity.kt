@@ -6,10 +6,14 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.net.http.SslError
+import android.app.AlertDialog
 import android.os.Bundle
+import android.os.Message
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
+import android.webkit.JsPromptResult
+import android.webkit.JsResult
 import android.webkit.SslErrorHandler
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -18,6 +22,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.EditText
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -55,6 +60,7 @@ import androidx.lifecycle.lifecycleScope
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SessionState
+import com.fitsync.app.sync.SyncScheduler
 import com.fitsync.app.ui.theme.FitSyncTheme
 import com.fitsync.app.ui.components.AppTopBar
 import com.fitsync.app.ui.components.PlatformAvatar
@@ -85,15 +91,26 @@ class PlatformWebActivity : ComponentActivity() {
         platform = intent.getStringExtra(EXTRA_PLATFORM)?.let(Platform::valueOf)
             ?: run { finish(); return }
         jobId = intent.getLongExtra(EXTRA_JOB_ID, -1)
-        initialUrl = intent.getStringExtra(EXTRA_URL)
-            ?: PlatformWebConfigs.get(platform).loginUrl
+        val config = PlatformWebConfigs.get(platform)
+        initialUrl = if (platform == Platform.GARMIN && jobId > 0) {
+            config.loginUrl
+        } else {
+            intent.getStringExtra(EXTRA_URL) ?: config.loginUrl
+        }
+        if (platform == Platform.GARMIN && jobId > 0) {
+            statusText = "请恢复 Garmin 登录并验证，FitSync 会自动重试，无需手动上传 FIT"
+        }
 
         setContent {
             FitSyncTheme {
                 Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
                     AppTopBar(
                         title = platform.displayName,
-                        subtitle = if (jobId > 0) "网页上传任务" else "安全网页登录",
+                        subtitle = when {
+                            jobId <= 0 -> "安全网页登录"
+                            platform == Platform.GARMIN -> "恢复自动同步"
+                            else -> "网页上传任务"
+                        },
                         navigationIcon = {
                             IconButton(onClick = { finish() }) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "关闭")
@@ -138,7 +155,7 @@ class PlatformWebActivity : ComponentActivity() {
                                 Icon(Icons.Default.CheckCircle, contentDescription = null)
                                 Text("验证并保存登录", modifier = Modifier.padding(start = 6.dp))
                             }
-                            if (jobId > 0) {
+                            if (jobId > 0 && platform != Platform.GARMIN) {
                                 OutlinedButton(onClick = { confirmUpload() }, modifier = Modifier.weight(1f)) {
                                     Icon(Icons.Default.UploadFile, contentDescription = null)
                                     Text("完成上传", modifier = Modifier.padding(start = 6.dp))
@@ -162,7 +179,8 @@ class PlatformWebActivity : ComponentActivity() {
             allowFileAccess = false
             allowContentAccess = true
             mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
-            setSupportMultipleWindows(false)
+            setSupportMultipleWindows(true)
+            javaScriptCanOpenWindowsAutomatically = true
             userAgentString = "$userAgentString FitSync/1.0"
         }
         CookieManager.getInstance().apply {
@@ -189,6 +207,7 @@ class PlatformWebActivity : ComponentActivity() {
 
             override fun onPageFinished(view: WebView, url: String) {
                 CookieManager.getInstance().flush()
+                FitSyncApp.instance.webSessionManager.rememberWebViewUrl(platform, url)
                 if (!mainFrameLoadFailed) {
                     statusText = "页面已加载；登录完成后点击“验证并保存登录”"
                 }
@@ -234,6 +253,69 @@ class PlatformWebActivity : ComponentActivity() {
                 if (jobId > 0) providePendingFitFile() else filePicker.launch(arrayOf("application/vnd.ant.fit", "application/octet-stream"))
                 return true
             }
+
+            // 部分人机验证 SDK 会用 window.open() 弹窗。开启 setSupportMultipleWindows(true) 后
+            // 必须实现本回调，否则 window.open() 返回 null，验证直接失败。这里创建临时子 WebView，
+            // 把目标 URL 转交给主 WebView 加载（复用 shouldOverrideUrlLoading 的白名单），再 sendToTarget。
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message?,
+            ): Boolean {
+                val parent = view ?: return false
+                val child = WebView(parent.context).apply {
+                    settings.javaScriptEnabled = true
+                    webChromeClient = parent.webChromeClient
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                            parent.loadUrl(request?.url?.toString().orEmpty())
+                            return true
+                        }
+                    }
+                }
+                (resultMsg?.obj as? WebView.WebViewTransport)?.webView = child
+                resultMsg?.sendToTarget()
+                return true
+            }
+
+            // 兜底渲染页面的 alert / confirm / prompt 对话框（部分验证或登录流程会用到）。
+            override fun onJsAlert(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                AlertDialog.Builder(this@PlatformWebActivity)
+                    .setMessage(message)
+                    .setPositiveButton("确定") { _, _ -> result?.confirm() }
+                    .setOnCancelListener { result?.cancel() }
+                    .show()
+                return true
+            }
+
+            override fun onJsConfirm(view: WebView?, url: String?, message: String?, result: JsResult?): Boolean {
+                AlertDialog.Builder(this@PlatformWebActivity)
+                    .setMessage(message)
+                    .setPositiveButton("确定") { _, _ -> result?.confirm() }
+                    .setNegativeButton("取消") { _, _ -> result?.cancel() }
+                    .setOnCancelListener { result?.cancel() }
+                    .show()
+                return true
+            }
+
+            override fun onJsPrompt(
+                view: WebView?,
+                url: String?,
+                message: String?,
+                defaultValue: String?,
+                result: JsPromptResult?,
+            ): Boolean {
+                val input = EditText(this@PlatformWebActivity).apply { setText(defaultValue) }
+                AlertDialog.Builder(this@PlatformWebActivity)
+                    .setMessage(message)
+                    .setView(input)
+                    .setPositiveButton("确定") { _, _ -> result?.confirm(input.text.toString()) }
+                    .setNegativeButton("取消") { _, _ -> result?.cancel() }
+                    .setOnCancelListener { result?.cancel() }
+                    .show()
+                return true
+            }
         }
         view.setDownloadListener(DownloadListener { url, _, contentDisposition, mimeType, _ ->
             enqueueDownload(url, contentDisposition, mimeType)
@@ -243,27 +325,46 @@ class PlatformWebActivity : ComponentActivity() {
 
     private fun validateAndSave() {
         statusText = "正在验证登录状态…"
-        captureSession {
-            lifecycleScope.launch {
-                val state = withContext(Dispatchers.IO) {
-                    FitSyncApp.instance.platformAccountRepository.validateAndPersist(platform)
-                }
-                statusText = when (state) {
-                    SessionState.AUTHENTICATED -> "登录状态有效，已经保存"
-                    SessionState.EXPIRED -> "登录已失效，请重新登录"
-                    SessionState.NOT_CONNECTED -> "未检测到有效登录，请先完成登录"
-                    SessionState.NEEDS_USER_ACTION -> "平台需要验证码或其他确认，请在网页中完成"
+        CookieManager.getInstance().flush()
+        FitSyncApp.instance.webSessionManager.rememberWebViewUrl(platform, webView?.url)
+        when (platform) {
+            Platform.GARMIN -> validateGarminFromWebView()
+            Platform.ONELAP -> captureOnelapTokens {
+                persistDetectedState(detectedOverride = null)
+            }
+            else -> persistDetectedState(detectedOverride = null)
+        }
+    }
+
+    private fun persistDetectedState(detectedOverride: SessionState?) {
+        lifecycleScope.launch {
+            val sessions = FitSyncApp.instance.webSessionManager
+            val state = withContext(Dispatchers.IO) {
+                FitSyncApp.instance.platformAccountRepository.validateAndPersist(
+                    platform = platform,
+                    detectedOverride = detectedOverride,
+                )
+            }
+            val cookieInfo = sessions.cookieDiagnostic(platform)
+            val page = webView?.url?.let { runCatching { java.net.URI(it).host }.getOrNull() } ?: "?"
+            statusText = when (state) {
+                SessionState.AUTHENTICATED -> "登录状态有效，已经保存"
+                SessionState.EXPIRED -> "登录已失效，请重新登录（页面 $page；$cookieInfo）"
+                SessionState.NOT_CONNECTED ->
+                    "未检测到有效登录。请确认已登录并跳转到 Connect 主站后再点验证（页面 $page；$cookieInfo）"
+                SessionState.NEEDS_USER_ACTION ->
+                    "网页会话可能有效，但后台校验未通过，请在页面完成验证码/二次确认后重试（页面 $page；$cookieInfo）"
+            }
+            if (state == SessionState.AUTHENTICATED) {
+                SyncScheduler.enqueueContinuation(this@PlatformWebActivity)
+                if (platform == Platform.GARMIN && jobId > 0) {
+                    statusText = "Garmin 登录已恢复，自动同步任务已重新加入队列"
                 }
             }
         }
     }
 
-    private fun captureSession(done: () -> Unit) {
-        CookieManager.getInstance().flush()
-        if (platform != Platform.ONELAP) {
-            done()
-            return
-        }
+    private fun captureOnelapTokens(done: () -> Unit) {
         val script = """
             (function(){return JSON.stringify({
               token:localStorage.getItem('token'),
@@ -283,6 +384,110 @@ class PlatformWebActivity : ComponentActivity() {
             }
             done()
         } ?: done()
+    }
+
+    /**
+     * 在 WebView 页面上下文中用同步 XHR 探活（自动携带浏览器 Cookie），
+     * 避免 OkHttp 与 WebView Cookie/风控不一致导致的误报「未登录」。
+     */
+    private fun validateGarminFromWebView() {
+        val script = """
+            (function(){
+              function metaCsrf(){
+                var m=document.querySelector('meta[name="csrf-token"]');
+                return (m && m.getAttribute('content')) || '';
+              }
+              function pickCsrf(){
+                return metaCsrf()
+                  || (window.__CSRF_TOKEN__ || window.csrfToken || '')
+                  || localStorage.getItem('csrfToken')
+                  || localStorage.getItem('csrf-token')
+                  || sessionStorage.getItem('csrfToken')
+                  || '';
+              }
+              function probe(url){
+                try {
+                  var xhr = new XMLHttpRequest();
+                  xhr.open('GET', url, false);
+                  xhr.withCredentials = true;
+                  xhr.setRequestHeader('NK', 'NT');
+                  xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+                  xhr.setRequestHeader('Accept', 'application/json, */*');
+                  xhr.send(null);
+                  return {url:url, status:xhr.status, ok:(xhr.status>=200 && xhr.status<300)};
+                } catch(e) {
+                  return {url:url, status:0, ok:false, error:String(e)};
+                }
+              }
+              var csrf = pickCsrf();
+              var host = location.host || '';
+              var onSso = /sso\.garmin\.(com|cn)/i.test(host);
+              var onConnect = /connect\.garmin\.(com|cn)/i.test(host);
+              var origins = [];
+              if (onConnect) origins.push(location.origin);
+              origins.push('https://connect.garmin.cn');
+              origins.push('https://connect.garmin.com');
+              // 去重
+              origins = origins.filter(function(v,i,a){return a.indexOf(v)===i;});
+              var probes = [];
+              var authed = false;
+              var authedHost = '';
+              for (var i=0;i<origins.length;i++){
+                var r = probe(origins[i] + '/gc-api/userprofile-service/socialProfile');
+                probes.push(r);
+                if (r.ok) { authed = true; authedHost = origins[i]; break; }
+              }
+              var cookieLen = (document.cookie || '').length;
+              return JSON.stringify({
+                ok: authed,
+                authedByApi: authed,
+                authedHost: authedHost,
+                href: location.href || '',
+                host: host,
+                onSso: onSso,
+                onConnect: onConnect,
+                cookieLen: cookieLen,
+                csrf: csrf,
+                probes: probes
+              });
+            })()
+        """.trimIndent()
+        val view = webView
+        if (view == null) {
+            persistDetectedState(detectedOverride = null)
+            return
+        }
+        view.evaluateJavascript(script) { encoded ->
+            val sessions = FitSyncApp.instance.webSessionManager
+            sessions.rememberWebViewUrl(platform, view.url)
+            CookieManager.getInstance().flush()
+            val proof = runCatching {
+                val jsonText = JSONArray("[$encoded]").getString(0)
+                JSONObject(jsonText)
+            }.getOrNull()
+            val capturedSession = if (proof != null) {
+                val csrf = proof.optString("csrf").takeIf { it.isNotBlank() && it != "null" }
+                val detectedOrigin = proof.optString("authedHost").takeIf { it.isNotBlank() }
+                    ?: view.url?.let { url ->
+                        runCatching {
+                            java.net.URI(url).let { uri -> "${uri.scheme}://${uri.host}" }
+                        }.getOrNull()
+                    }
+                sessions.captureGarminWebSession(detectedOrigin, csrf)
+            } else {
+                false
+            }
+            val webOk = proof?.optBoolean("ok") == true && capturedSession
+            val onSso = proof?.optBoolean("onSso") == true
+            val hasAny = sessions.hasSession(platform)
+            val override = when {
+                webOk -> SessionState.AUTHENTICATED
+                onSso -> SessionState.EXPIRED
+                hasAny -> SessionState.NEEDS_USER_ACTION
+                else -> SessionState.NOT_CONNECTED
+            }
+            persistDetectedState(detectedOverride = override)
+        }
     }
 
     private fun providePendingFitFile() {
@@ -306,9 +511,13 @@ class PlatformWebActivity : ComponentActivity() {
 
     private fun confirmUpload() {
         lifecycleScope.launch(Dispatchers.IO) {
-            FitSyncApp.instance.syncCoordinator.confirmForegroundJob(jobId)
+            val confirmed = FitSyncApp.instance.syncCoordinator.confirmForegroundJob(jobId)
             withContext(Dispatchers.Main) {
-                Toast.makeText(this@PlatformWebActivity, "已记录为完成", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this@PlatformWebActivity,
+                    if (confirmed) "已记录为完成" else "本地活动或同步任务已不存在",
+                    Toast.LENGTH_SHORT,
+                ).show()
                 finish()
             }
         }

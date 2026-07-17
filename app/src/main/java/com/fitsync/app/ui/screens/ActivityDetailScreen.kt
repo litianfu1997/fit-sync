@@ -17,7 +17,9 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -26,6 +28,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -41,10 +44,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import android.widget.Toast
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
+import com.fitsync.app.data.repo.ActivityDeletionResult
 import com.fitsync.app.domain.model.AccountStatus
 import com.fitsync.app.domain.model.DeliveryJobStatus
+import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.sync.SyncScheduler
 import com.fitsync.app.ui.components.AppTopBar
 import com.fitsync.app.ui.components.EmptyState
@@ -67,18 +73,73 @@ import java.util.Locale
 @Composable
 fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
     val app = FitSyncApp.instance
+    val activity by app.database.canonicalActivityDao().observeById(activityId).collectAsState(initial = null)
     val variants by app.database.activityVariantDao().observeByCanonical(activityId).collectAsState(initial = emptyList())
     val copies by app.database.platformCopyDao().observeByCanonical(activityId).collectAsState(initial = emptyList())
     val jobs by app.database.deliveryJobDao().observeByCanonical(activityId).collectAsState(initial = emptyList())
     val accounts by app.database.platformAccountDao().observeAll().collectAsState(initial = emptyList())
-    var activity by remember { mutableStateOf<CanonicalActivityEntity?>(null) }
     var actionMessage by remember { mutableStateOf<String?>(null) }
+    var showDeleteConfirmation by remember { mutableStateOf(false) }
+    var isDeleting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val dateFormat = remember { SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.getDefault()) }
 
-    LaunchedEffect(activityId) {
-        activity = withContext(Dispatchers.IO) { app.database.canonicalActivityDao().getById(activityId) }
+    var hasObservedActivity by remember { mutableStateOf(false) }
+
+    LaunchedEffect(activity) {
+        if (activity != null) {
+            hasObservedActivity = true
+        } else if (hasObservedActivity && !isDeleting) {
+            onBack()
+        }
+    }
+
+    if (showDeleteConfirmation) {
+        AlertDialog(
+            onDismissRequest = { if (!isDeleting) showDeleteConfirmation = false },
+            title = { Text("删除本地活动？") },
+            text = {
+                Text("将删除全部本地 FIT、活动记录、平台副本映射和同步历史，并取消未完成任务。各平台已有活动不会被删除；已发出的上传可能已被平台接收，之后同步也可能重新下载此活动。")
+            },
+            confirmButton = {
+                Button(
+                    enabled = !isDeleting,
+                    onClick = {
+                        isDeleting = true
+                        scope.launch(Dispatchers.IO) {
+                            val result = runCatching { app.activityDeletionService.delete(activityId) }
+                            withContext(Dispatchers.Main) {
+                                result.onSuccess { deletion ->
+                                    showDeleteConfirmation = false
+                                    when (deletion) {
+                                        ActivityDeletionResult.AlreadyDeleted -> onBack()
+                                        is ActivityDeletionResult.Deleted -> {
+                                            if (deletion.failedPaths.isEmpty()) {
+                                                onBack()
+                                            } else {
+                                                Toast.makeText(
+                                                    context,
+                                                    "活动已删除，但有 ${deletion.failedPaths.size} 个残留文件未能清理",
+                                                    Toast.LENGTH_LONG,
+                                                ).show()
+                                                onBack()
+                                            }
+                                        }
+                                    }
+                                }.onFailure {
+                                    isDeleting = false
+                                    actionMessage = "删除失败：${it.message ?: "请稍后重试"}"
+                                }
+                            }
+                        }
+                    },
+                ) { Text(if (isDeleting) "正在删除…" else "确认删除") }
+            },
+            dismissButton = {
+                TextButton(enabled = !isDeleting, onClick = { showDeleteConfirmation = false }) { Text("取消") }
+            },
+        )
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -161,7 +222,7 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                                     onClick = {
                                         scope.launch(Dispatchers.IO) {
                                             val result = runCatching {
-                                                val id = app.syncCoordinator.planner.enqueueManual(activityId, account.id)
+                                                val id = app.syncCoordinator.enqueueManual(activityId, account.id)
                                                 SyncScheduler.enqueueNow(context)
                                                 id
                                             }
@@ -248,7 +309,9 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                                                         )
                                                     },
                                                     modifier = Modifier.padding(top = 6.dp),
-                                                ) { Text("继续处理") }
+                                                ) {
+                                                    Text(if (account.platform == Platform.GARMIN) "重新登录" else "继续处理")
+                                                }
                                             }
                                             DeliveryJobStatus.FAILED, DeliveryJobStatus.RETRY_WAIT -> {
                                                 OutlinedButton(
@@ -278,6 +341,25 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                                 }
                             }
                         }
+                    }
+                }
+            }
+            item { SectionHeader("删除活动", "此操作只删除 FitSync 本机数据") }
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            "删除全部本地 FIT、活动记录和同步历史，不会删除平台上的活动。",
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                        OutlinedButton(
+                            enabled = !isDeleting,
+                            onClick = { showDeleteConfirmation = true },
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Text("删除本地活动", modifier = Modifier.padding(start = 6.dp))
+                        }
+                        actionMessage?.let { StatusPill(it, StatusTone.ERROR) }
                     }
                 }
             }

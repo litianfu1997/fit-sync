@@ -28,9 +28,20 @@ class ImportService(
     private val fileStore: FitFileStore,
     private val fitEngine: FitEngine = FitEngine(),
     private val dedupEngine: DedupEngine = DedupEngine(),
+    private val mutationGate: ActivityMutationGate = ActivityMutationGate(),
 ) {
 
     suspend fun importFromUri(
+        uri: Uri,
+        displayName: String? = null,
+        sourcePlatform: Platform? = null,
+        collectorType: CollectorType = CollectorType.SHARE,
+        remoteActivityId: String? = null,
+    ): ImportOutcome = mutationGate.withLock {
+        importFromUriLocked(uri, displayName, sourcePlatform, collectorType, remoteActivityId)
+    }
+
+    private suspend fun importFromUriLocked(
         uri: Uri,
         displayName: String? = null,
         sourcePlatform: Platform? = null,
@@ -249,7 +260,11 @@ class ImportService(
         remoteActivityId = remoteActivityId,
     )
 
-    suspend fun reparseStoredActivitiesIfNeeded() {
+    suspend fun reparseStoredActivitiesIfNeeded() = mutationGate.withLock {
+        reparseStoredActivitiesIfNeededLocked()
+    }
+
+    private suspend fun reparseStoredActivitiesIfNeededLocked() {
         val settingsDao = db.appSettingsDao()
         val settings = settingsDao.get() ?: AppSettingsEntity()
         if (settings.fitParserVersion >= CURRENT_PARSER_VERSION) return

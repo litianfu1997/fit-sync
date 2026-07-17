@@ -7,9 +7,9 @@
 ## 核心能力
 
 1. 通过系统分享或登录平台网页收集 FIT  
-2. 保存 WebView 登录 Cookie，迈金令牌使用 Android Keystore 加密  
+2. 保存 WebView 登录 Cookie，平台令牌和 Garmin `JWT_WEB` 使用 Android Keystore 加密
 3. 迈金、行者支持后台活动发现、原始 FIT 下载和上传  
-4. Garmin、COROS、iGPSPORT 使用前台网页任务和手动分享兜底  
+4. Garmin 使用 Connect API 后台上传 FIT，失败时自动重试，不降级为手动上传；COROS、iGPSPORT 使用前台网页任务和手动分享兜底
 5. 本地四级去重，PlatformCopy + 幂等任务阻止重复与循环同步  
 6. 配置“来源平台 → 多个目标平台”规则，并支持单次补发  
 

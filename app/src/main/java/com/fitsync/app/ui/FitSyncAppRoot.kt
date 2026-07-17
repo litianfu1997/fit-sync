@@ -60,6 +60,17 @@ fun FitSyncAppRoot() {
     val current = backStack?.destination?.route
     val showBottomBar = destinations.any { it.route == current }
 
+    fun navigateToMainDestination(route: String) {
+        if (route == current) return
+        if (route == "home" && navController.popBackStack("home", inclusive = false)) return
+
+        navController.navigate(route) {
+            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+            launchSingleTop = true
+            restoreState = true
+        }
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
@@ -77,13 +88,7 @@ fun FitSyncAppRoot() {
                             val selected = current == destination.route
                             NavigationBarItem(
                                 selected = selected,
-                                onClick = {
-                                    navController.navigate(destination.route) {
-                                        popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                        launchSingleTop = true
-                                        restoreState = true
-                                    }
-                                },
+                                onClick = { navigateToMainDestination(destination.route) },
                                 icon = { Icon(destination.icon, contentDescription = destination.label) },
                                 label = { Text(destination.label, style = MaterialTheme.typography.labelMedium) },
                                 colors = NavigationBarItemDefaults.colors(
@@ -107,20 +112,18 @@ fun FitSyncAppRoot() {
         ) {
             composable("home") {
                 HomeScreen(
-                    onOpenActivities = { navController.navigate("activities") },
+                    onOpenActivities = { navigateToMainDestination("activities") },
                     onOpenJobs = { filter -> navController.navigate("jobs/${filter.routeValue}") },
-                    onOpenPlatforms = { navController.navigate("platforms") },
-                    onOpenRules = { navController.navigate("rules") },
                 )
             }
             composable("activities") {
                 ActivitiesScreen(
                     onOpenActivity = { id -> navController.navigate("activity/$id") },
-                    onOpenPlatforms = { navController.navigate("platforms") },
+                    onOpenPlatforms = { navigateToMainDestination("platforms") },
                 )
             }
             composable("rules") {
-                SyncRulesScreen(onOpenPlatforms = { navController.navigate("platforms") })
+                SyncRulesScreen(onOpenPlatforms = { navigateToMainDestination("platforms") })
             }
             composable("platforms") { PlatformsScreen() }
             composable("settings") { SettingsScreen() }

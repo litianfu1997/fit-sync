@@ -101,6 +101,20 @@ class FitFileStore(private val context: Context) {
         }
     }
 
+    suspend fun deleteStoredFiles(paths: Collection<String>): List<String> = withContext(Dispatchers.IO) {
+        val root = fitsDir.canonicalFile
+        paths.distinct().mapNotNull { path ->
+            val file = runCatching { File(path).canonicalFile }.getOrNull() ?: return@mapNotNull path
+            val isInsideRoot = file.parentFile == root || file.toPath().startsWith(root.toPath())
+            when {
+                !isInsideRoot -> path
+                !file.exists() -> null
+                !file.isFile || !file.delete() -> path
+                else -> null
+            }
+        }
+    }
+
     private fun finalizeStoredFile(tempFile: File, displayName: String): StoredFitFile {
         val sha256 = sha256Of(tempFile)
         val target = File(fitsDir, "${sha256.take(16)}_${safeName(displayName)}")

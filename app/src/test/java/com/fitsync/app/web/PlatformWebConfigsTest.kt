@@ -25,14 +25,38 @@ class PlatformWebConfigsTest {
     @Test
     fun vendorAuthenticationRedirects_areAllowed() {
         assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "sso.garmin.com")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "connect.garmin.cn")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "sso.garmin.cn")).isTrue()
         assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "login.passport.igpsport.com")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "app.igpsport.cn")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "login.passport.igpsport.cn")).isTrue()
         assertThat(PlatformWebConfigs.isAllowed(Platform.XINGZHE, "www.imxingzhe.com")).isTrue()
+    }
+
+    @Test
+    fun aliyunCaptchaHosts_areAllowed() {
+        // 阿里云验证码（AliyunCaptcha）滑块通过这些第三方域加载，必须放行，否则 iframe 被当跳转拦截。
+        assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "g.alicdn.com")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "o.alicdn.com")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "static-captcha.aliyuncs.com")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "axpp9h.captcha-open.aliyuncs.com")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "cloudauth-device-dualstack.cn-shanghai.aliyuncs.com")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "webapi.amap.com")).isTrue()
+        // 跨平台共享：行者登录同样能加载阿里云验证码
+        assertThat(PlatformWebConfigs.isAllowed(Platform.XINGZHE, "g.alicdn.com")).isTrue()
+        // 平台自有域仍放行
+        assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "otm.onelap.cn")).isTrue()
+        // 与验证无关的域仍拒绝（含形似域）
+        assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "evil.com")).isFalse()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "alicdn.com.evil.org")).isFalse()
     }
 
     @Test
     fun lookalikeDomains_areRejected() {
         assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "garmin.com.example.org")).isFalse()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "garmin.cn.example.org")).isFalse()
         assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "fakeigpsport.com")).isFalse()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "fakeigpsport.cn")).isFalse()
         assertThat(PlatformWebConfigs.isAllowed(Platform.XINGZHE, null)).isFalse()
     }
 }
