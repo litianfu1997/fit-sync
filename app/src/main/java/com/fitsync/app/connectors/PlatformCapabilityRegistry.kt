@@ -31,16 +31,23 @@ object PlatformCapabilityRegistry {
             experimental = true,
         )
         Platform.GARMIN -> ConnectorCapabilities(
-            shareImportSupported = true,
-            listActivitiesMode = ConnectorExecution.FOREGROUND_WEB,
-            downloadFitMode = ConnectorExecution.FOREGROUND_WEB,
+            shareImportSupported = false,
+            // 复用 WebView 登录态(JWT_WEB + Connect-Csrf-Token)走 gc-api 同源代理，后台读取与写入。
+            listActivitiesMode = ConnectorExecution.BACKGROUND,
+            downloadFitMode = ConnectorExecution.BACKGROUND,
             uploadFitMode = ConnectorExecution.BACKGROUND,
+            supportsIncrementalCursor = true,
+            supportsBulkHistory = true,
+            experimental = true,
         )
         Platform.IGPSPORT -> ConnectorCapabilities(
             shareImportSupported = true,
-            listActivitiesMode = ConnectorExecution.MANUAL,
-            downloadFitMode = ConnectorExecution.MANUAL,
-            uploadFitMode = ConnectorExecution.FOREGROUND_WEB,
+            // 纯 API 账号密码后台登录（不走 WebView）：后台 list→download→upload(getSignedUrl+PUT OSS+uploadByOss)。
+            listActivitiesMode = ConnectorExecution.BACKGROUND,
+            downloadFitMode = ConnectorExecution.BACKGROUND,
+            uploadFitMode = ConnectorExecution.BACKGROUND,
+            supportsIncrementalCursor = true,
+            supportsBulkHistory = true,
             experimental = true,
         )
         Platform.COROS -> ConnectorCapabilities(

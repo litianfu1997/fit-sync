@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -152,6 +154,10 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                 }
             },
         )
+        // 来源 = FIT 下载来源(variant.sourcePlatform) ∪ 已存在平台(platform_copy→account)，去重后展示。
+        val sourcePlatforms = (variants.mapNotNull { it.sourcePlatform } +
+            copies.mapNotNull { c -> accounts.firstOrNull { it.id == c.platformAccountId }?.platform })
+            .distinct()
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
@@ -159,6 +165,9 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
         ) {
             activity?.let { current ->
                 item { ActivitySummary(current, dateFormat) }
+            }
+            if (sourcePlatforms.isNotEmpty()) {
+                item { ActivitySourcesRow(sourcePlatforms) }
             }
             item { SectionHeader("平台副本", "同一活动在各平台中的记录") }
             if (copies.isEmpty()) {
@@ -287,9 +296,13 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                                     Column(Modifier.weight(1f)) {
                                         Text(account?.platform?.displayName ?: "未知平台", style = MaterialTheme.typography.titleSmall)
                                         Text(
-                                            job.errorMessage ?: "尝试 ${job.attemptCount} 次",
+                                            deliveryJobDetail(job),
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = if (job.status == DeliveryJobStatus.FAILED) MaterialTheme.colorScheme.error
+                                            color = if (
+                                                job.status == DeliveryJobStatus.FAILED ||
+                                                job.status == DeliveryJobStatus.RETRY_WAIT ||
+                                                job.status == DeliveryJobStatus.WAITING_USER
+                                            ) MaterialTheme.colorScheme.error
                                             else MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
@@ -398,6 +411,35 @@ private fun ActivitySummary(activity: CanonicalActivityEntity, dateFormat: Simpl
                 SummaryStat("时长", activity.elapsedSeconds?.let(::formatDuration) ?: "--")
                 SummaryStat("均心率", activity.avgHeartRate?.let { "$it bpm" } ?: "--")
                 SummaryStat("爬升", activity.elevationGain?.let { "%.0f m".format(it) } ?: "--")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ActivitySourcesRow(platforms: List<Platform>) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                "来源",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.align(Alignment.CenterVertically),
+            )
+            platforms.forEach { platform ->
+                Row(
+                    modifier = Modifier.align(Alignment.CenterVertically),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    PlatformAvatar(platform, 26.dp)
+                    Text(platform.displayName, style = MaterialTheme.typography.bodyMedium)
+                }
             }
         }
     }

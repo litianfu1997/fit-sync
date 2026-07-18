@@ -7,12 +7,6 @@ import com.fitsync.app.security.SecureSessionStore
 import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
 
-data class GarminWebSession(
-    val domain: String,
-    val jwtWeb: String,
-    val csrf: String?,
-)
-
 class WebSessionManager(
     private val secureStore: SecureSessionStore,
 ) {
@@ -46,7 +40,7 @@ class WebSessionManager(
     }
 
     fun hasSession(platform: Platform): Boolean = when (platform) {
-        Platform.GARMIN -> garminWebSession() != null
+        Platform.GARMIN -> hasGarminSession()
         else -> !cookieHeader(platform).isNullOrBlank() || !token(platform).isNullOrBlank()
     }
 
@@ -83,50 +77,69 @@ class WebSessionManager(
         secureStore.put(key(Platform.ONELAP, "uid"), userId)
     }
 
-    /** 从 WebView 当前页捕获的 Garmin CSRF，供后台上传复用。 */
-    fun saveGarminCsrf(token: String?) {
-        secureStore.put(key(Platform.GARMIN, "csrf"), token)
-    }
-
-    fun garminCsrf(): String? = secureStore.get(key(Platform.GARMIN, "csrf"))
-
-    /**
-     * 从 WebView Cookie 中保存可供后台 API 使用的 JWT_WEB。
-     * 普通 SSO/追踪 Cookie 不能证明后台上传已具备授权。
-     */
-    fun captureGarminWebSession(connectOrigin: String?, csrf: String?): Boolean {
-        val hintedDomain = garminDomain(connectOrigin)
-        val current = findGarminJwtWeb(hintedDomain) ?: return false
-        val previousJwtWeb = secureStore.get(key(Platform.GARMIN, "jwt_web"))
-        secureStore.put(key(Platform.GARMIN, "jwt_web"), current.second)
-        secureStore.put(key(Platform.GARMIN, "domain"), current.first)
-        when {
-            !csrf.isNullOrBlank() -> saveGarminCsrf(csrf)
-            previousJwtWeb != current.second -> saveGarminCsrf(null)
-        }
-        return true
-    }
-
-    fun garminWebSession(): GarminWebSession? {
-        val storedDomain = secureStore.get(key(Platform.GARMIN, "domain"))
-            ?.takeIf { it == GARMIN_COM_DOMAIN || it == GARMIN_CN_DOMAIN }
-        val current = findGarminJwtWeb(storedDomain)
-        if (current != null) {
-            secureStore.put(key(Platform.GARMIN, "jwt_web"), current.second)
-            secureStore.put(key(Platform.GARMIN, "domain"), current.first)
-        }
-        val jwtWeb = current?.second ?: secureStore.get(key(Platform.GARMIN, "jwt_web"))
-            ?: return null
-        return GarminWebSession(
-            domain = current?.first ?: storedDomain ?: GARMIN_COM_DOMAIN,
-            jwtWeb = jwtWeb,
-            csrf = garminCsrf(),
-        )
-    }
-
     fun token(platform: Platform): String? = secureStore.get(key(platform, "token"))
     fun refreshToken(platform: Platform): String? = secureStore.get(key(platform, "refresh_token"))
     fun externalUserId(platform: Platform): String? = secureStore.get(key(platform, "uid"))
+
+    /**
+     * 持久化 Garmin 中国站后台直连所需的最小会话信息（Keystore 加密）。
+     *
+     * - [jwtWeb]：登录后 connect.garmin.cn 的 JWT_WEB Cookie 值，后台 OkHttp 直连
+     *   connectapi.garmin.cn 时作为会话凭据。
+     * - [csrf]：中国站写操作使用的 `Connect-Csrf-Token`；`NK: NT` 是额外代理头，不能替代它。
+     * - [domain]：登录域归属 garmin.cn / garmin.com（决定 connectapi 后缀）。
+     * - [userAgent]：复用 WebView 登录时的 UA，避免被网关按移动端拦截。
+     */
+    fun saveGarminSession(
+        jwtWeb: String?,
+        csrf: String?,
+        domain: String?,
+        userAgent: String?,
+        cookieHeader: String? = null,
+    ) {
+        secureStore.put(key(Platform.GARMIN, "jwt_web"), jwtWeb)
+        // 完整 Cookie 头用于网页代理路径（connect.garmin.cn/modern/proxy 上传）；
+        // 缺省退化为仅 JWT_WEB，保证直连路径仍可用。
+        secureStore.put(
+            key(Platform.GARMIN, "cookie"),
+            cookieHeader?.takeIf { it.isNotBlank() } ?: jwtWeb?.let { "JWT_WEB=$it" },
+        )
+        secureStore.put(key(Platform.GARMIN, "csrf"), csrf)
+        secureStore.put(key(Platform.GARMIN, "domain"), domain)
+        secureStore.put(key(Platform.GARMIN, "user_agent"), userAgent)
+    }
+
+    fun garminJwtWeb(): String? = secureStore.get(key(Platform.GARMIN, "jwt_web"))
+    fun garminCookieHeader(): String? = secureStore.get(key(Platform.GARMIN, "cookie"))
+    fun garminCsrf(): String? = secureStore.get(key(Platform.GARMIN, "csrf"))
+    fun garminDomain(): String =
+        secureStore.get(key(Platform.GARMIN, "domain"))?.takeIf { it.isNotBlank() } ?: "garmin.cn"
+    fun garminUserAgent(): String? = secureStore.get(key(Platform.GARMIN, "user_agent"))
+
+    /**
+     * 持久化 iGPSPORT 中国站后台登录凭据（Keystore 加密）。
+     *
+     * iGPSPORT 走纯 API 账号密码登录（不走 WebView），JWT token 7 天过期且无刷新接口，
+     * 故除 token 外还需保存账号密码，以便过期时后台自动重新登录（[com.fitsync.app.connectors.IgpsportApiConnector] 的 withRelogin）。
+     * - [token]：access_token，存通用 key `IGPSPORT:token`，[applyTo] 会自动注入 `Authorization: Bearer`。
+     * - [memberId]：JWT 里的 memberid，存通用 key `IGPSPORT:uid`（对应 [externalUserId]）。
+     * - [username]/[password]：仅用于 token 过期后静默重登，不再用于其它用途。
+     */
+    fun saveIgpsportSession(
+        token: String?,
+        memberId: String?,
+        username: String?,
+        password: String?,
+    ) {
+        secureStore.put(key(Platform.IGPSPORT, "token"), token)
+        secureStore.put(key(Platform.IGPSPORT, "uid"), memberId)
+        secureStore.put(key(Platform.IGPSPORT, "username"), username)
+        secureStore.put(key(Platform.IGPSPORT, "password"), password)
+    }
+
+    fun igpsportUsername(): String? = secureStore.get(key(Platform.IGPSPORT, "username"))
+    fun igpsportPassword(): String? = secureStore.get(key(Platform.IGPSPORT, "password"))
+    fun igpsportMemberId(): String? = secureStore.get(key(Platform.IGPSPORT, "uid"))
 
     fun clear(platform: Platform) {
         val config = PlatformWebConfigs.get(platform)
@@ -142,7 +155,7 @@ class WebSessionManager(
         }
         lastWebViewUrls.remove(platform)
         cookies.flush()
-        listOf("token", "refresh_token", "uid", "csrf", "jwt_web", "domain").forEach {
+        listOf("token", "refresh_token", "uid", "csrf", "jwt_web", "cookie", "domain", "user_agent", "username", "password").forEach {
             secureStore.remove(key(platform, it))
         }
     }
@@ -163,48 +176,24 @@ class WebSessionManager(
         return urls.toList()
     }
 
-    private fun findGarminJwtWeb(preferredDomain: String?): Pair<String, String>? {
-        val domains = linkedSetOf<String>().apply {
-            preferredDomain?.let(::add)
-            add(GARMIN_COM_DOMAIN)
-            add(GARMIN_CN_DOMAIN)
-        }
-        domains.forEach { domain ->
-            val urls = listOf(
-                "https://connect.$domain/",
-                "https://connect.$domain/modern/",
-                "https://connectapi.$domain/",
-            )
-            urls.forEach { url ->
-                cookieValue(cookies.getCookie(url), "JWT_WEB")?.let { return domain to it }
-            }
-        }
-        return null
-    }
+    private fun hasGarminSession(): Boolean =
+        // 后台 WorkManager 跑时 WebView 进程可能不在，优先认可持久化的 JWT_WEB；
+        // WebView 登录刚完成时则看 cookie。
+        !secureStore.get(key(Platform.GARMIN, "jwt_web")).isNullOrBlank() ||
+            GARMIN_EXTRA_COOKIE_URLS.any { url -> hasGarminSessionCookie(cookies.getCookie(url)) }
 
     private fun key(platform: Platform, field: String) = "${platform.name}:$field"
 
     companion object {
         private val GARMIN_EXTRA_COOKIE_URLS = listOf(
-            "https://connect.garmin.com/",
-            "https://connect.garmin.com/modern/",
-            "https://connect.garmin.com/app/",
-            "https://sso.garmin.com/",
-            "https://sso.garmin.com/sso/",
-            "https://www.garmin.com/",
-            "https://accounts.garmin.com/",
-            "https://connectapi.garmin.com/",
             "https://connect.garmin.cn/",
             "https://connect.garmin.cn/modern/",
             "https://connect.garmin.cn/app/",
             "https://sso.garmin.cn/",
             "https://sso.garmin.cn/sso/",
             "https://www.garmin.cn/",
-            "https://connectapi.garmin.cn/",
         )
 
-        private const val GARMIN_COM_DOMAIN = "garmin.com"
-        private const val GARMIN_CN_DOMAIN = "garmin.cn"
     }
 }
 
@@ -218,15 +207,10 @@ internal fun cookieValue(header: String?, name: String): String? = header
     ?.removeSurrounding("\"")
     ?.takeIf { it.isNotEmpty() }
 
-private fun garminDomain(origin: String?): String? {
-    val value = origin ?: return null
-    val host = runCatching { java.net.URI(value).host }.getOrNull() ?: return null
-    return when {
-        host == "garmin.cn" || host.endsWith(".garmin.cn") -> "garmin.cn"
-        host == "garmin.com" || host.endsWith(".garmin.com") -> "garmin.com"
-        else -> null
-    }
-}
+/** Garmin 偶尔会调整会话 Cookie 名；兼容 JWT_WEB 及明确的 session/SSO/token 类 Cookie。 */
+internal fun hasGarminSessionCookie(header: String?): Boolean =
+    cookieValue(header, "JWT_WEB") != null ||
+        (!header.isNullOrBlank() && sessionCookieScore(header) >= 11)
 
 /**
  * Cookie 质量分：包含常见会话/ SSO 关键字的 Cookie 优先于仅追踪/同意偏好。

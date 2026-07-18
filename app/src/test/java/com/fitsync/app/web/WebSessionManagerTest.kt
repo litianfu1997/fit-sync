@@ -5,6 +5,15 @@ import com.google.common.truth.Truth.assertThat
 import org.junit.Test
 
 class WebSessionManagerTest {
+
+    @Test
+    fun garminSessionCookie_acceptsKnownAndSessionLikeNamesOnly() {
+        assertThat(hasGarminSessionCookie("JWT_WEB=abc; _ga=tracking")).isTrue()
+        assertThat(hasGarminSessionCookie("GARMIN-SSO=abc; locale=zh-CN")).isTrue()
+        assertThat(hasGarminSessionCookie("_ga=tracking; cookie-consent=yes")).isFalse()
+        assertThat(hasGarminSessionCookie(null)).isFalse()
+    }
+
     @Test
     fun onelap_usesRawAuthorizationToken() {
         assertThat(authorizationHeaderValue(Platform.ONELAP, "onelap-token"))
@@ -35,4 +44,5 @@ class WebSessionManagerTest {
         assertThat(cookieValue(header, "missing")).isNull()
         assertThat(cookieValue(null, "JWT_WEB")).isNull()
     }
+
 }

@@ -10,6 +10,7 @@ import java.util.concurrent.ThreadLocalRandom
 
 object FitFileNaming {
     private val dateFormatter = DateTimeFormatter.ofPattern("yyyyMMdd")
+    private val displayDateFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 
     fun create(
         platform: Platform,
@@ -27,6 +28,28 @@ object FitFileNaming {
             sportType.fileNameLabel(),
             String.format(Locale.ROOT, "%06d", randomNumber),
         ).joinToString("_") + ".fit"
+    }
+
+    /**
+     * 生成人类可读的活动展示标题，例如「2026-07-18 上午 骑行」。
+     *
+     * 用途：
+     * - 单来源活动在拿不到平台列表名（preferredTitle 为空）时作为兜底标题；
+     * - 多来源活动合并（AUTO_MERGE）后作为统一的中性标题，不偏袒任一平台。
+     *
+     * 与 [create] 不同：不含平台前缀、随机数、扩展名，适合直接作为 canonical.title 展示。
+     */
+    fun displayTitle(
+        startTimeEpochMs: Long,
+        sportType: SportType,
+        zoneId: ZoneId = ZoneId.systemDefault(),
+    ): String {
+        val localDateTime = Instant.ofEpochMilli(startTimeEpochMs).atZone(zoneId)
+        return listOf(
+            displayDateFormatter.format(localDateTime),
+            timePeriod(localDateTime.hour),
+            sportType.fileNameLabel(),
+        ).joinToString(" ")
     }
 
     internal fun timePeriod(hour: Int): String = when (hour) {

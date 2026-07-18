@@ -96,9 +96,10 @@ class SyncCoordinator(
     suspend fun processDeliveryJobs(): Int {
         var completed = 0
         val now = System.currentTimeMillis()
-        // 登录已恢复时自动续跑旧版遗留或授权失效产生的 Garmin 等待任务。
-        // 真正失效的会话会立即把账号改为 AUTH_EXPIRED，后续批次不会反复重置。
-        db.deliveryJobDao().upgradeWaitingForegroundJobs(Platform.GARMIN, now)
+        // 恢复上一轮被 Worker 中断（进程被杀/超时）而卡在 UPLOADING 的任务，避免永久卡死。
+        // WAITING_USER 不在这里盲目重置：AUTH_EXPIRED/USER_ACTION 的任务只在登录成功后由
+        // PlatformAccountRepository 恢复；RETRY_WAIT 由 findRunnable 按 nextRetryAt 退避拾取。
+        db.deliveryJobDao().resetStaleUploading(now)
         db.deliveryJobDao().findRunnable(now).forEach { candidateJob ->
             val prepared = mutationGate.withLock {
                 val currentJob = db.deliveryJobDao().getById(candidateJob.id) ?: return@withLock null
@@ -117,7 +118,19 @@ class SyncCoordinator(
                 }
                 val currentMode = connector.detectCapabilities().uploadFitMode
                 if (currentMode != ConnectorExecution.BACKGROUND) {
-                    waitForUser(currentJob.id, account.platform, PlatformWebConfigs.get(account.platform).uploadUrl, "请在网页中完成 FIT 上传")
+                    db.deliveryJobDao().update(
+                        currentJob.copy(
+                            executionMode = currentMode,
+                            updatedAtEpochMs = now,
+                        ),
+                    )
+                    waitForUser(
+                        currentJob.id,
+                        account.platform,
+                        PlatformWebConfigs.get(account.platform).uploadUrl,
+                        "${account.platform.displayName} 不支持后台上传，请在网页中完成 FIT 导入",
+                        "FOREGROUND_UPLOAD_REQUIRED",
+                    )
                     return@withLock null
                 }
                 db.deliveryJobDao().update(
@@ -131,7 +144,9 @@ class SyncCoordinator(
                 PreparedDelivery(currentJob.copy(executionMode = currentMode), account.id, activity, connector)
             } ?: return@forEach
 
-            val result = prepared.connector.uploadFit(prepared.activity)
+            // 任何 connector 异常（DB/IO/解析）都转可重试失败，避免 job 永久卡在 UPLOADING。
+            val result = runCatching { prepared.connector.uploadFit(prepared.activity) }
+                .getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "上传过程发生异常") }
             mutationGate.withLock {
                 val currentJob = db.deliveryJobDao().getById(prepared.job.id)
                 val currentActivity = db.canonicalActivityDao().getById(prepared.job.canonicalActivityId)
@@ -170,11 +185,12 @@ class SyncCoordinator(
                     is ConnectorResult.RequiresLogin -> {
                         markAccountNeedsAction(accountId, true)
                         val platform = db.platformAccountDao().getById(accountId)?.platform ?: return@withLock
-                        waitForUser(job.id, platform, result.url, result.message)
+                        waitForUser(job.id, platform, result.url, result.message, "AUTH_EXPIRED")
                     }
                     is ConnectorResult.RequiresUserAction -> {
+                        markAccountNeedsAction(accountId, false)
                         val platform = db.platformAccountDao().getById(accountId)?.platform ?: return@withLock
-                        waitForUser(job.id, platform, result.url, result.message)
+                        waitForUser(job.id, platform, result.url, result.message, "USER_ACTION_REQUIRED")
                     }
                     is ConnectorResult.RetryableFailure -> {
                         val attempt = job.attemptCount + 1
@@ -205,14 +221,57 @@ class SyncCoordinator(
         return completed
     }
 
-    suspend fun confirmForegroundJob(jobId: Long): Boolean = mutationGate.withLock {
+    suspend fun confirmForegroundJob(
+        jobId: Long,
+        duplicate: Boolean = false,
+        remoteActivityId: String? = null,
+        remoteUrl: String? = null,
+    ): Boolean = mutationGate.withLock {
         val job = db.deliveryJobDao().getById(jobId) ?: return@withLock false
-        if (db.canonicalActivityDao().getById(job.canonicalActivityId) == null) return@withLock false
+        if (job.status != DeliveryJobStatus.WAITING_USER || job.executionMode == ConnectorExecution.BACKGROUND) {
+            return@withLock false
+        }
+        if (db.canonicalActivityDao().getById(job.canonicalActivityId) == null ||
+            db.activityVariantDao().getById(job.sourceVariantId) == null
+        ) return@withLock false
+        val cleanRemoteId = remoteActivityId?.trim()?.takeIf(String::isNotEmpty)
+        if (cleanRemoteId != null) {
+            saveRemoteCopy(
+                canonicalId = job.canonicalActivityId,
+                accountId = job.destinationAccountId,
+                sourceVariantId = job.sourceVariantId,
+                copy = com.fitsync.app.connectors.RemoteCopy(
+                    remoteActivityId = cleanRemoteId,
+                    remoteUrl = remoteUrl,
+                    duplicate = duplicate,
+                ),
+            )
+        }
         db.deliveryJobDao().update(
             job.copy(
-                status = DeliveryJobStatus.SUCCEEDED,
+                status = if (duplicate) DeliveryJobStatus.DUPLICATE_REMOTE else DeliveryJobStatus.SUCCEEDED,
+                attemptCount = job.attemptCount + 1,
+                remoteActivityId = cleanRemoteId,
                 errorCode = null,
                 errorMessage = null,
+                updatedAtEpochMs = System.currentTimeMillis(),
+            ),
+        )
+        notifications.cancel(jobId)
+        true
+    }
+
+    suspend fun failForegroundJob(jobId: Long, code: String, message: String): Boolean = mutationGate.withLock {
+        val job = db.deliveryJobDao().getById(jobId) ?: return@withLock false
+        if (job.status != DeliveryJobStatus.WAITING_USER || job.executionMode == ConnectorExecution.BACKGROUND) {
+            return@withLock false
+        }
+        db.deliveryJobDao().update(
+            job.copy(
+                status = DeliveryJobStatus.FAILED,
+                attemptCount = job.attemptCount + 1,
+                errorCode = code,
+                errorMessage = message,
                 updatedAtEpochMs = System.currentTimeMillis(),
             ),
         )
@@ -385,6 +444,7 @@ class SyncCoordinator(
                     sourcePlatform = platform,
                     collectorType = CollectorType.CLOUD,
                     remoteActivityId = remote.remoteActivityId,
+                    preferredTitle = remote.name,
                 )
                 val ids = when (outcome) {
                     is ImportOutcome.Success -> outcome.canonicalActivityId to outcome.variantId
@@ -438,12 +498,19 @@ class SyncCoordinator(
         )
     }
 
-    private suspend fun waitForUser(jobId: Long, platform: Platform, url: String, message: String) {
+    private suspend fun waitForUser(
+        jobId: Long,
+        platform: Platform,
+        url: String,
+        message: String,
+        errorCode: String,
+    ) {
         val job = db.deliveryJobDao().getById(jobId) ?: return
         db.deliveryJobDao().update(
             job.copy(
                 status = DeliveryJobStatus.WAITING_USER,
                 userActionUrl = url,
+                errorCode = errorCode,
                 errorMessage = message,
                 updatedAtEpochMs = System.currentTimeMillis(),
             ),

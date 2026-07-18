@@ -49,7 +49,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.domain.model.DedupStatus
-import com.fitsync.app.domain.model.DeliveryJobStatus
 import com.fitsync.app.domain.model.ImportJobStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.sync.SyncScheduler
@@ -83,9 +82,9 @@ fun HomeScreen(
         combine(
             db.canonicalActivityDao().observeCount(),
             db.canonicalActivityDao().observeCountByDedup(DedupStatus.NEEDS_REVIEW),
-            db.deliveryJobDao().observeCountByStatus(DeliveryJobStatus.SUCCEEDED),
+            db.deliveryJobDao().observeCompletedCount(),
             db.deliveryJobDao().observePendingCount(),
-            db.deliveryJobDao().observeCountByStatus(DeliveryJobStatus.FAILED),
+            db.deliveryJobDao().observeProblemCount(),
         ) { discovered, review, synced, pending, failed -> HomeStats(discovered, synced, pending, review, failed) }
     }.collectAsState(initial = HomeStats())
     val recentImports by db.importJobDao().observeRecent().collectAsState(initial = emptyList())

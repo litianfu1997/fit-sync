@@ -30,19 +30,12 @@ object PlatformWebConfigs {
         )
         Platform.GARMIN -> PlatformWebConfig(
             platform,
-            loginUrl = "https://connect.garmin.com/signin/?service=https%3A%2F%2Fconnect.garmin.com%2Fapp%2Fimport-data",
-            uploadUrl = "https://connect.garmin.com/app/import-data",
-            // 含中国镜像 connect.garmin.cn / sso.garmin.cn：服务端会把中国 IP 从 .com 重定向到 .cn
-            allowedDomainSuffixes = setOf("garmin.com", "garmin.cn"),
+            loginUrl = "https://connect.garmin.cn/signin/?service=https%3A%2F%2Fconnect.garmin.cn%2Fapp%2Fimport-data",
+            uploadUrl = "https://connect.garmin.cn/app/import-data",
+            allowedDomainSuffixes = setOf("garmin.cn"),
             origins = setOf(
-                "https://connect.garmin.com",
-                "https://sso.garmin.com",
-                "https://connectapi.garmin.com",
-                "https://www.garmin.com",
-                "https://accounts.garmin.com",
                 "https://connect.garmin.cn",
                 "https://sso.garmin.cn",
-                "https://connectapi.garmin.cn",
                 "https://www.garmin.cn",
             ),
         )
@@ -55,13 +48,11 @@ object PlatformWebConfigs {
         )
         Platform.IGPSPORT -> PlatformWebConfig(
             platform,
-            loginUrl = "https://login.passport.igpsport.com/login",
-            uploadUrl = "https://app.igpsport.com/sport/history/list",
-            // 含中国镜像 app.igpsport.cn：服务端会把中国 IP 从 .com 重定向到 .cn
-            allowedDomainSuffixes = setOf("igpsport.com", "igpsport.cn"),
+            loginUrl = "https://login.passport.igpsport.cn/login",
+            uploadUrl = "https://app.igpsport.cn/sport/history/list",
+            // 当前只接入中国站；后台 API 仍使用官方中国站后端 prod.zh.igpsport.com。
+            allowedDomainSuffixes = setOf("igpsport.cn"),
             origins = setOf(
-                "https://app.igpsport.com",
-                "https://login.passport.igpsport.com",
                 "https://app.igpsport.cn",
                 "https://login.passport.igpsport.cn",
             ),

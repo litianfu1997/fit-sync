@@ -14,6 +14,7 @@ import com.fitsync.app.security.SecureSessionStore
 import com.fitsync.app.sync.DeliveryPlanner
 import com.fitsync.app.sync.SyncCoordinator
 import com.fitsync.app.sync.SyncScheduler
+import com.fitsync.app.web.GarminUploadFilePreparer
 import com.fitsync.app.web.WebSessionManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +26,10 @@ class FitSyncApp : Application() {
     lateinit var database: FitSyncDatabase
         private set
     lateinit var fitFileStore: FitFileStore
+        private set
+    lateinit var fitEngine: FitEngine
+        private set
+    lateinit var garminUploadFilePreparer: GarminUploadFilePreparer
         private set
     lateinit var importService: ImportService
         private set
@@ -46,12 +51,14 @@ class FitSyncApp : Application() {
         instance = this
         database = FitSyncDatabase.getInstance(this)
         fitFileStore = FitFileStore(this)
+        fitEngine = FitEngine()
+        garminUploadFilePreparer = GarminUploadFilePreparer(this, fitEngine)
         val activityMutationGate = ActivityMutationGate()
         webSessionManager = WebSessionManager(SecureSessionStore(this)).also { it.prepareCookies() }
         importService = ImportService(
             db = database,
             fileStore = fitFileStore,
-            fitEngine = FitEngine(),
+            fitEngine = fitEngine,
             mutationGate = activityMutationGate,
         )
         connectorRegistry = ConnectorRegistry(

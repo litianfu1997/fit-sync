@@ -58,17 +58,7 @@ interface CanonicalActivityDao {
                activity.distanceMeters,
                activity.elevationGain,
                activity.avgHeartRate,
-               COALESCE(
-                   (
-                       SELECT imported_name.displayName
-                       FROM import_job AS imported_name
-                       WHERE imported_name.canonicalActivityId = activity.id
-                         AND imported_name.displayName IS NOT NULL
-                       ORDER BY imported_name.createdAtEpochMs DESC, imported_name.id DESC
-                       LIMIT 1
-                   ),
-                   activity.title
-               ) AS title,
+               activity.title,
                activity.activityFingerprint,
                activity.dedupStatus,
                activity.primaryVariantId,
@@ -186,11 +176,27 @@ interface DeliveryJobDao {
     @Query(
         """
         SELECT COUNT(*) FROM delivery_job
-        WHERE status = 'PENDING' OR status = 'UPLOADING' OR status = 'RETRY_WAIT'
-           OR status = 'WAITING_REMOTE_PROCESS' OR status = 'WAITING_USER'
+        WHERE status = 'PENDING' OR status = 'UPLOADING'
+           OR status = 'WAITING_REMOTE_PROCESS'
         """,
     )
     fun observePendingCount(): Flow<Int>
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM delivery_job
+        WHERE status = 'FAILED' OR status = 'RETRY_WAIT' OR status = 'WAITING_USER'
+        """,
+    )
+    fun observeProblemCount(): Flow<Int>
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM delivery_job
+        WHERE status = 'SUCCEEDED' OR status = 'DUPLICATE_REMOTE'
+        """,
+    )
+    fun observeCompletedCount(): Flow<Int>
 
     @Query("SELECT * FROM delivery_job WHERE status = 'WAITING_USER' ORDER BY createdAtEpochMs DESC")
     fun observeWaitingForUser(): Flow<List<DeliveryJobEntity>>
@@ -245,19 +251,30 @@ interface DeliveryJobDao {
     @Query(
         """
         UPDATE delivery_job
-        SET status = 'PENDING', executionMode = 'BACKGROUND', userActionUrl = NULL,
-            errorCode = NULL, errorMessage = NULL, nextRetryAtEpochMs = NULL,
-            updatedAtEpochMs = :now
+        SET status = 'PENDING', userActionUrl = NULL,
+            errorCode = NULL, errorMessage = NULL,
+            nextRetryAtEpochMs = NULL, updatedAtEpochMs = :now
         WHERE status = 'WAITING_USER'
           AND destinationAccountId IN (
-              SELECT id FROM platform_account
-              WHERE platform = :platform AND status = 'ACTIVE'
+              SELECT id FROM platform_account WHERE platform = :platform
           )
         """,
     )
-    suspend fun upgradeWaitingForegroundJobs(
+    suspend fun resumeJobsForForeground(
         platform: Platform,
         now: Long = System.currentTimeMillis(),
+    )
+
+    @Query(
+        """
+        UPDATE delivery_job
+        SET status = 'PENDING', updatedAtEpochMs = :now
+        WHERE status = 'UPLOADING' AND updatedAtEpochMs < :staleBefore
+        """,
+    )
+    suspend fun resetStaleUploading(
+        now: Long,
+        staleBefore: Long = now - 10L * 60 * 1000,
     )
 
     @Query("DELETE FROM delivery_job WHERE canonicalActivityId = :canonicalId")

@@ -5,11 +5,56 @@ import org.junit.Test
 
 class GarminConnectorTest {
     @Test
-    fun uploadUrl_usesConnectApiWithoutLegacyFileSuffix() {
+    fun gcApiRequest_usesChinaProxyHeaders() {
+        val request = buildGarminGcApiRequest(
+            url = "https://connect.garmin.cn/gc-api/activitylist-service/activities/search/activities?start=0&limit=1",
+            cookieHeader = "JWT_WEB=current",
+            csrf = "csrf-token",
+            userAgent = "FitSync-Test",
+            body = null,
+        )
+
+        assertThat(request.header("DI-Backend")).isEqualTo("connectapi.garmin.cn")
+        assertThat(request.header("Cookie")).isEqualTo("JWT_WEB=current")
+        assertThat(request.header("Connect-Csrf-Token")).isEqualTo("csrf-token")
+        assertThat(request.header("Origin")).isEqualTo("https://connect.garmin.cn")
+        assertThat(request.method).isEqualTo("GET")
+    }
+
+    @Test
+    fun apiCookie_prefersCurrentWebViewJwtAndFallsBackToStoredJwt() {
+        assertThat(
+            selectGarminApiCookie(
+                liveCookie = "locale=zh-CN; JWT_WEB=current",
+                storedCookie = "JWT_WEB=old",
+                storedJwt = "fallback",
+            ),
+        ).isEqualTo("locale=zh-CN; JWT_WEB=current")
+        assertThat(
+            selectGarminApiCookie(
+                liveCookie = "locale=zh-CN",
+                storedCookie = "tracking=1",
+                storedJwt = "fallback",
+            ),
+        ).isEqualTo("JWT_WEB=fallback")
+    }
+
+    @Test
+    fun loginResponse_onlyTreatsDefinitiveAuthFailuresAsExpired() {
+        assertThat(isGarminLoginResponse(401, null)).isTrue()
+        assertThat(isGarminLoginResponse(302, "https://sso.garmin.cn/sso/signin")).isTrue()
+        assertThat(isGarminLoginResponse(302, "/signin/")).isTrue()
+        assertThat(isGarminLoginResponse(403, null)).isFalse()
+        assertThat(isGarminLoginResponse(503, null)).isFalse()
+    }
+
+    @Test
+    fun uploadUrl_usesChinaGcApiProxy() {
+        // 中国站后台上传走 connect.garmin.cn 同源 gc-api 代理（实测稳定），不走 connectapi 直连。
         assertThat(garminUploadUrl("garmin.com"))
-            .isEqualTo("https://connectapi.garmin.com/upload-service/upload")
+            .isEqualTo("https://connect.garmin.cn/gc-api/upload-service/upload")
         assertThat(garminUploadUrl("garmin.cn"))
-            .isEqualTo("https://connectapi.garmin.cn/upload-service/upload")
+            .isEqualTo("https://connect.garmin.cn/gc-api/upload-service/upload")
     }
 
     @Test
@@ -48,6 +93,65 @@ class GarminConnectorTest {
         assertThat(state?.isFinal).isTrue()
         assertThat(state?.remoteActivityId).isEqualTo("42")
         assertThat(state?.duplicate).isTrue()
+    }
+
+    @Test
+    fun parseImportState_realDuplicateUsesIntegerCode202() {
+        // 真实 Garmin 重复上传返回 HTTP 409，messages[].code 是整数 202、content 含 "Duplicate"。
+        val state = parseGarminImportState(
+            """
+            {"detailedImportResult":{"uploadId":"","successes":[],"failures":[{"internalId":20242598711,"messages":[{"code":202,"content":"Duplicate Activity."}]}]}}
+            """.trimIndent(),
+        )
+
+        assertThat(state?.isFinal).isTrue()
+        assertThat(state?.remoteActivityId).isEqualTo("20242598711")
+        assertThat(state?.duplicate).isTrue()
+    }
+
+    @Test
+    fun parseImportState_realSuccessCarriesUploadId() {
+        val state = parseGarminImportState(
+            """
+            {"detailedImportResult":{"uploadId":212157427938,"uploadUuid":{"uuid":"abc"},"owner":2591602,"successes":[{"internalId":23626050000}],"failures":[]}}
+            """.trimIndent(),
+        )
+
+        assertThat(state?.isFinal).isTrue()
+        assertThat(state?.remoteActivityId).isEqualTo("23626050000")
+        assertThat(state?.duplicate).isFalse()
+        assertThat(state?.success).isTrue()
+        assertThat(state?.uploadId).isEqualTo(212157427938L)
+    }
+
+    @Test
+    fun parseImportState_nonDuplicateFailureIsFinalButNotSuccess() {
+        // 例如 EU consent 拒绝：failures 非 duplicate，是终态但既不算成功也不算重复。
+        val state = parseGarminImportState(
+            """
+            {"detailedImportResult":{"successes":[],"failures":[{"internalId":1,"messages":[{"code":403,"content":"The user is from EU location, but upload consent is not yet granted"}]}]}}
+            """.trimIndent(),
+        )
+
+        assertThat(state?.isFinal).isTrue()
+        assertThat(state?.success).isFalse()
+        assertThat(state?.duplicate).isFalse()
+    }
+
+    @Test
+    fun parseActivities_extractsIdNameSportDistanceAndStart() {
+        val activities = parseGarminActivities(
+            """[{"activityId":535949177,"activityName":"Paris 虚拟骑行","startTimeGMT":"2025-11-04 10:58:33","activityType":{"typeKey":"virtual_ride"},"distance":90760.74},{"activityId":123,"activityName":"晨跑","startTimeGMT":"2025-01-01 00:00:00","activityType":{"typeKey":"running"},"distance":5000}]""",
+        )
+
+        assertThat(activities).hasSize(2)
+        val first = activities[0]
+        assertThat(first.remoteActivityId).isEqualTo("535949177")
+        assertThat(first.name).isEqualTo("Paris 虚拟骑行")
+        assertThat(first.sportType).isEqualTo("virtual_ride")
+        assertThat(first.distanceMeters).isEqualTo(90760.74)
+        assertThat(first.startTimeEpochMs).isNotNull()
+        assertThat(first.startTimeEpochMs).isGreaterThan(1_700_000_000_000L) // 2023 年之后
     }
 
     @Test

@@ -8,10 +8,8 @@ import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SessionState
 import com.fitsync.app.domain.model.SportType
 import com.fitsync.app.web.PlatformWebConfigs
-import com.fitsync.app.web.GarminWebSession
 import com.fitsync.app.web.WebSessionManager
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -49,12 +47,15 @@ class ConnectorRegistry(
         .followRedirects(true)
         .build()
 
+    private val garminHttpClient = GarminConnectApiConnector.httpClient()
+
     private val connectors: Map<Platform, PlatformConnector> = listOf(
         OnelapConnector(db, fileStore, sessionManager, httpClient),
         XingzheConnector(db, fileStore, sessionManager, httpClient),
-        GarminConnector(db, fileStore, sessionManager, httpClient),
+        // Garmin 走 Connect API 后台直连上传；读取仍维持网页/分享路径。
+        GarminConnectApiConnector(db, fileStore, sessionManager, garminHttpClient),
+        IgpsportApiConnector(db, fileStore, sessionManager, httpClient),
         ForegroundWebConnector(Platform.COROS, sessionManager),
-        ForegroundWebConnector(Platform.IGPSPORT, sessionManager),
     ).associateBy { it.platform }
 
     fun get(platform: Platform): PlatformConnector? = connectors[platform]
@@ -399,183 +400,6 @@ private class XingzheConnector(
     }
 }
 
-private class GarminConnector(
-    db: FitSyncDatabase,
-    fileStore: FitFileStore,
-    sessionManager: WebSessionManager,
-    client: OkHttpClient,
-) : HttpPlatformConnector(db, fileStore, sessionManager, client) {
-    override val platform = Platform.GARMIN
-    private val config = PlatformWebConfigs.get(platform)
-
-    override suspend fun validateSession(): SessionState {
-        if (sessionManager.garminWebSession() == null) return SessionState.NOT_CONNECTED
-        return when (probeAuthenticatedSession()) {
-            is ConnectorResult.Success -> SessionState.AUTHENTICATED
-            is ConnectorResult.RequiresLogin -> SessionState.EXPIRED
-            else -> SessionState.NEEDS_USER_ACTION
-        }
-    }
-
-    override suspend fun detectCapabilities(): ConnectorCapabilities =
-        PlatformCapabilityRegistry.capabilities(platform)
-
-    override suspend fun listActivities(
-        sinceEpochMs: Long,
-        cursor: SyncCursor?,
-    ): ConnectorResult<ActivityPage> = ConnectorResult.RequiresUserAction(
-        config.loginUrl,
-        "Garmin Connect 需要在网页中导出 FIT",
-    )
-
-    override suspend fun downloadFit(activity: RemoteActivitySummary): ConnectorResult<FitFile> =
-        ConnectorResult.RequiresUserAction(
-            activity.downloadUrl ?: config.loginUrl,
-            "请在 Garmin Connect 下载 FIT 后分享到本应用",
-        )
-
-    override suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy> {
-        val pair = primaryFile(activity)
-            ?: return ConnectorResult.PermanentFailure("FILE_MISSING", "本地 FIT 文件不存在")
-        val session = sessionManager.garminWebSession()
-            ?: return ConnectorResult.RequiresLogin(config.loginUrl, "Garmin 自动同步登录态不可用，请重新登录并验证")
-        val file = pair.first
-        val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
-            .addFormDataPart("file", file.name, file.asRequestBody(FIT))
-            .build()
-
-        return try {
-            var response = execute(garminApiRequest(garminUploadUrl(session.domain), session).post(multipart).build())
-            // 部分地区仍要求 CSRF；先按现行 JWT_WEB 协议请求，403 时再携带当前页面 token 重试一次。
-            if (response.code == 403 && !session.csrf.isNullOrBlank()) {
-                response.close()
-                response = execute(
-                    garminApiRequest(garminUploadUrl(session.domain), session, session.csrf)
-                        .post(multipart)
-                        .build(),
-                )
-            }
-            response.use {
-                val body = response.body?.string().orEmpty()
-                parseFinalGarminResult(body, session.domain)?.let { return it }
-                when {
-                    response.code == 401 || response.code == 403 ->
-                        ConnectorResult.RequiresLogin(loginUrl(session.domain), "Garmin 自动同步授权已失效，请重新登录并验证")
-                    response.code == 408 || response.code == 429 || response.code >= 500 ->
-                        ConnectorResult.RetryableFailure(response.code.toString(), garminFailureMessage(body, response.code))
-                    response.code == 409 -> ConnectorResult.Duplicate()
-                    response.code !in setOf(200, 201, 202) ->
-                        ConnectorResult.PermanentFailure(response.code.toString(), garminFailureMessage(body, response.code))
-                    else -> {
-                        val statusUrl = garminStatusApiUrl(response.header("Location"), session.domain)
-                            ?: return ConnectorResult.RetryableFailure(
-                                "GARMIN_RESULT_PENDING",
-                                "Garmin 已接收 FIT，但尚未返回可验证的处理结果",
-                            )
-                        pollUploadStatus(
-                            session = session,
-                            statusUrl = statusUrl,
-                            initialDelayMs = response.header("Location-In-Milliseconds")
-                                ?.toLongOrNull()?.coerceIn(250L, 5_000L) ?: 1_000L,
-                        )
-                    }
-                }
-            }
-        } catch (t: Throwable) {
-            ConnectorResult.RetryableFailure(null, t.message ?: "Garmin 自动同步请求失败")
-        }
-    }
-
-    private suspend fun probeAuthenticatedSession(): ConnectorResult<Unit> {
-        val session = sessionManager.garminWebSession()
-            ?: return ConnectorResult.RequiresLogin(config.loginUrl, "请先登录 Garmin Connect")
-        return try {
-            val profileUrl = "${garminApiOrigin(session.domain)}/userprofile-service/socialProfile"
-            execute(garminApiRequest(profileUrl, session).get().build()).use { response ->
-                when {
-                    response.code == 401 || response.code == 403 ->
-                        ConnectorResult.RequiresLogin(loginUrl(session.domain), "Garmin 自动同步授权已失效")
-                    response.isSuccessful -> ConnectorResult.Success(Unit)
-                    response.code == 408 || response.code == 429 || response.code >= 500 ->
-                        ConnectorResult.RetryableFailure(response.code.toString(), "Garmin 登录校验暂时失败")
-                    else -> ConnectorResult.PermanentFailure(response.code.toString(), "Garmin 登录校验失败（HTTP ${response.code}）")
-                }
-            }
-        } catch (t: Throwable) {
-            ConnectorResult.RetryableFailure(null, t.message ?: "Garmin 登录校验失败")
-        }
-    }
-
-    private suspend fun pollUploadStatus(
-        session: GarminWebSession,
-        statusUrl: String,
-        initialDelayMs: Long,
-    ): ConnectorResult<RemoteCopy> {
-        var waitMs = initialDelayMs
-        repeat(GARMIN_STATUS_POLL_LIMIT) {
-            delay(waitMs)
-            execute(garminApiRequest(statusUrl, session).get().build()).use { response ->
-                val body = response.body?.string().orEmpty()
-                parseFinalGarminResult(body, session.domain)?.let { return it }
-                when {
-                    response.code == 401 || response.code == 403 ->
-                        return ConnectorResult.RequiresLogin(loginUrl(session.domain), "Garmin 自动同步授权已失效")
-                    response.code == 408 || response.code == 429 || response.code >= 500 ->
-                        return ConnectorResult.RetryableFailure(response.code.toString(), garminFailureMessage(body, response.code))
-                    response.code !in setOf(200, 201, 202) ->
-                        return ConnectorResult.PermanentFailure(response.code.toString(), garminFailureMessage(body, response.code))
-                }
-                waitMs = response.header("Location-In-Milliseconds")
-                    ?.toLongOrNull()?.coerceIn(250L, 5_000L) ?: 1_000L
-            }
-        }
-        return ConnectorResult.RetryableFailure("GARMIN_PROCESSING_TIMEOUT", "Garmin 已接收 FIT，但处理结果暂未完成")
-    }
-
-    private fun garminApiRequest(url: String, session: GarminWebSession, csrf: String? = null): Request.Builder {
-        val connectOrigin = "https://connect.${session.domain}"
-        return Request.Builder().url(url)
-            .header("User-Agent", GARMIN_USER_AGENT)
-            .header("Accept", "application/json")
-            .header("X-Lang", "zh-CN")
-            .header("NK", "NT")
-            .header("Origin", connectOrigin)
-            .header("Referer", "$connectOrigin/modern/")
-            .header("DI-Backend", "connectapi.${session.domain}")
-            .header("Cookie", "JWT_WEB=${session.jwtWeb}")
-            .apply { csrf?.let { header("connect-csrf-token", it) } }
-    }
-
-    private fun parseFinalGarminResult(body: String, domain: String): ConnectorResult<RemoteCopy>? {
-        val state = parseGarminImportState(body) ?: return null
-        if (!state.isFinal) return null
-        val copy = state.remoteActivityId?.let { id ->
-            RemoteCopy(
-                remoteActivityId = id,
-                remoteUrl = "https://connect.$domain/app/activity/$id",
-                duplicate = state.duplicate,
-            )
-        }
-        return when {
-            state.duplicate -> ConnectorResult.Duplicate(copy)
-            copy != null -> ConnectorResult.Success(copy)
-            else -> ConnectorResult.PermanentFailure(
-                "GARMIN_IMPORT_FAILED",
-                state.failureMessage ?: "Garmin 未能导入该 FIT 文件",
-            )
-        }
-    }
-
-    private fun garminFailureMessage(body: String, statusCode: Int): String =
-        parseGarminImportState(body)?.failureMessage
-            ?: "Garmin 自动导入失败（HTTP $statusCode）"
-
-    private fun loginUrl(domain: String): String {
-        val connectOrigin = "https://connect.$domain"
-        return "$connectOrigin/signin/?service=${java.net.URLEncoder.encode("$connectOrigin/app", Charsets.UTF_8.name())}"
-    }
-}
-
 private class ForegroundWebConnector(
     override val platform: Platform,
     private val sessionManager: WebSessionManager,
@@ -721,87 +545,8 @@ internal object JsonPlatformParser {
     }
 }
 
-internal data class GarminImportState(
-    val isFinal: Boolean,
-    val remoteActivityId: String? = null,
-    val duplicate: Boolean = false,
-    val failureMessage: String? = null,
-)
-
-internal fun garminApiOrigin(domain: String): String = when (domain) {
-    "garmin.com", "garmin.cn" -> "https://connectapi.$domain"
-    else -> error("不支持的 Garmin 域名")
-}
-
-internal fun garminUploadUrl(domain: String): String = "${garminApiOrigin(domain)}/upload-service/upload"
-
-internal fun parseGarminImportState(raw: String): GarminImportState? = runCatching {
-    val root = JSONObject(raw)
-    val detail = root.optJSONObject("detailedImportResult") ?: return@runCatching null
-    val successes = detail.optJSONArray("successes") ?: JSONArray()
-    val failures = detail.optJSONArray("failures") ?: JSONArray()
-    if (successes.length() > 0) {
-        return@runCatching GarminImportState(
-            isFinal = true,
-            remoteActivityId = garminInternalId(successes),
-        )
-    }
-    if (failures.length() > 0) {
-        val message = failures.toString()
-        val normalized = message.lowercase(Locale.ROOT)
-        return@runCatching GarminImportState(
-            isFinal = true,
-            remoteActivityId = garminInternalId(failures),
-            duplicate = normalized.contains("duplicate") ||
-                normalized.contains("already exists") ||
-                message.contains("重复") || message.contains("已存在"),
-            failureMessage = message,
-        )
-    }
-    GarminImportState(isFinal = false)
-}.getOrNull()
-
-internal fun garminStatusApiUrl(
-    location: String?,
-    domain: String = "garmin.com",
-): String? {
-    val apiOrigin = garminApiOrigin(domain)
-    val url = when {
-        location.isNullOrBlank() -> return null
-        location.startsWith('/') -> "$apiOrigin$location".toHttpUrlOrNull()
-        else -> location.toHttpUrlOrNull()
-    } ?: return null
-    if (!url.isHttps) return null
-    val expectedApiHost = "connectapi.$domain"
-    val expectedWebHost = "connect.$domain"
-    val path = when {
-        url.host == expectedApiHost && url.encodedPath.startsWith("/gc-api/") ->
-            url.encodedPath.removePrefix("/gc-api")
-        url.host == expectedApiHost -> url.encodedPath
-        url.host == expectedWebHost && url.encodedPath.startsWith("/gc-api/") ->
-            url.encodedPath.removePrefix("/gc-api")
-        else -> return null
-    }
-    return buildString {
-        append(apiOrigin)
-        append(path)
-        url.encodedQuery?.let { append('?').append(it) }
-    }
-}
-
-private fun garminInternalId(items: JSONArray): String? {
-    for (index in 0 until items.length()) {
-        val value = items.optJSONObject(index)?.opt("internalId") ?: continue
-        if (value != JSONObject.NULL && value.toString().isNotBlank()) return value.toString()
-    }
-    return null
-}
-
 private val JSON = "application/json; charset=utf-8".toMediaType()
 private val FIT = "application/vnd.ant.fit".toMediaType()
-private const val GARMIN_STATUS_POLL_LIMIT = 10
-private const val GARMIN_USER_AGENT =
-    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36 FitSync/1.0"
 
 private fun dayString(epochMs: Long): String = SimpleDateFormat("yyyy-MM-dd", Locale.US).run {
     timeZone = TimeZone.getDefault()

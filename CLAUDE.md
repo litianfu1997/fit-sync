@@ -77,7 +77,7 @@ export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"   # 或对应的 SDK 路径
 `PlatformConnector` 接口 + `ConnectorResult<T>` sealed 类型驱动一切平台交互。**所有平台调用都返回 ConnectorResult，绝不要直接抛业务异常**——上层 `SyncCoordinator` 按分支决定状态机转移。
 
 - `HttpPlatformConnector` 基类（Onelap/Xingzhe）：OkHttp + `WebSessionManager.applyTo()` 注入 Cookie/Token；401/403 降级、429/5xx 可重试、其他永久失败的映射在 `failure()` 里。
-- `ForegroundWebConnector`（Garmin/COROS/iGPSPORT）：所有方法返回 `RequiresUserAction`，由 SyncCoordinator 转 `WAITING_USER` 任务 + 通知，引导用户去网页完成。
+- `ForegroundWebConnector`（COROS）：所有方法返回 `RequiresUserAction`，由 SyncCoordinator 转 `WAITING_USER` 任务 + 通知，引导用户去网页完成。Garmin（WebView 抓 JWT_WEB/CSRF）与 iGPSPORT（纯 API 账号密码登录，token 过期自动重登）已后台化，见 `GarminConnectApiConnector` / `IgpsportApiConnector`。
 - 能力矩阵在 `PlatformCapabilityRegistry`：**读取能力 ≠ 写入能力**，不要因为能列出活动就假定能上传。运行时可在校验后降级。
 
 ### 安全模型
