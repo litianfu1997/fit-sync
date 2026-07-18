@@ -54,8 +54,8 @@ class ConnectorRegistry(
         XingzheConnector(db, fileStore, sessionManager, httpClient),
         // Garmin 走 Connect API 后台直连上传；读取仍维持网页/分享路径。
         GarminConnectApiConnector(db, fileStore, sessionManager, garminHttpClient),
+        IgpsportApiConnector(db, fileStore, sessionManager, httpClient),
         ForegroundWebConnector(Platform.COROS, sessionManager),
-        ForegroundWebConnector(Platform.IGPSPORT, sessionManager),
     ).associateBy { it.platform }
 
     fun get(platform: Platform): PlatformConnector? = connectors[platform]

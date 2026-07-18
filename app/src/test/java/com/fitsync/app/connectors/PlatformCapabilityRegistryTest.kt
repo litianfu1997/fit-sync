@@ -27,12 +27,21 @@ class PlatformCapabilityRegistryTest {
     }
 
     @Test
-    fun corosAndIgpsport_doNotClaimUnverifiedBackgroundAccess() {
-        listOf(Platform.COROS, Platform.IGPSPORT).forEach { platform ->
-            val capabilities = PlatformCapabilityRegistry.capabilities(platform)
-            assertThat(capabilities.listActivitiesMode).isNotEqualTo(ConnectorExecution.BACKGROUND)
-            assertThat(capabilities.uploadFitMode).isNotEqualTo(ConnectorExecution.BACKGROUND)
-        }
+    fun igpsport_supportsExperimentalBackgroundReadAndWrite() {
+        val capabilities = PlatformCapabilityRegistry.capabilities(Platform.IGPSPORT)
+
+        assertThat(capabilities.listActivitiesMode).isEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.downloadFitMode).isEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.uploadFitMode).isEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.experimental).isTrue()
+    }
+
+    @Test
+    fun coros_doesNotClaimUnverifiedBackgroundAccess() {
+        val capabilities = PlatformCapabilityRegistry.capabilities(Platform.COROS)
+
+        assertThat(capabilities.listActivitiesMode).isNotEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.uploadFitMode).isNotEqualTo(ConnectorExecution.BACKGROUND)
     }
 
     @Test

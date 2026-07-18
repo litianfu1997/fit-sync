@@ -48,13 +48,11 @@ object PlatformWebConfigs {
         )
         Platform.IGPSPORT -> PlatformWebConfig(
             platform,
-            loginUrl = "https://login.passport.igpsport.com/login",
-            uploadUrl = "https://app.igpsport.com/sport/history/list",
-            // 含中国镜像 app.igpsport.cn：服务端会把中国 IP 从 .com 重定向到 .cn
-            allowedDomainSuffixes = setOf("igpsport.com", "igpsport.cn"),
+            loginUrl = "https://login.passport.igpsport.cn/login",
+            uploadUrl = "https://app.igpsport.cn/sport/history/list",
+            // 当前只接入中国站；后台 API 仍使用官方中国站后端 prod.zh.igpsport.com。
+            allowedDomainSuffixes = setOf("igpsport.cn"),
             origins = setOf(
-                "https://app.igpsport.com",
-                "https://login.passport.igpsport.com",
                 "https://app.igpsport.cn",
                 "https://login.passport.igpsport.cn",
             ),

@@ -82,6 +82,7 @@ fun PlatformsScreen() {
     val scope = rememberCoroutineScope()
     var busyPlatform by remember { mutableStateOf<Platform?>(null) }
     var pendingDisconnect by remember { mutableStateOf<Platform?>(null) }
+    var igpsportLogin by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val dateFormat = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
     val knownPlatforms = PlatformCapabilityRegistry.allKnownPlatforms()
@@ -190,7 +191,11 @@ fun PlatformsScreen() {
                         ) {
                             Button(
                                 onClick = {
-                                    context.startActivity(PlatformWebActivity.createIntent(context, platform))
+                                    if (platform == Platform.IGPSPORT) {
+                                        igpsportLogin = true
+                                    } else {
+                                        context.startActivity(PlatformWebActivity.createIntent(context, platform))
+                                    }
                                 },
                                 modifier = Modifier.weight(1f),
                                 enabled = !isBusy,
@@ -270,6 +275,22 @@ fun PlatformsScreen() {
                 ) { Text("确认断开") }
             },
             dismissButton = { TextButton(onClick = { pendingDisconnect = null }) { Text("取消") } },
+        )
+    }
+
+    if (igpsportLogin) {
+        IgpsportLoginDialog(
+            platform = Platform.IGPSPORT,
+            onDismiss = { igpsportLogin = false },
+            onSubmit = { u, p ->
+                app.platformAccountRepository.loginWithCredentials(Platform.IGPSPORT, u, p)
+            },
+            onResult = {
+                igpsportLogin = false
+                scope.launch {
+                    snackbarHostState.showSnackbar("iGPSPORT 登录成功")
+                }
+            },
         )
     }
 }

@@ -5,6 +5,50 @@ import org.junit.Test
 
 class GarminConnectorTest {
     @Test
+    fun gcApiRequest_usesChinaProxyHeaders() {
+        val request = buildGarminGcApiRequest(
+            url = "https://connect.garmin.cn/gc-api/activitylist-service/activities/search/activities?start=0&limit=1",
+            cookieHeader = "JWT_WEB=current",
+            csrf = "csrf-token",
+            userAgent = "FitSync-Test",
+            body = null,
+        )
+
+        assertThat(request.header("DI-Backend")).isEqualTo("connectapi.garmin.cn")
+        assertThat(request.header("Cookie")).isEqualTo("JWT_WEB=current")
+        assertThat(request.header("Connect-Csrf-Token")).isEqualTo("csrf-token")
+        assertThat(request.header("Origin")).isEqualTo("https://connect.garmin.cn")
+        assertThat(request.method).isEqualTo("GET")
+    }
+
+    @Test
+    fun apiCookie_prefersCurrentWebViewJwtAndFallsBackToStoredJwt() {
+        assertThat(
+            selectGarminApiCookie(
+                liveCookie = "locale=zh-CN; JWT_WEB=current",
+                storedCookie = "JWT_WEB=old",
+                storedJwt = "fallback",
+            ),
+        ).isEqualTo("locale=zh-CN; JWT_WEB=current")
+        assertThat(
+            selectGarminApiCookie(
+                liveCookie = "locale=zh-CN",
+                storedCookie = "tracking=1",
+                storedJwt = "fallback",
+            ),
+        ).isEqualTo("JWT_WEB=fallback")
+    }
+
+    @Test
+    fun loginResponse_onlyTreatsDefinitiveAuthFailuresAsExpired() {
+        assertThat(isGarminLoginResponse(401, null)).isTrue()
+        assertThat(isGarminLoginResponse(302, "https://sso.garmin.cn/sso/signin")).isTrue()
+        assertThat(isGarminLoginResponse(302, "/signin/")).isTrue()
+        assertThat(isGarminLoginResponse(403, null)).isFalse()
+        assertThat(isGarminLoginResponse(503, null)).isFalse()
+    }
+
+    @Test
     fun uploadUrl_usesChinaGcApiProxy() {
         // 中国站后台上传走 connect.garmin.cn 同源 gc-api 代理（实测稳定），不走 connectapi 直连。
         assertThat(garminUploadUrl("garmin.com"))

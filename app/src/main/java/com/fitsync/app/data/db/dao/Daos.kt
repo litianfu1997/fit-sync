@@ -58,17 +58,7 @@ interface CanonicalActivityDao {
                activity.distanceMeters,
                activity.elevationGain,
                activity.avgHeartRate,
-               COALESCE(
-                   (
-                       SELECT imported_name.displayName
-                       FROM import_job AS imported_name
-                       WHERE imported_name.canonicalActivityId = activity.id
-                         AND imported_name.displayName IS NOT NULL
-                       ORDER BY imported_name.createdAtEpochMs DESC, imported_name.id DESC
-                       LIMIT 1
-                   ),
-                   activity.title
-               ) AS title,
+               activity.title,
                activity.activityFingerprint,
                activity.dedupStatus,
                activity.primaryVariantId,

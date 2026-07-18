@@ -28,10 +28,23 @@ class PlatformWebConfigsTest {
         assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "sso.garmin.cn")).isTrue()
         assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "connect.garmin.com")).isFalse()
         assertThat(PlatformWebConfigs.isAllowed(Platform.GARMIN, "sso.garmin.com")).isFalse()
-        assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "login.passport.igpsport.com")).isTrue()
         assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "app.igpsport.cn")).isTrue()
         assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "login.passport.igpsport.cn")).isTrue()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "app.igpsport.com")).isFalse()
+        assertThat(PlatformWebConfigs.isAllowed(Platform.IGPSPORT, "login.passport.igpsport.com")).isFalse()
         assertThat(PlatformWebConfigs.isAllowed(Platform.XINGZHE, "www.imxingzhe.com")).isTrue()
+    }
+
+    @Test
+    fun igpsportWebEntries_useChinaSiteOnly() {
+        val config = PlatformWebConfigs.get(Platform.IGPSPORT)
+
+        assertThat(config.loginUrl).startsWith("https://login.passport.igpsport.cn/")
+        assertThat(config.uploadUrl).startsWith("https://app.igpsport.cn/")
+        assertThat(config.origins).containsExactly(
+            "https://app.igpsport.cn",
+            "https://login.passport.igpsport.cn",
+        )
     }
 
     @Test

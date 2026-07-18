@@ -6,6 +6,7 @@ import com.fitsync.app.data.db.entity.ActivityVariantEntity
 import com.fitsync.app.data.db.entity.AppSettingsEntity
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
 import com.fitsync.app.data.db.entity.ImportJobEntity
+import com.fitsync.app.data.file.FitFileNaming
 import com.fitsync.app.data.file.FitFileStore
 import com.fitsync.app.domain.dedup.ActivityFingerprint
 import com.fitsync.app.domain.dedup.DedupDecision
@@ -37,8 +38,9 @@ class ImportService(
         sourcePlatform: Platform? = null,
         collectorType: CollectorType = CollectorType.SHARE,
         remoteActivityId: String? = null,
+        preferredTitle: String? = null,
     ): ImportOutcome = mutationGate.withLock {
-        importFromUriLocked(uri, displayName, sourcePlatform, collectorType, remoteActivityId)
+        importFromUriLocked(uri, displayName, sourcePlatform, collectorType, remoteActivityId, preferredTitle)
     }
 
     private suspend fun importFromUriLocked(
@@ -47,6 +49,7 @@ class ImportService(
         sourcePlatform: Platform? = null,
         collectorType: CollectorType = CollectorType.SHARE,
         remoteActivityId: String? = null,
+        preferredTitle: String? = null,
     ): ImportOutcome {
         val importDao = db.importJobDao()
         val jobId = importDao.insert(
@@ -146,7 +149,8 @@ class ImportService(
                             distanceMeters = parsed.distanceMeters,
                             elevationGain = parsed.elevationGain,
                             avgHeartRate = parsed.avgHeartRate,
-                            title = displayName?.substringBeforeLast('.'),
+                            title = preferredTitle?.takeIf { it.isNotBlank() }
+                                ?: FitFileNaming.displayTitle(start, resolvedSportType),
                             activityFingerprint = ActivityFingerprint.compute(parsed),
                             dedupStatus = DedupStatus.UNIQUE,
                         ),
@@ -155,10 +159,12 @@ class ImportService(
                 DedupDecision.Action.AUTO_MERGE -> {
                     val id = decision.matchedCanonicalId!!
                     val existing = db.canonicalActivityDao().getById(id)!!
+                    val merged = existing.withMissingMetricsFrom(parsed).copy(
+                        dedupStatus = DedupStatus.AUTO_MERGED,
+                    )
+                    // 合并后强制使用「日期 时段 活动类型」中性标题，不偏袒任一来源平台。
                     db.canonicalActivityDao().update(
-                        existing.withMissingMetricsFrom(parsed).copy(
-                            dedupStatus = DedupStatus.AUTO_MERGED,
-                        ),
+                        merged.copy(title = FitFileNaming.displayTitle(merged.startTimeEpochMs, merged.sportType)),
                     )
                     id
                 }
@@ -174,7 +180,8 @@ class ImportService(
                             distanceMeters = parsed.distanceMeters,
                             elevationGain = parsed.elevationGain,
                             avgHeartRate = parsed.avgHeartRate,
-                            title = displayName?.substringBeforeLast('.'),
+                            title = preferredTitle?.takeIf { it.isNotBlank() }
+                                ?: FitFileNaming.displayTitle(start, resolvedSportType),
                             activityFingerprint = ActivityFingerprint.compute(parsed),
                             dedupStatus = DedupStatus.NEEDS_REVIEW,
                         ),
@@ -252,12 +259,14 @@ class ImportService(
         sourcePlatform: Platform,
         collectorType: CollectorType = CollectorType.CLOUD,
         remoteActivityId: String? = null,
+        preferredTitle: String? = null,
     ): ImportOutcome = importFromUri(
         uri = Uri.fromFile(file),
         displayName = displayName,
         sourcePlatform = sourcePlatform,
         collectorType = collectorType,
         remoteActivityId = remoteActivityId,
+        preferredTitle = preferredTitle,
     )
 
     suspend fun reparseStoredActivitiesIfNeeded() = mutationGate.withLock {
@@ -268,6 +277,14 @@ class ImportService(
         val settingsDao = db.appSettingsDao()
         val settings = settingsDao.get() ?: AppSettingsEntity()
         if (settings.fitParserVersion >= CURRENT_PARSER_VERSION) return
+
+        // 标题一次性回填：仅针对 v2 及更早的历史数据（fitParserVersion < TITLE_BACKFILL_GATE）。
+        // 与解析器版本升级解耦——未来 FitEngine 改动递增 CURRENT_PARSER_VERSION 时不会重复触发，
+        // 避免把此后导入活动已捕获的平台原名(preferredTitle)再次抹成中性 displayTitle 而造成不可逆丢失。
+        // 用 canonical 持久的 startTime/sport 回填，不依赖 FIT 文件是否存在，保证所有历史活动都被覆盖。
+        if (settings.fitParserVersion < TITLE_BACKFILL_GATE) {
+            backfillDisplayTitlesLocked()
+        }
 
         db.canonicalActivityDao().getAll().forEach { canonical ->
             val reparsed = db.activityVariantDao().findByCanonical(canonical.id).mapNotNull { variant ->
@@ -295,10 +312,12 @@ class ImportService(
             }
             val preferred = reparsed.maxByOrNull { it.result.qualityScore } ?: return@forEach
             val parsed = preferred.result
+            val finalSportType = parsed.sportType.takeUnless { it == SportType.UNKNOWN } ?: canonical.sportType
+            val finalStartTime = parsed.startTimeEpochMs ?: canonical.startTimeEpochMs
             db.canonicalActivityDao().update(
                 canonical.copy(
-                    sportType = parsed.sportType.takeUnless { it == SportType.UNKNOWN } ?: canonical.sportType,
-                    startTimeEpochMs = parsed.startTimeEpochMs ?: canonical.startTimeEpochMs,
+                    sportType = finalSportType,
+                    startTimeEpochMs = finalStartTime,
                     endTimeEpochMs = parsed.endTimeEpochMs ?: canonical.endTimeEpochMs,
                     elapsedSeconds = parsed.elapsedSeconds ?: canonical.elapsedSeconds,
                     movingSeconds = parsed.movingSeconds ?: canonical.movingSeconds,
@@ -316,6 +335,21 @@ class ImportService(
         }
 
         settingsDao.upsert(settings.copy(fitParserVersion = CURRENT_PARSER_VERSION))
+    }
+
+    /**
+     * 一次性把所有 canonical 的标题回填为「日期 时段 活动类型」。
+     * 仅依赖 canonical 持久的 startTimeEpochMs/sportType（导入时必然写入），不读取 FIT 文件，
+     * 因此即便某活动的 FIT 缺失/损坏也能回填，避免历史标题与 displayTitle 格式不一致或列表空白。
+     */
+    private suspend fun backfillDisplayTitlesLocked() {
+        db.canonicalActivityDao().getAll().forEach { canonical ->
+            db.canonicalActivityDao().update(
+                canonical.copy(
+                    title = FitFileNaming.displayTitle(canonical.startTimeEpochMs, canonical.sportType),
+                ),
+            )
+        }
     }
 
     private fun encodeTrack(points: List<LatLng>): String {
@@ -353,7 +387,13 @@ class ImportService(
     private data class ReparsedVariant(val variantId: Long, val result: FitParseResult)
 
     private companion object {
-        const val CURRENT_PARSER_VERSION = 2
+        const val CURRENT_PARSER_VERSION = 3
+
+        // 标题回填闸门：仅对 fitParserVersion < 此值的历史数据回填 displayTitle。
+        // 固定为本次命名重构引入时的 CURRENT_PARSER_VERSION(=3)，实现「v2→v3 一次性回填」语义；
+        // 未来解析器版本继续递增(3→4→…)时，settings.fitParserVersion 已 ≥ 3，不再重复回填，
+        // 从而保护此后新导入活动捕获的平台原名(preferredTitle)不被覆盖。
+        const val TITLE_BACKFILL_GATE = 3
     }
 }
 

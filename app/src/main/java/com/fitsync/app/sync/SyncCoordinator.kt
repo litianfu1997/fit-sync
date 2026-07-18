@@ -444,6 +444,7 @@ class SyncCoordinator(
                     sourcePlatform = platform,
                     collectorType = CollectorType.CLOUD,
                     remoteActivityId = remote.remoteActivityId,
+                    preferredTitle = remote.name,
                 )
                 val ids = when (outcome) {
                     is ImportOutcome.Success -> outcome.canonicalActivityId to outcome.variantId

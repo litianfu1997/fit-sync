@@ -86,7 +86,7 @@ class WebSessionManager(
      *
      * - [jwtWeb]：登录后 connect.garmin.cn 的 JWT_WEB Cookie 值，后台 OkHttp 直连
      *   connectapi.garmin.cn 时作为会话凭据。
-     * - [csrf]：预留的写操作 CSRF token（当前上传用 NK:NT 常量 sentinel，未启用此字段；保留以备 Garmin 改版时补抓）。
+     * - [csrf]：中国站写操作使用的 `Connect-Csrf-Token`；`NK: NT` 是额外代理头，不能替代它。
      * - [domain]：登录域归属 garmin.cn / garmin.com（决定 connectapi 后缀）。
      * - [userAgent]：复用 WebView 登录时的 UA，避免被网关按移动端拦截。
      */
@@ -116,6 +116,31 @@ class WebSessionManager(
         secureStore.get(key(Platform.GARMIN, "domain"))?.takeIf { it.isNotBlank() } ?: "garmin.cn"
     fun garminUserAgent(): String? = secureStore.get(key(Platform.GARMIN, "user_agent"))
 
+    /**
+     * 持久化 iGPSPORT 中国站后台登录凭据（Keystore 加密）。
+     *
+     * iGPSPORT 走纯 API 账号密码登录（不走 WebView），JWT token 7 天过期且无刷新接口，
+     * 故除 token 外还需保存账号密码，以便过期时后台自动重新登录（[com.fitsync.app.connectors.IgpsportApiConnector] 的 withRelogin）。
+     * - [token]：access_token，存通用 key `IGPSPORT:token`，[applyTo] 会自动注入 `Authorization: Bearer`。
+     * - [memberId]：JWT 里的 memberid，存通用 key `IGPSPORT:uid`（对应 [externalUserId]）。
+     * - [username]/[password]：仅用于 token 过期后静默重登，不再用于其它用途。
+     */
+    fun saveIgpsportSession(
+        token: String?,
+        memberId: String?,
+        username: String?,
+        password: String?,
+    ) {
+        secureStore.put(key(Platform.IGPSPORT, "token"), token)
+        secureStore.put(key(Platform.IGPSPORT, "uid"), memberId)
+        secureStore.put(key(Platform.IGPSPORT, "username"), username)
+        secureStore.put(key(Platform.IGPSPORT, "password"), password)
+    }
+
+    fun igpsportUsername(): String? = secureStore.get(key(Platform.IGPSPORT, "username"))
+    fun igpsportPassword(): String? = secureStore.get(key(Platform.IGPSPORT, "password"))
+    fun igpsportMemberId(): String? = secureStore.get(key(Platform.IGPSPORT, "uid"))
+
     fun clear(platform: Platform) {
         val config = PlatformWebConfigs.get(platform)
         cookieProbeUrls(platform).forEach { origin ->
@@ -130,7 +155,7 @@ class WebSessionManager(
         }
         lastWebViewUrls.remove(platform)
         cookies.flush()
-        listOf("token", "refresh_token", "uid", "csrf", "jwt_web", "cookie", "domain", "user_agent").forEach {
+        listOf("token", "refresh_token", "uid", "csrf", "jwt_web", "cookie", "domain", "user_agent", "username", "password").forEach {
             secureStore.remove(key(platform, it))
         }
     }
