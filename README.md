@@ -7,9 +7,9 @@
 ## 核心能力
 
 1. 通过系统分享或登录平台网页收集 FIT  
-2. 保存 WebView 登录 Cookie；需要持久化的平台令牌使用 Android Keystore 加密
-3. 迈金、行者支持后台活动发现、原始 FIT 下载和上传  
-4. Garmin 仅支持中国站并作为同步目标，使用桌面版 Connect 网页导入；应用会先校验/解压真实 FIT，再向网页文件选择器提供临时文件，并核对网页结果后才完成任务，不再调用会返回 403 的私有后台接口
+2. 保存 WebView 登录 Cookie；需要持久化的平台令牌与账号密码使用 Android Keystore 加密
+3. 迈金、行者、Garmin 中国站、iGPSPORT、COROS 均支持后台活动发现、原始 FIT 下载与上传；其中行者/Garmin/iGPSPORT/COROS 依赖逆向接口，标记为实验性，可能随平台调整失效  
+4. 各平台按其网页端实际机制适配认证：迈金/行者复用 WebView Cookie 与令牌；Garmin 中国站抓取 JWT_WEB + Connect-Csrf-Token 走同源 `gc-api` 代理；iGPSPORT/COROS 走账号密码 API 登录，访问令牌失效时用加密凭据自动重登
 5. 本地四级去重，PlatformCopy + 幂等任务阻止重复与循环同步  
 6. 配置“来源平台 → 多个目标平台”规则，并支持单次补发  
 
@@ -52,7 +52,7 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 ## 使用
 
 1. 安装 Debug APK  
-2. 在“平台”页面打开网页并完成登录，点击“验证并保存登录”  
+2. 在“平台”页面登录账号：迈金/行者/Garmin 在内置 WebView 完成登录后点“验证并保存登录”；iGPSPORT/COROS 直接填写账号密码（Keystore 加密保存）  
 3. 在“规则”页面选择来源和目标；启用规则即授权自动上传  
 4. 点击首页“立即同步”，或等待系统后台增量同步  
 5. 仍可从任意平台将 FIT 分享到本应用，作为“本地导入”来源  
