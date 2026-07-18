@@ -7,7 +7,7 @@
 | 迈金 ONELAP | 已实现 | 已实现 | 登录有效时后台；令牌失效先刷新，失败后要求重新登录 |
 | 行者 | 已实现：`/api/v1/pgworkout/`、`/api/v1/workout/{id}/fit/` | 已实现：`/api/v1/fit/upload/` | Cookie 后台请求优先，网页上传兜底 |
 | Garmin Connect 中国站 | 已实现：`gc-api/activitylist-service` | 已实现：`gc-api/download-service/files/activity/{id}/fit`、`gc-api/upload-service/upload` | 登录有效时后台双向同步；JWT_WEB/CSRF 失效要求重新登录（实验性） |
-| COROS 高驰 | 网页/邮件导出 | 网页导入 | 前台网页或手动确认 |
+| COROS 高驰 | 已实现：`activity/query` + `activity/detail/download` | 已实现：OSS 直传 + `activity/fit/import` | 账号密码 API 登录，后台 list→download→upload（实验性，仅中国站） |
 | iGPSPORT | 已实现：`web-analyze/activity/queryMyActivity` + OSS 公共读直链 | 已实现：OSS 直传 + `uploadByOss` | 账号密码 API 登录，后台 list→download→upload（实验性） |
 
 ## 运行时能力
@@ -46,3 +46,15 @@
   - 上传：`getSignedUrl?fileExtension=.fit` 拿 OSS 直传地址 → `PUT` FIT 字节到签名 URL（匿名且不附带 `Content-Type`，与中国站网页端保持一致）→ `POST uploadByOss {fileName, ossName:ossId}` 创建活动（异步解析，响应 data 多为 null，用 ossId 作临时 remoteActivityId，下次 list 按 sha256 对齐）。
 - 失效处理：仅中国站业务 API 的 401/403 触发账号密码静默重登；OSS 直传失败按投递失败重试，不会把账号误标为 `AUTH_EXPIRED`。
 - 实验性：依赖逆向的私有接口，可能随 iGPSPORT 调整而失效。
+
+## COROS 同步说明
+
+- 范围：仅支持 COROS 中国站（后端 `teamcnapi.coros.com`，区域 regionId=2）。非中国站账号登录会被拒绝。
+- 网页入口：`https://t.coros.com/admin/views/activities`，活动列表页同时提供“导入数据”和“导出数据”；平台页在账号有效时的“打开平台”会直接进入这里。
+- 认证：**纯 API 账号密码登录**（不走 WebView）。`POST /account/login` body `{account, accountType:2, pwd:MD5(明文)}` 返回 `accessToken + userId + regionId`。accessToken **无刷新接口**，且网页端登录会顶掉 API token，故登录时一并把账号密码（Keystore 加密）持久化，token 失效时用持久化账号密码自动重登（`CorosApiConnector.withRelogin`）。后续业务请求带小写 `accesstoken` 头（**非** Authorization Bearer）。
+- 执行方式：list/download/upload 均为 `BACKGROUND`：
+  - 列表：`GET /activity/query?size=&pageNumber=`（活动 ID = `labelId`，分页看 `totalPage`，客户端按增量窗口过滤；`sportType` 写入 metadata 供下载用）。
+  - 下载：`POST /activity/detail/download?labelId=&sportType=&fileType=4`（fileType=4=FIT）拿 `data.fileUrl`，再匿名 GET（阿里云 OSS 直链 `coros-oss.oss-cn-beijing.aliyuncs.com`）。
+  - 上传：① `GET faq.coros.com/openapi/oss/sts`（固定 sign/app_id）拿 STS 临时凭证——盐串污染的 base64 解码 ② FIT 打 zip ③ 用 STS 凭证按阿里云 OSS **V1 签名（HMAC-SHA1）** PUT 到 `coros-oss/fit_zip/{userId}/{md5}.zip` ④ `POST /activity/fit/import`（multipart 字段 `jsonParameter`，`serviceName="oss"`，`md5`=原始 FIT 的、`size`=zip 的）。import 异步，用 fitMd5 作临时 remoteActivityId，下次 list 按 sha256 对齐。
+- 失效处理：业务 401 触发账号密码静默重登；OSS/STS 失败按可重试失败处理，不把账号误标 `AUTH_EXPIRED`（STS 失效重拿即可）。
+- 实验性：依赖逆向的私有接口与硬编码常量（sign/app_id/盐），可能随 COROS 调整失效；失效时降级为失败任务并提示，不会静默丢任务。中国站访问不要走 VPN/代理。

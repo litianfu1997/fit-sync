@@ -52,9 +52,13 @@ object PlatformCapabilityRegistry {
         )
         Platform.COROS -> ConnectorCapabilities(
             shareImportSupported = true,
-            listActivitiesMode = ConnectorExecution.FOREGROUND_WEB,
-            downloadFitMode = ConnectorExecution.MANUAL,
-            uploadFitMode = ConnectorExecution.FOREGROUND_WEB,
+            // 纯 API 账号密码后台登录（不走 WebView，仅中国站）：后台 list→download→upload(STS+OSS V1 PUT+import)。
+            listActivitiesMode = ConnectorExecution.BACKGROUND,
+            downloadFitMode = ConnectorExecution.BACKGROUND,
+            uploadFitMode = ConnectorExecution.BACKGROUND,
+            supportsIncrementalCursor = true,
+            supportsBulkHistory = true,
+            experimental = true,
         )
         Platform.UNKNOWN -> ConnectorCapabilities(
             shareImportSupported = true,

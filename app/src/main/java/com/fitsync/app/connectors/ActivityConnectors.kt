@@ -61,6 +61,15 @@ interface PlatformConnector {
     suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy>
 }
 
+/**
+ * 走纯 API 账号密码登录（不走 WebView）的 connector（如 iGPSPORT、COROS 中国站）。
+ * 登录成功后由 connector 自行把凭据持久化到 WebSessionManager（Keystore 加密），
+ * token 失效时用持久化的账号密码静默重登。
+ */
+internal interface CredentialsLoginConnector : PlatformConnector {
+    suspend fun login(username: String, password: String): SessionState
+}
+
 data class UploadResult(
     val success: Boolean,
     val remoteUploadId: String? = null,

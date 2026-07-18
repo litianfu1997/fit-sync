@@ -141,6 +141,33 @@ class WebSessionManager(
     fun igpsportPassword(): String? = secureStore.get(key(Platform.IGPSPORT, "password"))
     fun igpsportMemberId(): String? = secureStore.get(key(Platform.IGPSPORT, "uid"))
 
+    /**
+     * 持久化 COROS 中国站后台登录凭据（Keystore 加密）。
+     *
+     * COROS 走纯 API 账号密码登录（不走 WebView），accessToken 无刷新接口，故除 token 外还需
+     * 保存账号密码，以便过期时后台自动重新登录（[com.fitsync.app.connectors.CorosApiConnector] 的 withRelogin）。
+     *
+     * - [accessToken]：存通用 key `COROS:token`（让 [hasSession]/[externalUserId] 正常工作）。
+     *   ⚠️ COROS 的请求**绝不**走 [applyTo]——它会注入 `Authorization: Bearer` + `token` 头，
+     *   COROS 网关只认小写 `accesstoken` 头；[CorosApiConnector] 自持 `apiRequest` 注入 `accesstoken`。
+     * - [userId]：登录返回的 userId，存通用 key `COROS:uid`（[externalUserId] 读取，OSS objectKey 用）。
+     * - [username]/[password]：仅用于 token 过期后静默重登。
+     */
+    fun saveCorosSession(
+        accessToken: String?,
+        userId: String?,
+        username: String?,
+        password: String?,
+    ) {
+        secureStore.put(key(Platform.COROS, "token"), accessToken)
+        secureStore.put(key(Platform.COROS, "uid"), userId)
+        secureStore.put(key(Platform.COROS, "username"), username)
+        secureStore.put(key(Platform.COROS, "password"), password)
+    }
+
+    fun corosUsername(): String? = secureStore.get(key(Platform.COROS, "username"))
+    fun corosPassword(): String? = secureStore.get(key(Platform.COROS, "password"))
+
     fun clear(platform: Platform) {
         val config = PlatformWebConfigs.get(platform)
         cookieProbeUrls(platform).forEach { origin ->

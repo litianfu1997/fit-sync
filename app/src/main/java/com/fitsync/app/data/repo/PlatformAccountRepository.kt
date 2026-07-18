@@ -1,7 +1,7 @@
 package com.fitsync.app.data.repo
 
 import com.fitsync.app.connectors.ConnectorRegistry
-import com.fitsync.app.connectors.IgpsportApiConnector
+import com.fitsync.app.connectors.CredentialsLoginConnector
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.PlatformAccountEntity
 import com.fitsync.app.domain.model.AccountStatus
@@ -72,7 +72,7 @@ class PlatformAccountRepository(
     }
 
     /**
-     * 账号密码登录（仅 iGPSPORT：它走纯 API 登录而非 WebView）。
+     * 账号密码登录（iGPSPORT / COROS 中国站：走纯 API 登录而非 WebView）。
      * 成功后由 [validateAndPersist] 落库建账号；失败返回具体 [SessionState] 供 UI 提示。
      */
     suspend fun loginWithCredentials(
@@ -80,9 +80,9 @@ class PlatformAccountRepository(
         username: String,
         password: String,
     ): SessionState {
-        val igp = connectors.get(platform) as? IgpsportApiConnector
+        val connector = connectors.get(platform) as? CredentialsLoginConnector
             ?: return SessionState.NOT_CONNECTED
-        val state = igp.login(username, password)
+        val state = connector.login(username, password)
         if (state == SessionState.AUTHENTICATED) {
             validateAndPersist(platform, SessionState.AUTHENTICATED)
         }

@@ -48,6 +48,15 @@ class PlatformWebConfigsTest {
     }
 
     @Test
+    fun corosWebEntry_usesActivityListForImportAndExport() {
+        val config = PlatformWebConfigs.get(Platform.COROS)
+
+        assertThat(config.uploadUrl)
+            .isEqualTo("https://t.coros.com/admin/views/activities")
+        assertThat(PlatformWebConfigs.isAllowed(Platform.COROS, URI(config.uploadUrl).host)).isTrue()
+    }
+
+    @Test
     fun aliyunCaptchaHosts_areAllowed() {
         // 阿里云验证码（AliyunCaptcha）滑块通过这些第三方域加载，必须放行，否则 iframe 被当跳转拦截。
         assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "g.alicdn.com")).isTrue()

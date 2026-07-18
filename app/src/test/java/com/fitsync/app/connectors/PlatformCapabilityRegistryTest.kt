@@ -37,11 +37,13 @@ class PlatformCapabilityRegistryTest {
     }
 
     @Test
-    fun coros_doesNotClaimUnverifiedBackgroundAccess() {
+    fun coros_supportsExperimentalBackgroundReadAndWrite() {
         val capabilities = PlatformCapabilityRegistry.capabilities(Platform.COROS)
 
-        assertThat(capabilities.listActivitiesMode).isNotEqualTo(ConnectorExecution.BACKGROUND)
-        assertThat(capabilities.uploadFitMode).isNotEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.listActivitiesMode).isEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.downloadFitMode).isEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.uploadFitMode).isEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.experimental).isTrue()
     }
 
     @Test

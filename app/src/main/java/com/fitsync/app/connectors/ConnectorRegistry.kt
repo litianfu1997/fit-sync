@@ -55,7 +55,7 @@ class ConnectorRegistry(
         // Garmin 走 Connect API 后台直连上传；读取仍维持网页/分享路径。
         GarminConnectApiConnector(db, fileStore, sessionManager, garminHttpClient),
         IgpsportApiConnector(db, fileStore, sessionManager, httpClient),
-        ForegroundWebConnector(Platform.COROS, sessionManager),
+        CorosApiConnector(db, fileStore, sessionManager, httpClient),
     ).associateBy { it.platform }
 
     fun get(platform: Platform): PlatformConnector? = connectors[platform]
@@ -398,37 +398,6 @@ private class XingzheConnector(
     companion object {
         private const val PAGE_SIZE = 50
     }
-}
-
-private class ForegroundWebConnector(
-    override val platform: Platform,
-    private val sessionManager: WebSessionManager,
-) : PlatformConnector {
-    override suspend fun validateSession(): SessionState =
-        if (sessionManager.hasSession(platform)) SessionState.AUTHENTICATED else SessionState.NOT_CONNECTED
-
-    override suspend fun detectCapabilities(): ConnectorCapabilities =
-        PlatformCapabilityRegistry.capabilities(platform)
-
-    override suspend fun listActivities(
-        sinceEpochMs: Long,
-        cursor: SyncCursor?,
-    ): ConnectorResult<ActivityPage> = ConnectorResult.RequiresUserAction(
-        PlatformWebConfigs.get(platform).loginUrl,
-        "${platform.displayName} 需要在网页中导出 FIT",
-    )
-
-    override suspend fun downloadFit(activity: RemoteActivitySummary): ConnectorResult<FitFile> =
-        ConnectorResult.RequiresUserAction(
-            activity.downloadUrl ?: PlatformWebConfigs.get(platform).loginUrl,
-            "请在网页中下载 FIT 后分享到本应用",
-        )
-
-    override suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy> =
-        ConnectorResult.RequiresUserAction(
-            PlatformWebConfigs.get(platform).uploadUrl,
-            "请在网页中确认上传 FIT",
-        )
 }
 
 internal object JsonPlatformParser {

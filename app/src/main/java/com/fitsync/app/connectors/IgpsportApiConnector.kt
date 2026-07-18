@@ -43,7 +43,7 @@ internal class IgpsportApiConnector(
     private val fileStore: FitFileStore,
     private val sessionManager: WebSessionManager,
     private val client: OkHttpClient,
-) : PlatformConnector {
+) : PlatformConnector, CredentialsLoginConnector {
     override val platform = Platform.IGPSPORT
 
     override suspend fun validateSession(): SessionState {
@@ -59,10 +59,10 @@ internal class IgpsportApiConnector(
         PlatformCapabilityRegistry.capabilities(platform)
 
     /**
-     * 账号密码登录（接口外方法，由 `PlatformAccountRepository.loginWithCredentials` 调用）。
+     * 账号密码登录（[CredentialsLoginConnector] 实现，由 `PlatformAccountRepository.loginWithCredentials` 调用）。
      * 成功则把 token + memberid + 账号密码一并持久化到 [WebSessionManager]。
      */
-    suspend fun login(username: String, password: String): SessionState {
+    override suspend fun login(username: String, password: String): SessionState {
         val payload = JSONObject()
             .put("appId", APP_ID)
             .put("username", username)

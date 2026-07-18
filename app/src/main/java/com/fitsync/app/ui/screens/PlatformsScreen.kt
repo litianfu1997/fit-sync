@@ -63,6 +63,7 @@ import com.fitsync.app.ui.components.accountStatusTone
 import com.fitsync.app.ui.components.executionText
 import com.fitsync.app.ui.components.platformColor
 import com.fitsync.app.web.PlatformWebActivity
+import com.fitsync.app.web.PlatformWebConfigs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -82,7 +83,7 @@ fun PlatformsScreen() {
     val scope = rememberCoroutineScope()
     var busyPlatform by remember { mutableStateOf<Platform?>(null) }
     var pendingDisconnect by remember { mutableStateOf<Platform?>(null) }
-    var igpsportLogin by remember { mutableStateOf(false) }
+    var credentialsLogin by remember { mutableStateOf<Platform?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     val dateFormat = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
     val knownPlatforms = PlatformCapabilityRegistry.allKnownPlatforms()
@@ -191,8 +192,18 @@ fun PlatformsScreen() {
                         ) {
                             Button(
                                 onClick = {
-                                    if (platform == Platform.IGPSPORT) {
-                                        igpsportLogin = true
+                                    if (platform == Platform.COROS &&
+                                        account != null && account.status != AccountStatus.AUTH_EXPIRED
+                                    ) {
+                                        context.startActivity(
+                                            PlatformWebActivity.createIntent(
+                                                context,
+                                                platform,
+                                                url = PlatformWebConfigs.get(platform).uploadUrl,
+                                            ),
+                                        )
+                                    } else if (platform == Platform.IGPSPORT || platform == Platform.COROS) {
+                                        credentialsLogin = platform
                                     } else {
                                         context.startActivity(PlatformWebActivity.createIntent(context, platform))
                                     }
@@ -201,11 +212,20 @@ fun PlatformsScreen() {
                                 enabled = !isBusy,
                             ) {
                                 Icon(
-                                    if (account == null) Icons.AutoMirrored.Filled.Login else Icons.Default.OpenInBrowser,
+                                    if (account == null ||
+                                        (platform == Platform.COROS && account.status == AccountStatus.AUTH_EXPIRED)
+                                    ) Icons.AutoMirrored.Filled.Login else Icons.Default.OpenInBrowser,
                                     contentDescription = null,
                                     modifier = Modifier.size(18.dp),
                                 )
-                                Text(if (account == null) "登录平台" else "打开平台", modifier = Modifier.padding(start = 6.dp))
+                                Text(
+                                    when {
+                                        account == null -> "登录平台"
+                                        platform == Platform.COROS && account.status == AccountStatus.AUTH_EXPIRED -> "重新登录"
+                                        else -> "打开平台"
+                                    },
+                                    modifier = Modifier.padding(start = 6.dp),
+                                )
                             }
                             if (account != null) {
                                 OutlinedButton(
@@ -278,20 +298,36 @@ fun PlatformsScreen() {
         )
     }
 
-    if (igpsportLogin) {
-        IgpsportLoginDialog(
-            platform = Platform.IGPSPORT,
-            onDismiss = { igpsportLogin = false },
-            onSubmit = { u, p ->
-                app.platformAccountRepository.loginWithCredentials(Platform.IGPSPORT, u, p)
-            },
-            onResult = {
-                igpsportLogin = false
-                scope.launch {
-                    snackbarHostState.showSnackbar("iGPSPORT 登录成功")
-                }
-            },
-        )
+    credentialsLogin?.let { p ->
+        if (p == Platform.COROS) {
+            CorosLoginDialog(
+                platform = p,
+                onDismiss = { credentialsLogin = null },
+                onSubmit = { u, pw ->
+                    app.platformAccountRepository.loginWithCredentials(p, u, pw)
+                },
+                onResult = {
+                    credentialsLogin = null
+                    scope.launch {
+                        snackbarHostState.showSnackbar("${p.displayName} 登录成功")
+                    }
+                },
+            )
+        } else {
+            IgpsportLoginDialog(
+                platform = p,
+                onDismiss = { credentialsLogin = null },
+                onSubmit = { u, pw ->
+                    app.platformAccountRepository.loginWithCredentials(p, u, pw)
+                },
+                onResult = {
+                    credentialsLogin = null
+                    scope.launch {
+                        snackbarHostState.showSnackbar("${p.displayName} 登录成功")
+                    }
+                },
+            )
+        }
     }
 }
 

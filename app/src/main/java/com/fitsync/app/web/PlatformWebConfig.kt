@@ -42,7 +42,8 @@ object PlatformWebConfigs {
         Platform.COROS -> PlatformWebConfig(
             platform,
             loginUrl = "https://t.coros.com/login",
-            uploadUrl = "https://t.coros.com/",
+            // 活动列表页同时提供“导入数据”和“导出数据”，作为 COROS 的统一网页操作入口。
+            uploadUrl = "https://t.coros.com/admin/views/activities",
             allowedDomainSuffixes = setOf("coros.com"),
             origins = setOf("https://t.coros.com", "https://training.coros.com"),
         )
