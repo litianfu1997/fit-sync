@@ -22,22 +22,30 @@ class SyncWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = runCatching {
-        val coordinator = (applicationContext as FitSyncApp).syncCoordinator
-        val summary = if (inputData.getBoolean(KEY_DELIVERY_ONLY, false)) {
-            coordinator.runDeliveryBatch()
+        val app = applicationContext as FitSyncApp
+        val deliveryOnly = inputData.getBoolean(KEY_DELIVERY_ONLY, false)
+        setForeground(app.syncNotificationManager.foregroundInfo(deliveryOnly))
+        val summary = if (deliveryOnly) {
+            app.syncCoordinator.runDeliveryBatch()
         } else {
-            coordinator.runSync(force = inputData.getBoolean(KEY_FORCE, false))
+            app.syncCoordinator.runSync(force = inputData.getBoolean(KEY_FORCE, false))
         }
         if (summary.hasMoreDeliveries) {
             SyncScheduler.enqueueContinuation(applicationContext)
         }
-        Result.success()
-    }.getOrElse { Result.retry() }
+        Result.success(summary.toWorkData(deliveryOnly))
+    }.getOrElse { error ->
+        if (inputData.getBoolean(KEY_FORCE, false)) {
+            Result.failure(syncFailureData(error.message ?: "后台同步发生异常"))
+        } else {
+            Result.retry()
+        }
+    }
 }
 
 object SyncScheduler {
     private const val PERIODIC_NAME = "fitsync-periodic-sync"
-    private const val MANUAL_NAME = "fitsync-manual-sync"
+    const val MANUAL_NAME = "fitsync-manual-sync"
 
     fun schedule(context: Context, enabled: Boolean, intervalMinutes: Int = 15) {
         val manager = WorkManager.getInstance(context)
@@ -61,12 +69,16 @@ object SyncScheduler {
             .enqueueUniqueWork(MANUAL_NAME, ExistingWorkPolicy.KEEP, request)
     }
 
-    internal fun enqueueContinuation(context: Context) {
+    fun enqueueDeliveryNow(context: Context) {
         WorkManager.getInstance(context).enqueueUniqueWork(
             MANUAL_NAME,
             ExistingWorkPolicy.APPEND_OR_REPLACE,
             oneTimeRequest(force = false, deliveryOnly = true),
         )
+    }
+
+    internal fun enqueueContinuation(context: Context) {
+        enqueueDeliveryNow(context)
     }
 
     private fun oneTimeRequest(force: Boolean, deliveryOnly: Boolean) =

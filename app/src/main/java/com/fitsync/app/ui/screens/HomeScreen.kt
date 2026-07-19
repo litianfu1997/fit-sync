@@ -29,6 +29,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -38,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.livedata.observeAsState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -47,11 +49,15 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.domain.model.DedupStatus
 import com.fitsync.app.domain.model.ImportJobStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.sync.SyncScheduler
+import com.fitsync.app.sync.syncErrorMessage
+import com.fitsync.app.sync.toSyncWorkResult
 import com.fitsync.app.ui.components.AppTopBar
 import com.fitsync.app.ui.components.EmptyState
 import com.fitsync.app.ui.components.PlatformAvatar
@@ -91,6 +97,10 @@ fun HomeScreen(
     val waitingJobs by db.deliveryJobDao().observeWaitingForUser().collectAsState(initial = emptyList())
     val accounts by db.platformAccountDao().observeAll().collectAsState(initial = emptyList())
     val settings by db.appSettingsDao().observe().collectAsState(initial = null)
+    val workManager = remember(context) { WorkManager.getInstance(context.applicationContext) }
+    val manualWorks by workManager.getWorkInfosForUniqueWorkLiveData(SyncScheduler.MANUAL_NAME)
+        .observeAsState(initial = emptyList())
+    val syncState = remember(manualWorks) { manualSyncUiState(manualWorks.lastOrNull()) }
     val dateFormat = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -107,10 +117,11 @@ fun HomeScreen(
                 SyncHero(
                     autoSyncEnabled = settings?.autoSyncEnabled != false,
                     waitingCount = waitingJobs.size,
+                    syncState = syncState,
                     onSync = {
                         SyncScheduler.enqueueNow(context)
                         scope.launch {
-                            snackbarHostState.showSnackbar("同步任务已开始，将在后台检查所有平台")
+                            snackbarHostState.showSnackbar("已加入后台同步，切换应用不会中断")
                         }
                     },
                 )
@@ -299,7 +310,12 @@ private fun StatCell(
 }
 
 @Composable
-private fun SyncHero(autoSyncEnabled: Boolean, waitingCount: Int, onSync: () -> Unit) {
+private fun SyncHero(
+    autoSyncEnabled: Boolean,
+    waitingCount: Int,
+    syncState: ManualSyncUiState,
+    onSync: () -> Unit,
+) {
     Box(
         modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.large)
             .background(Brush.linearGradient(listOf(Color(0xFF111827), Color(0xFF21170F), Color(0xFF3B1D08))))
@@ -328,21 +344,70 @@ private fun SyncHero(autoSyncEnabled: Boolean, waitingCount: Int, onSync: () -> 
                 style = MaterialTheme.typography.headlineLarge,
             )
             Text(
-                if (waitingCount > 0) "$waitingCount 个任务等待确认，处理后即可继续" else "一处导入，多平台自动补齐，全程只在本机处理。",
+                when (syncState) {
+                    ManualSyncUiState.Idle -> if (waitingCount > 0) {
+                        "$waitingCount 个任务等待确认，处理后即可继续"
+                    } else {
+                        "一处导入，多平台自动补齐，全程只在本机处理。"
+                    }
+                    is ManualSyncUiState.Queued -> syncState.message
+                    ManualSyncUiState.Running -> "正在后台检查平台，切换应用不会中断"
+                    is ManualSyncUiState.Finished -> syncState.message
+                    is ManualSyncUiState.Failed -> syncState.message
+                },
                 modifier = Modifier.padding(top = 10.dp),
                 color = Color.White.copy(alpha = 0.68f),
                 style = MaterialTheme.typography.bodyMedium,
             )
             Button(
                 onClick = onSync,
+                enabled = !syncState.isActive,
                 modifier = Modifier.padding(top = 22.dp).fillMaxWidth().height(52.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = FitOrange, contentColor = Color.White),
             ) {
-                Icon(Icons.Default.Refresh, contentDescription = null)
-                Text("立即同步全部", modifier = Modifier.padding(start = 8.dp))
+                if (syncState.isActive) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        color = Color.White,
+                        strokeWidth = 2.dp,
+                    )
+                } else {
+                    Icon(Icons.Default.Refresh, contentDescription = null)
+                }
+                Text(
+                    when (syncState) {
+                        ManualSyncUiState.Running -> "正在后台同步"
+                        is ManualSyncUiState.Queued -> "等待后台执行"
+                        else -> "立即同步全部"
+                    },
+                    modifier = Modifier.padding(start = 8.dp),
+                )
             }
         }
     }
+}
+
+private sealed class ManualSyncUiState(val isActive: Boolean) {
+    data object Idle : ManualSyncUiState(false)
+    data class Queued(val message: String) : ManualSyncUiState(true)
+    data object Running : ManualSyncUiState(true)
+    data class Finished(val message: String) : ManualSyncUiState(false)
+    data class Failed(val message: String) : ManualSyncUiState(false)
+}
+
+private fun manualSyncUiState(workInfo: WorkInfo?): ManualSyncUiState = when (workInfo?.state) {
+    null -> ManualSyncUiState.Idle
+    WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> ManualSyncUiState.Queued(
+        if (workInfo.runAttemptCount > 0) "同步暂时未完成，等待系统重试" else "已进入后台同步队列，等待网络条件",
+    )
+    WorkInfo.State.RUNNING -> ManualSyncUiState.Running
+    WorkInfo.State.SUCCEEDED -> ManualSyncUiState.Finished(
+        workInfo.outputData.toSyncWorkResult()?.userMessage() ?: "上次同步已完成",
+    )
+    WorkInfo.State.FAILED -> ManualSyncUiState.Failed(
+        workInfo.outputData.syncErrorMessage()?.let { "同步失败：$it" } ?: "同步失败，请稍后重试",
+    )
+    WorkInfo.State.CANCELLED -> ManualSyncUiState.Failed("同步已取消，可重新发起")
 }
 
 private fun importTone(status: ImportJobStatus): Pair<Color, StatusTone> = when (status) {

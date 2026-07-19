@@ -43,6 +43,8 @@ class FitSyncApp : Application() {
         private set
     lateinit var syncCoordinator: SyncCoordinator
         private set
+    lateinit var syncNotificationManager: SyncNotificationManager
+        private set
 
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -66,11 +68,11 @@ class FitSyncApp : Application() {
             fileStore = fitFileStore,
             sessionManager = webSessionManager,
         )
-        val notifications = SyncNotificationManager(this).also { it.createChannel() }
+        syncNotificationManager = SyncNotificationManager(this).also { it.createChannel() }
         activityDeletionService = ActivityDeletionService(
             db = database,
             fileStore = fitFileStore,
-            notifications = notifications,
+            notifications = syncNotificationManager,
             mutationGate = activityMutationGate,
         )
         val planner = DeliveryPlanner(database)
@@ -79,7 +81,7 @@ class FitSyncApp : Application() {
             importService = importService,
             connectors = connectorRegistry,
             planner = planner,
-            notifications = notifications,
+            notifications = syncNotificationManager,
             mutationGate = activityMutationGate,
         )
         platformAccountRepository = PlatformAccountRepository(

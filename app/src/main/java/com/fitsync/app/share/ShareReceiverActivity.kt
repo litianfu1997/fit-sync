@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.data.repo.ImportOutcome
 import com.fitsync.app.domain.model.Platform
+import com.fitsync.app.sync.SyncScheduler
 import com.fitsync.app.ui.components.AppTopBar
 import com.fitsync.app.ui.theme.FitSyncTheme
 import com.fitsync.app.ui.theme.FitRed
@@ -66,14 +67,19 @@ class ShareReceiverActivity : ComponentActivity() {
                         return@LaunchedEffect
                     }
                     val results = withContext(Dispatchers.IO) {
-                        uris.map { uri ->
+                        var plannedDeliveries = 0
+                        val outcomes = uris.map { uri ->
                             val outcome = FitSyncApp.instance.importService.importFromUri(
                                 uri,
                                 sourcePlatform = Platform.LOCAL_IMPORT,
                             )
-                            FitSyncApp.instance.syncCoordinator.onImported(outcome, Platform.LOCAL_IMPORT)
+                            plannedDeliveries += FitSyncApp.instance.syncCoordinator.onImported(outcome, Platform.LOCAL_IMPORT)
                             outcome
                         }
+                        if (plannedDeliveries > 0) {
+                            SyncScheduler.enqueueDeliveryNow(applicationContext)
+                        }
+                        outcomes
                     }
                     successful = results.none { it is ImportOutcome.Invalid || it is ImportOutcome.Failed }
                     message = results.joinToString("\n") { formatOutcome(it) }

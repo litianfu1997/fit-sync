@@ -39,40 +39,53 @@ class SyncCoordinator(
         if (!force && settings?.autoSyncEnabled == false) return@sync SyncRunSummary()
         var pulled = 0
         var queued = 0
-        db.platformAccountDao().getAll()
-            .filter { it.status != AccountStatus.DISABLED }
-            .forEach { account ->
-                val connector = connectors.get(account.platform) ?: return@forEach
-                val listMode = connector.detectCapabilities().listActivitiesMode
-                if (listMode != ConnectorExecution.BACKGROUND) {
-                    if (force && listMode != ConnectorExecution.UNSUPPORTED) {
-                        val url = PlatformWebConfigs.get(account.platform).loginUrl
-                        markAccountNeedsAction(account.id, false)
-                        if (settings?.notificationsEnabled != false) {
-                            notifications.notifyAccountAction(
-                                account.id,
-                                account.platform,
-                                url,
-                                "请在网页中导出 FIT 后分享到本应用",
-                            )
-                        }
-                    }
-                    return@forEach
-                }
-                val result = pullAccount(
-                    account.id,
-                    settings?.initialHistoryDays ?: 90,
-                    forceFullHistory = force,
-                )
-                pulled += result.first
-                queued += result.second
+        var failedAccounts = 0
+        val enabledRuleCount = db.syncRuleDao().getEnabled().size
+        val accounts = db.platformAccountDao().getAll().filter { it.status != AccountStatus.DISABLED }
+        accounts.forEach { account ->
+            val connector = connectors.get(account.platform)
+            if (connector == null) {
+                failedAccounts++
+                return@forEach
             }
+            val listMode = connector.detectCapabilities().listActivitiesMode
+            if (listMode != ConnectorExecution.BACKGROUND) {
+                if (force && listMode != ConnectorExecution.UNSUPPORTED) {
+                    val url = PlatformWebConfigs.get(account.platform).loginUrl
+                    markAccountNeedsAction(account.id, false)
+                    if (settings?.notificationsEnabled != false) {
+                        notifications.notifyAccountAction(
+                            account.id,
+                            account.platform,
+                            url,
+                            "请在网页中导出 FIT 后分享到本应用",
+                        )
+                    }
+                }
+                return@forEach
+            }
+            val result = pullAccount(
+                account.id,
+                settings?.initialHistoryDays ?: 90,
+                forceFullHistory = force,
+            )
+            pulled += result.pulled
+            queued += result.queued
+            if (!result.completedNormally) failedAccounts++
+        }
         val delivered = processDeliveryJobs()
+        val actionRequiredAccounts = db.platformAccountDao().getAll().count {
+            it.status == AccountStatus.AUTH_EXPIRED || it.status == AccountStatus.NEEDS_USER_ACTION
+        }
         SyncRunSummary(
             pulledActivities = pulled,
             queuedDeliveries = queued,
             completedDeliveries = delivered,
             hasMoreDeliveries = hasRunnableDeliveries(),
+            checkedAccounts = accounts.size,
+            enabledRules = enabledRuleCount,
+            actionRequiredAccounts = actionRequiredAccounts,
+            failedAccounts = failedAccounts,
         )
     }
 
@@ -321,9 +334,9 @@ class SyncCoordinator(
         accountId: Long,
         historyDays: Int,
         forceFullHistory: Boolean,
-    ): Pair<Int, Int> {
-        var account = db.platformAccountDao().getById(accountId) ?: return 0 to 0
-        val connector = connectors.get(account.platform) ?: return 0 to 0
+    ): PullAccountResult {
+        var account = db.platformAccountDao().getById(accountId) ?: return PullAccountResult()
+        val connector = connectors.get(account.platform) ?: return PullAccountResult()
         val now = System.currentTimeMillis()
         val previousSync = account.lastSyncAtEpochMs
         val since = calculatePullSince(now, previousSync, historyDays, forceFullHistory)
@@ -427,7 +440,7 @@ class SyncCoordinator(
                 ),
             )
         }
-        return pulled to queued
+        return PullAccountResult(pulled, queued, completedNormally)
     }
 
     private suspend fun downloadAndImport(
@@ -562,4 +575,14 @@ data class SyncRunSummary(
     val queuedDeliveries: Int = 0,
     val completedDeliveries: Int = 0,
     val hasMoreDeliveries: Boolean = false,
+    val checkedAccounts: Int = 0,
+    val enabledRules: Int = 0,
+    val actionRequiredAccounts: Int = 0,
+    val failedAccounts: Int = 0,
+)
+
+private data class PullAccountResult(
+    val pulled: Int = 0,
+    val queued: Int = 0,
+    val completedNormally: Boolean = false,
 )
