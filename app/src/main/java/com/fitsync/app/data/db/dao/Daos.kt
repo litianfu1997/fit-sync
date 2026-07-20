@@ -62,6 +62,7 @@ interface CanonicalActivityDao {
                activity.activityFingerprint,
                activity.dedupStatus,
                activity.primaryVariantId,
+               activity.reviewCandidateCanonicalId,
                activity.createdAtEpochMs
         FROM canonical_activity AS activity
         ORDER BY COALESCE(
@@ -79,6 +80,15 @@ interface CanonicalActivityDao {
 
     @Query("SELECT * FROM canonical_activity ORDER BY startTimeEpochMs DESC")
     suspend fun getAll(): List<CanonicalActivityEntity>
+
+    @Query(
+        """
+        SELECT * FROM canonical_activity
+        ORDER BY startTimeEpochMs DESC
+        LIMIT :limit OFFSET :offset
+        """,
+    )
+    suspend fun getPage(limit: Int, offset: Int): List<CanonicalActivityEntity>
 
     @Query("SELECT COUNT(*) FROM canonical_activity")
     fun observeCount(): Flow<Int>
@@ -101,6 +111,9 @@ interface CanonicalActivityDao {
     )
     suspend fun findByStartTimeRange(fromMs: Long, toMs: Long): List<CanonicalActivityEntity>
 
+    @Query("SELECT * FROM canonical_activity WHERE reviewCandidateCanonicalId = :candidateId")
+    suspend fun findByReviewCandidate(candidateId: Long): List<CanonicalActivityEntity>
+
     @Insert
     suspend fun insert(entity: CanonicalActivityEntity): Long
 
@@ -121,6 +134,14 @@ interface ActivityVariantDao {
 
     @Query("SELECT * FROM activity_variant WHERE canonicalActivityId = :canonicalId")
     fun observeByCanonical(canonicalId: Long): Flow<List<ActivityVariantEntity>>
+
+    @Query(
+        """
+        SELECT * FROM activity_variant
+        WHERE localFilePath IS NOT NULL AND localFilePath != ''
+        """,
+    )
+    suspend fun findWithLocalFiles(): List<ActivityVariantEntity>
 
     @Query("SELECT * FROM activity_variant WHERE id = :id")
     suspend fun getById(id: Long): ActivityVariantEntity?
@@ -161,8 +182,20 @@ interface PlatformCopyDao {
     )
     suspend fun findByCanonicalAndAccount(canonicalId: Long, accountId: Long): PlatformCopyEntity?
 
+    @Query(
+        """
+        SELECT * FROM platform_copy
+        WHERE platformAccountId = :accountId AND fileSha256 = :sha
+        LIMIT 1
+        """,
+    )
+    suspend fun findBySha256(accountId: Long, sha: String): PlatformCopyEntity?
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(entity: PlatformCopyEntity): Long
+
+    @Update
+    suspend fun update(entity: PlatformCopyEntity)
 
     @Query("DELETE FROM platform_copy WHERE canonicalActivityId = :canonicalId")
     suspend fun deleteByCanonical(canonicalId: Long)
@@ -209,6 +242,9 @@ interface DeliveryJobDao {
 
     @Query("SELECT * FROM delivery_job WHERE canonicalActivityId = :canonicalId")
     suspend fun findByCanonical(canonicalId: Long): List<DeliveryJobEntity>
+
+    @Query("SELECT * FROM delivery_job WHERE sourceVariantId = :variantId")
+    suspend fun findBySourceVariant(variantId: Long): List<DeliveryJobEntity>
 
     @Query("SELECT COUNT(*) FROM delivery_job WHERE status = :status")
     fun observeCountByStatus(status: DeliveryJobStatus): Flow<Int>

@@ -42,7 +42,11 @@ class Migration1To2Test {
         }
 
         database = Room.databaseBuilder(context, FitSyncDatabase::class.java, dbName)
-            .addMigrations(FitSyncDatabase.MIGRATION_1_2, FitSyncDatabase.MIGRATION_2_3)
+            .addMigrations(
+                FitSyncDatabase.MIGRATION_1_2,
+                FitSyncDatabase.MIGRATION_2_3,
+                FitSyncDatabase.MIGRATION_3_4,
+            )
             .build()
         val settings = database!!.appSettingsDao().get()
 

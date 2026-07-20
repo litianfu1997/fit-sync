@@ -10,8 +10,11 @@ import com.fitsync.app.data.db.entity.CanonicalActivityEntity
 import com.fitsync.app.data.db.entity.DeliveryJobEntity
 import com.fitsync.app.data.db.entity.PlatformCopyEntity
 import com.fitsync.app.data.repo.ActivityMutationGate
+import com.fitsync.app.data.repo.FitStorageJanitor
 import com.fitsync.app.data.repo.ImportOutcome
 import com.fitsync.app.data.repo.ImportService
+import com.fitsync.app.data.repo.PlatformCopyUpsertPlan
+import com.fitsync.app.data.repo.planPlatformCopyUpsert
 import com.fitsync.app.domain.model.AccountStatus
 import com.fitsync.app.domain.model.CollectorType
 import com.fitsync.app.domain.model.ConnectorExecution
@@ -31,6 +34,7 @@ class SyncCoordinator(
     val planner: DeliveryPlanner,
     private val notifications: SyncNotificationManager,
     private val mutationGate: ActivityMutationGate = ActivityMutationGate(),
+    private val storageJanitor: FitStorageJanitor? = null,
 ) {
     private val syncMutex = Mutex()
 
@@ -74,6 +78,7 @@ class SyncCoordinator(
             if (!result.completedNormally) failedAccounts++
         }
         val delivered = processDeliveryJobs()
+        runCatching { storageJanitor?.run() }
         val actionRequiredAccounts = db.platformAccountDao().getAll().count {
             it.status == AccountStatus.AUTH_EXPIRED || it.status == AccountStatus.NEEDS_USER_ACTION
         }
@@ -91,6 +96,7 @@ class SyncCoordinator(
 
     suspend fun runDeliveryBatch(): SyncRunSummary = syncMutex.withLock {
         val delivered = processDeliveryJobs()
+        runCatching { storageJanitor?.run() }
         SyncRunSummary(
             completedDeliveries = delivered,
             hasMoreDeliveries = hasRunnableDeliveries(),
@@ -350,7 +356,7 @@ class SyncCoordinator(
         while (pages++ < 100) {
             when (val pageResult = connector.listActivities(since, cursor)) {
                 is ConnectorResult.Success -> {
-                    var pageFailed = false
+                    var abortAccount = false
                     for (remote in pageResult.value.items) {
                         if (db.platformCopyDao().findByRemote(account.id, remote.remoteActivityId) != null) continue
                         when (val imported = downloadAndImport(account.id, account.platform, connector, remote)) {
@@ -370,7 +376,7 @@ class SyncCoordinator(
                                     imported.message,
                                 )
                                 completedNormally = false
-                                pageFailed = true
+                                abortAccount = true
                             }
                             is ConnectorResult.RequiresUserAction -> {
                                 markAccountNeedsAction(account.id, false)
@@ -381,16 +387,16 @@ class SyncCoordinator(
                                     imported.message,
                                 )
                                 completedNormally = false
-                                pageFailed = true
+                                abortAccount = true
                             }
                             else -> {
+                                // 单条永久/可重试失败：跳过本条继续拉同页，不中断整页；下次同步再试
                                 completedNormally = false
-                                pageFailed = true
                             }
                         }
-                        if (pageFailed) break
+                        if (abortAccount) break
                     }
-                    if (pageFailed) break
+                    if (abortAccount) break
                     cursor = pageResult.value.nextCursor
                     account = account.copy(
                         syncCursor = cursor?.raw,
@@ -472,15 +478,14 @@ class SyncCoordinator(
                     if (db.canonicalActivityDao().getById(ids.first) == null) {
                         return@withLock ConnectorResult.PermanentFailure(null, "本地活动已删除")
                     }
-                    db.platformCopyDao().insert(
-                        PlatformCopyEntity(
-                            canonicalActivityId = ids.first,
-                            platformAccountId = accountId,
-                            remoteActivityId = remote.remoteActivityId,
-                            remoteUrl = remote.metadata["remote_url"],
-                            fileSha256 = downloaded.value.sha256,
-                            sourceVariantId = ids.second,
-                        ),
+                    upsertPlatformCopy(
+                        canonicalId = ids.first,
+                        accountId = accountId,
+                        remoteActivityId = remote.remoteActivityId,
+                        remoteUrl = remote.metadata["remote_url"],
+                        fileSha256 = downloaded.value.sha256,
+                        sourceVariantId = ids.second,
+                        createdBySync = false,
                     )
                     ConnectorResult.Success(ids.first)
                 }
@@ -499,16 +504,50 @@ class SyncCoordinator(
         sourceVariantId: Long,
         copy: com.fitsync.app.connectors.RemoteCopy,
     ) {
-        db.platformCopyDao().insert(
-            PlatformCopyEntity(
-                canonicalActivityId = canonicalId,
-                platformAccountId = accountId,
-                remoteActivityId = copy.remoteActivityId,
-                remoteUrl = copy.remoteUrl,
-                createdBySync = true,
-                sourceVariantId = sourceVariantId,
-            ),
+        val sha = db.activityVariantDao().getById(sourceVariantId)?.fileSha256
+        upsertPlatformCopy(
+            canonicalId = canonicalId,
+            accountId = accountId,
+            remoteActivityId = copy.remoteActivityId,
+            remoteUrl = copy.remoteUrl,
+            fileSha256 = sha,
+            sourceVariantId = sourceVariantId,
+            createdBySync = true,
         )
+    }
+
+    /**
+     * 写入或对齐 PlatformCopy。
+     * 上传路径可能先写入合成 remoteId（如 COROS md5 / iGP ossId），
+     * 后续 list 拉到真实 ID 时需覆盖同一 (canonical, account) 行，避免重复下载循环。
+     */
+    internal suspend fun upsertPlatformCopy(
+        canonicalId: Long,
+        accountId: Long,
+        remoteActivityId: String,
+        remoteUrl: String? = null,
+        fileSha256: String? = null,
+        sourceVariantId: Long? = null,
+        createdBySync: Boolean = false,
+    ) {
+        val dao = db.platformCopyDao()
+        val plan = planPlatformCopyUpsert(
+            byRemote = dao.findByRemote(accountId, remoteActivityId),
+            byCanonicalAndAccount = dao.findByCanonicalAndAccount(canonicalId, accountId),
+            bySha = fileSha256?.let { dao.findBySha256(accountId, it) },
+            canonicalId = canonicalId,
+            accountId = accountId,
+            remoteActivityId = remoteActivityId,
+            remoteUrl = remoteUrl,
+            fileSha256 = fileSha256,
+            sourceVariantId = sourceVariantId,
+            createdBySync = createdBySync,
+        )
+        when (plan) {
+            is PlatformCopyUpsertPlan.Update -> dao.update(plan.entity)
+            is PlatformCopyUpsertPlan.Insert -> dao.insert(plan.entity)
+            PlatformCopyUpsertPlan.NoOp -> Unit
+        }
     }
 
     private suspend fun waitForUser(

@@ -18,7 +18,11 @@ class FitFileStore(private val context: Context) {
     private val tempDir: File
         get() = File(context.cacheDir, "fit_import").also { it.mkdirs() }
 
-    suspend fun copyFromUri(uri: Uri, preferredName: String?): StoredFitFile = withContext(Dispatchers.IO) {
+    suspend fun copyFromUri(
+        uri: Uri,
+        preferredName: String?,
+        maxBytes: Long = DEFAULT_MAX_BYTES,
+    ): StoredFitFile = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
         val displayName = preferredName
             ?: resolver.query(uri, null, null, null, null)?.use { cursor ->
@@ -27,18 +31,15 @@ class FitFileStore(private val context: Context) {
             }
             ?: "import_${System.currentTimeMillis()}.fit"
 
-        val tempFile = File(tempDir, "tmp_${System.currentTimeMillis()}_${safeName(displayName)}")
         resolver.openInputStream(uri)?.use { input ->
-            tempFile.outputStream().use { output -> input.copyTo(output) }
+            storeFromStream(input, displayName, maxBytes = maxBytes)
         } ?: error("无法打开分享文件")
-
-        finalizeStoredFile(tempFile, displayName)
     }
 
     suspend fun storeFromStream(
         input: InputStream,
         displayName: String,
-        maxBytes: Long = 50L * 1024 * 1024,
+        maxBytes: Long = DEFAULT_MAX_BYTES,
     ): StoredFitFile =
         withContext(Dispatchers.IO) {
             val tempFile = File(tempDir, "tmp_${System.currentTimeMillis()}_${safeName(displayName)}")
@@ -54,7 +55,7 @@ class FitFileStore(private val context: Context) {
                         output.write(buffer, 0, read)
                     }
                 }
-                require(isFitFile(tempFile)) { "下载内容不是有效的 FIT 文件" }
+                require(isFitFile(tempFile)) { "内容不是有效的 FIT 文件" }
             } catch (t: Throwable) {
                 tempFile.delete()
                 throw t
@@ -132,6 +133,7 @@ class FitFileStore(private val context: Context) {
 
     companion object {
         private const val MAX_NAME_ATTEMPTS = 10
+        const val DEFAULT_MAX_BYTES = 50L * 1024 * 1024
 
         private fun safeName(name: String): String =
             name.substringAfterLast('/').substringAfterLast('\\')

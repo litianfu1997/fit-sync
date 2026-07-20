@@ -54,6 +54,8 @@ data class CanonicalActivityEntity(
     val activityFingerprint: String? = null,
     val dedupStatus: DedupStatus = DedupStatus.UNIQUE,
     val primaryVariantId: Long? = null,
+    /** NEEDS_REVIEW 时指向疑似同一活动的候选 canonical，供人工合并 */
+    val reviewCandidateCanonicalId: Long? = null,
     val createdAtEpochMs: Long = System.currentTimeMillis(),
 )
 

@@ -80,7 +80,7 @@ class PlatformWebActivity : ComponentActivity() {
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var grantedUploadUri: Uri? = null
     private var mainFrameLoadFailed = false
-    private var statusText by mutableStateOf("请在平台网页中登录，App 不会保存账号密码")
+    private var statusText by mutableStateOf("请在平台网页中登录；本页仅保存 Cookie/会话令牌，不收集网页里输入的密码")
     private var uploadFileProvided by mutableStateOf(false)
     private var uploadConfirmationBusy by mutableStateOf(false)
 
@@ -300,7 +300,18 @@ class PlatformWebActivity : ComponentActivity() {
                     webChromeClient = parent.webChromeClient
                     webViewClient = object : WebViewClient() {
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                            parent.loadUrl(request?.url?.toString().orEmpty())
+                            val uri = request?.url
+                            val allowed = uri != null &&
+                                uri.scheme == "https" &&
+                                PlatformWebConfigs.isAllowed(platform, uri.host)
+                            if (allowed) {
+                                parent.loadUrl(uri.toString())
+                            } else {
+                                val destination = uri?.host ?: uri?.scheme.orEmpty()
+                                statusText = "已阻止弹窗跳转：$destination"
+                                Toast.makeText(this@PlatformWebActivity, statusText, Toast.LENGTH_SHORT).show()
+                            }
+                            view?.destroy()
                             return true
                         }
                     }

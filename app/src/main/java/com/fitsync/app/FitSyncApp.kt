@@ -4,7 +4,9 @@ import android.app.Application
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.file.FitFileStore
 import com.fitsync.app.data.repo.ActivityDeletionService
+import com.fitsync.app.data.repo.ActivityMergeService
 import com.fitsync.app.data.repo.ActivityMutationGate
+import com.fitsync.app.data.repo.FitStorageJanitor
 import com.fitsync.app.data.repo.ImportService
 import com.fitsync.app.data.repo.PlatformAccountRepository
 import com.fitsync.app.connectors.ConnectorRegistry
@@ -34,6 +36,10 @@ class FitSyncApp : Application() {
     lateinit var importService: ImportService
         private set
     lateinit var activityDeletionService: ActivityDeletionService
+        private set
+    lateinit var activityMergeService: ActivityMergeService
+        private set
+    lateinit var fitStorageJanitor: FitStorageJanitor
         private set
     lateinit var webSessionManager: WebSessionManager
         private set
@@ -75,6 +81,16 @@ class FitSyncApp : Application() {
             notifications = syncNotificationManager,
             mutationGate = activityMutationGate,
         )
+        activityMergeService = ActivityMergeService(
+            db = database,
+            notifications = syncNotificationManager,
+            mutationGate = activityMutationGate,
+        )
+        fitStorageJanitor = FitStorageJanitor(
+            db = database,
+            fileStore = fitFileStore,
+            mutationGate = activityMutationGate,
+        )
         val planner = DeliveryPlanner(database)
         syncCoordinator = SyncCoordinator(
             db = database,
@@ -83,6 +99,7 @@ class FitSyncApp : Application() {
             planner = planner,
             notifications = syncNotificationManager,
             mutationGate = activityMutationGate,
+            storageJanitor = fitStorageJanitor,
         )
         platformAccountRepository = PlatformAccountRepository(
             db = database,
@@ -94,6 +111,11 @@ class FitSyncApp : Application() {
                 importService.reparseStoredActivitiesIfNeeded()
             } catch (_: Exception) {
                 // A failed metadata refresh must not prevent background sync scheduling.
+            }
+            try {
+                fitStorageJanitor.run()
+            } catch (_: Exception) {
+                // 启动清理失败不阻塞后台同步
             }
             val settings = database.appSettingsDao().get()
             SyncScheduler.schedule(

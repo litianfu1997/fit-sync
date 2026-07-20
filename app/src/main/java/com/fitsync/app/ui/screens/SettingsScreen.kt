@@ -153,23 +153,23 @@ fun SettingsScreen() {
                 }
             }
             item {
-                SettingsCard(Icons.Default.Storage, "原始 FIT 存储", "选择同步完成后的本地文件保留方式") {
+                SettingsCard(Icons.Default.Storage, "原始 FIT 存储", "仅删除本地文件，活动记录与平台映射仍保留") {
                     StorageOption(
                         title = "长期保存",
-                        subtitle = "保留所有原始 FIT，便于随时补发",
+                        subtitle = "永不自动删除原始 FIT，便于随时补发",
                         selected = current.storagePolicy == FitStoragePolicy.KEEP_FOREVER,
                         onClick = { save(current.copy(storagePolicy = FitStoragePolicy.KEEP_FOREVER)) },
                     )
                     StorageOption(
                         title = "成功 7 天后删除",
-                        subtitle = "兼顾补发窗口和存储空间，推荐",
+                        subtitle = "无未完成投递，且距成功投递（或导入）满 7 天后清理文件",
                         selected = current.storagePolicy == FitStoragePolicy.DELETE_AFTER_7_DAYS,
                         onClick = { save(current.copy(storagePolicy = FitStoragePolicy.DELETE_AFTER_7_DAYS)) },
                         recommended = true,
                     )
                     StorageOption(
-                        title = "同步成功立即删除",
-                        subtitle = "最节省空间，之后无法从本地重新上传",
+                        title = "同步成功后删除",
+                        subtitle = "至少成功投递过一次且无未完成任务后立即清理；之后无法再从本地上传",
                         selected = current.storagePolicy == FitStoragePolicy.DELETE_AFTER_SYNC,
                         onClick = { save(current.copy(storagePolicy = FitStoragePolicy.DELETE_AFTER_SYNC)) },
                     )
@@ -177,11 +177,16 @@ fun SettingsScreen() {
                         onClick = {
                             scope.launch {
                                 val result = withContext(Dispatchers.IO) {
-                                    runCatching { app.fitFileStore.cleanupTemporaryFiles() }
+                                    runCatching {
+                                        app.fitFileStore.cleanupTemporaryFiles()
+                                        app.fitStorageJanitor.run()
+                                    }
                                 }
                                 snackbarHostState.showSnackbar(
                                     result.fold(
-                                        onSuccess = { "临时下载文件已清理" },
+                                        onSuccess = { janitor ->
+                                            "已清理临时文件；按策略删除 ${janitor.deletedFiles} 个 FIT"
+                                        },
                                         onFailure = { "清理失败：${it.message ?: "请稍后重试"}" },
                                     ),
                                 )
@@ -214,7 +219,7 @@ fun SettingsScreen() {
                         Column(Modifier.weight(1f)) {
                             Text("隐私优先的本地架构", style = MaterialTheme.typography.titleMedium, color = Color.White)
                             Text(
-                                "FitSync 不保存平台账号密码，不使用自建服务器。Cookie、加密令牌、活动库与 FIT 文件都只存在应用沙箱，系统备份也已关闭。",
+                                "无自建服务器。迈金/行者/Garmin 主要保存 Cookie 与会话令牌；iGPSPORT/COROS 的账号密码经 Android Keystore 加密保存在本机，仅用于 token 失效时自动重登。活动库与 FIT 仅在应用沙箱，系统备份已关闭。",
                                 modifier = Modifier.padding(top = 4.dp),
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = Color.White.copy(alpha = 0.66f),

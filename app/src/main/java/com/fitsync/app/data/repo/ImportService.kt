@@ -93,13 +93,14 @@ class ImportService(
                 ) && parsed.startTimeEpochMs == null
             ) {
                 importDao.update(
-                    importDao.getById(jobId)!!.copy(
+                    importDao.getById(jobId)?.copy(
                         status = ImportJobStatus.INVALID,
                         validationStatus = parsed.validationStatus,
                         errorMessage = parsed.errorMessage,
                         updatedAtEpochMs = System.currentTimeMillis(),
-                    ),
+                    ) ?: return ImportOutcome.Invalid(jobId, parsed.validationStatus, parsed.errorMessage),
                 )
+                deleteOrphanStoredFile(stored.file.absolutePath, stored.sha256)
                 return ImportOutcome.Invalid(jobId, parsed.validationStatus, parsed.errorMessage)
             }
 
@@ -114,18 +115,20 @@ class ImportService(
             )
 
             importDao.update(
-                importDao.getById(jobId)!!.copy(
+                importDao.getById(jobId)?.copy(
                     displayName = stored.displayName,
                     status = ImportJobStatus.DEDUPLICATING,
                     localFilePath = stored.file.absolutePath,
                     validationStatus = parsed.validationStatus,
                     updatedAtEpochMs = System.currentTimeMillis(),
-                ),
+                ) ?: return ImportOutcome.Failed(jobId, "导入任务丢失"),
             )
 
-            val all = db.canonicalActivityDao().getAll()
+            // 与 DedupEngine 时间窗一致，避免全表扫描
+            val windowMs = DEDUP_TIME_WINDOW_MS
+            val nearby = db.canonicalActivityDao().findByStartTimeRange(start - windowMs, start + windowMs)
             val candidates = dedupEngine.filterCandidates(
-                all = all,
+                all = nearby,
                 startTimeEpochMs = start,
                 distanceMeters = parsed.distanceMeters,
                 sportType = parsed.sportType,
@@ -161,6 +164,7 @@ class ImportService(
                     val existing = db.canonicalActivityDao().getById(id)!!
                     val merged = existing.withMissingMetricsFrom(parsed).copy(
                         dedupStatus = DedupStatus.AUTO_MERGED,
+                        reviewCandidateCanonicalId = null,
                     )
                     // 合并后强制使用「日期 时段 活动类型」中性标题，不偏袒任一来源平台。
                     db.canonicalActivityDao().update(
@@ -169,7 +173,7 @@ class ImportService(
                     id
                 }
                 DedupDecision.Action.NEEDS_REVIEW -> {
-                    // Keep as separate canonical but flag needs review; user can merge later.
+                    // 独立 canonical + 记录候选，供详情页人工合并/保持分离
                     val id = db.canonicalActivityDao().insert(
                         CanonicalActivityEntity(
                             sportType = resolvedSportType,
@@ -184,6 +188,7 @@ class ImportService(
                                 ?: FitFileNaming.displayTitle(start, resolvedSportType),
                             activityFingerprint = ActivityFingerprint.compute(parsed),
                             dedupStatus = DedupStatus.NEEDS_REVIEW,
+                            reviewCandidateCanonicalId = decision.matchedCanonicalId,
                         ),
                     )
                     id
@@ -225,12 +230,12 @@ class ImportService(
                 else -> ImportJobStatus.READY
             }
             importDao.update(
-                importDao.getById(jobId)!!.copy(
+                importDao.getById(jobId)?.copy(
                     status = finalStatus,
                     canonicalActivityId = canonicalId,
                     variantId = variantId,
                     updatedAtEpochMs = System.currentTimeMillis(),
-                ),
+                ) ?: return ImportOutcome.Failed(jobId, "导入任务丢失"),
             )
 
             ImportOutcome.Success(
@@ -242,15 +247,25 @@ class ImportService(
                 validationStatus = parsed.validationStatus,
             )
         } catch (t: Throwable) {
-            importDao.update(
-                importDao.getById(jobId)!!.copy(
-                    status = ImportJobStatus.INVALID,
-                    errorMessage = t.message,
-                    updatedAtEpochMs = System.currentTimeMillis(),
-                ),
-            )
+            importDao.getById(jobId)?.let { job ->
+                importDao.update(
+                    job.copy(
+                        status = ImportJobStatus.INVALID,
+                        errorMessage = t.message,
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                    ),
+                )
+                job.localFilePath?.let { path ->
+                    deleteOrphanStoredFile(path, job.fileSha256)
+                }
+            }
             ImportOutcome.Failed(jobId, t.message)
         }
+    }
+
+    private suspend fun deleteOrphanStoredFile(path: String, sha256: String?) {
+        if (sha256 != null && db.activityVariantDao().findBySha256(sha256) != null) return
+        fileStore.deleteStoredFiles(listOf(path))
     }
 
     suspend fun importFromFile(
@@ -394,6 +409,9 @@ class ImportService(
         // 未来解析器版本继续递增(3→4→…)时，settings.fitParserVersion 已 ≥ 3，不再重复回填，
         // 从而保护此后新导入活动捕获的平台原名(preferredTitle)不被覆盖。
         const val TITLE_BACKFILL_GATE = 3
+
+        /** 与 DedupEngine 候选时间窗一致（±10 分钟） */
+        const val DEDUP_TIME_WINDOW_MS = 10L * 60 * 1000
     }
 }
 

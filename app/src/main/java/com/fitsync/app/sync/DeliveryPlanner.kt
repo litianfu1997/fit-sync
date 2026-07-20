@@ -86,16 +86,25 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
     suspend fun planHistory(ruleId: Long): Int {
         val rule = db.syncRuleDao().getAll().firstOrNull { it.id == ruleId } ?: return 0
         var count = 0
-        db.canonicalActivityDao().getAll().forEach { activity ->
-            val variants = db.activityVariantDao().findByCanonical(activity.id)
-            if (variants.any { (it.sourcePlatform ?: Platform.LOCAL_IMPORT) == rule.sourcePlatform }) {
-                count += planForActivity(activity.id, rule.sourcePlatform)
+        var offset = 0
+        while (true) {
+            val page = db.canonicalActivityDao().getPage(HISTORY_PAGE_SIZE, offset)
+            if (page.isEmpty()) break
+            page.forEach { activity ->
+                val variants = db.activityVariantDao().findByCanonical(activity.id)
+                if (variants.any { (it.sourcePlatform ?: Platform.LOCAL_IMPORT) == rule.sourcePlatform }) {
+                    count += planForActivity(activity.id, rule.sourcePlatform)
+                }
             }
+            offset += page.size
+            if (page.size < HISTORY_PAGE_SIZE) break
         }
         return count
     }
 
     companion object {
+        private const val HISTORY_PAGE_SIZE = 100
+
         fun idempotencyKey(fileSha256: String, destinationAccountId: Long): String {
             val raw = "$fileSha256:$destinationAccountId".toByteArray()
             return MessageDigest.getInstance("SHA-256").digest(raw)

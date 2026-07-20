@@ -50,7 +50,9 @@ import android.widget.Toast
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
 import com.fitsync.app.data.repo.ActivityDeletionResult
+import com.fitsync.app.data.repo.MergeResult
 import com.fitsync.app.domain.model.AccountStatus
+import com.fitsync.app.domain.model.DedupStatus
 import com.fitsync.app.domain.model.DeliveryJobStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.sync.SyncScheduler
@@ -82,10 +84,24 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
     val accounts by app.database.platformAccountDao().observeAll().collectAsState(initial = emptyList())
     var actionMessage by remember { mutableStateOf<String?>(null) }
     var showDeleteConfirmation by remember { mutableStateOf(false) }
+    var showMergeConfirmation by remember { mutableStateOf(false) }
     var isDeleting by remember { mutableStateOf(false) }
+    var isMerging by remember { mutableStateOf(false) }
+    var reviewCandidate by remember { mutableStateOf<CanonicalActivityEntity?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val dateFormat = remember { SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.getDefault()) }
+
+    LaunchedEffect(activity?.reviewCandidateCanonicalId, activity?.dedupStatus) {
+        val candidateId = activity?.reviewCandidateCanonicalId
+        reviewCandidate = if (
+            activity?.dedupStatus == DedupStatus.NEEDS_REVIEW && candidateId != null
+        ) {
+            withContext(Dispatchers.IO) { app.database.canonicalActivityDao().getById(candidateId) }
+        } else {
+            null
+        }
+    }
 
     var hasObservedActivity by remember { mutableStateOf(false) }
 
@@ -144,6 +160,61 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
         )
     }
 
+    if (showMergeConfirmation) {
+        val candidate = reviewCandidate
+        AlertDialog(
+            onDismissRequest = { if (!isMerging) showMergeConfirmation = false },
+            title = { Text("合并到候选活动？") },
+            text = {
+                Text(
+                    if (candidate != null) {
+                        "将把本活动的 FIT 副本与平台映射合并到「${candidate.title ?: "活动 #${candidate.id}"}」，并删除本条记录。此操作不可撤销。"
+                    } else {
+                        "候选活动已不存在，无法合并。"
+                    },
+                )
+            },
+            confirmButton = {
+                Button(
+                    enabled = !isMerging && candidate != null,
+                    onClick = {
+                        isMerging = true
+                        scope.launch(Dispatchers.IO) {
+                            val result = runCatching { app.activityMergeService.mergeIntoCandidate(activityId) }
+                            withContext(Dispatchers.Main) {
+                                isMerging = false
+                                showMergeConfirmation = false
+                                result.onSuccess { merge ->
+                                    when (merge) {
+                                        is MergeResult.Merged -> {
+                                            Toast.makeText(
+                                                context,
+                                                "已合并，迁移 ${merge.movedVariants} 个副本",
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                            onBack()
+                                        }
+                                        MergeResult.CandidateMissing ->
+                                            actionMessage = "候选活动已不存在"
+                                        MergeResult.NoCandidate ->
+                                            actionMessage = "没有可合并的候选"
+                                        MergeResult.NotFound, MergeResult.InvalidState ->
+                                            actionMessage = "当前状态无法合并"
+                                    }
+                                }.onFailure {
+                                    actionMessage = "合并失败：${it.message ?: "请稍后重试"}"
+                                }
+                            }
+                        }
+                    },
+                ) { Text(if (isMerging) "合并中…" else "确认合并") }
+            },
+            dismissButton = {
+                TextButton(enabled = !isMerging, onClick = { showMergeConfirmation = false }) { Text("取消") }
+            },
+        )
+    }
+
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
             title = "活动详情",
@@ -165,6 +236,26 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
         ) {
             activity?.let { current ->
                 item { ActivitySummary(current, dateFormat) }
+                if (current.dedupStatus == DedupStatus.NEEDS_REVIEW) {
+                    item {
+                        ReviewActionsCard(
+                            candidate = reviewCandidate,
+                            dateFormat = dateFormat,
+                            busy = isMerging,
+                            onMerge = { showMergeConfirmation = true },
+                            onKeepSeparate = {
+                                scope.launch(Dispatchers.IO) {
+                                    val ok = runCatching {
+                                        app.activityMergeService.keepSeparate(activityId)
+                                    }.getOrDefault(false)
+                                    withContext(Dispatchers.Main) {
+                                        actionMessage = if (ok) "已标记为保持分离" else "操作失败"
+                                    }
+                                }
+                            },
+                        )
+                    }
+                }
             }
             if (sourcePlatforms.isNotEmpty()) {
                 item { ActivitySourcesRow(sourcePlatforms) }
@@ -374,6 +465,39 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                         }
                         actionMessage?.let { StatusPill(it, StatusTone.ERROR) }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReviewActionsCard(
+    candidate: CanonicalActivityEntity?,
+    dateFormat: SimpleDateFormat,
+    busy: Boolean,
+    onMerge: () -> Unit,
+    onKeepSeparate: () -> Unit,
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = FitOrangeSoft.copy(alpha = 0.35f))) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("疑似重复活动", style = MaterialTheme.typography.titleSmall)
+            Text(
+                if (candidate != null) {
+                    "与「${candidate.title ?: "活动 #${candidate.id}"}」" +
+                        "（${dateFormat.format(Date(candidate.startTimeEpochMs))}）高度相似，请选择合并或保持分离。"
+                } else {
+                    "系统标记为待复核，但候选活动已不存在。可选择保持分离。"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(enabled = !busy && candidate != null, onClick = onMerge) {
+                    Text("合并到候选")
+                }
+                OutlinedButton(enabled = !busy, onClick = onKeepSeparate) {
+                    Text("保持分离")
                 }
             }
         }

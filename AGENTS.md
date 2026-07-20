@@ -40,17 +40,18 @@ export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"   # 或对应的 SDK 路径
 
 新增需要被复用的组件时：在 `FitSyncApp.onCreate()` 构造并暴露字段，不要就地 `new`。
 
-### 核心数据模型（Room，version 3）
+### 核心数据模型（Room，version 4）
 
 数据模型围绕「同一骑行的多个来源副本」展开，理解这层关系是修改同步逻辑的前提：
 
-- `CanonicalActivity` — 一条**规范化的真实活动**（去重后的「真相」），承载汇总指标 + `primaryVariantId`。
-- `ActivityVariant` — 同一活动从不同平台/设备拿到的**原始 FIT 文件副本**（按 `fileSha256` 唯一），带质量分、设备信息、轨迹摘要。canonical 1 → N variant。
-- `PlatformCopy` — 记录「某活动已经存在于某平台账号」，`(canonicalActivityId, platformAccountId)` 与 `(platformAccountId, remoteActivityId)` 双唯一索引。**这是去重和防止同步循环的关键表**。
+- `CanonicalActivity` — 一条**规范化的真实活动**（去重后的「真相」），承载汇总指标 + `primaryVariantId`；`NEEDS_REVIEW` 时用 `reviewCandidateCanonicalId` 指向候选。
+- `ActivityVariant` — 同一活动从不同平台/设备拿到的**原始 FIT 文件副本**（按 `fileSha256` 唯一），带质量分、设备信息、轨迹摘要。canonical 1 → N variant。本地文件可按 `FitStoragePolicy` 被 `FitStorageJanitor` 清理（path 置空，元数据保留）。
+- `PlatformCopy` — 记录「某活动已经存在于某平台账号」，`(canonicalActivityId, platformAccountId)` 与 `(platformAccountId, remoteActivityId)` 双唯一索引。**这是去重和防止同步循环的关键表**。写入统一走 `planPlatformCopyUpsert` / `upsertPlatformCopy`（合成 remoteId → 真实 ID 对齐）。
 - `DeliveryJob` — 上传任务队列（状态机 + 幂等键 + 重试退避）。`idempotencyKey = sha256(variant)+destinationAccountId`。
 - `SyncRule` — 「来源平台 → 目标账号」规则，启用即授权自动投递。
 - `ImportJob` — 单次导入过程的审计记录（COPYING→VALIDATING→DEDUPLICATING→READY/INVALID）。
 - `PlatformAccount` — 每平台**最多一个**账号（`platform` 唯一索引，迁移 1→2 时做了去重）。
+- 人工合并：`ActivityMergeService`（合并到候选 / 保持分离）。
 
 **Room schema 变更**：改实体必须新增 `Migration` 并加到 `FitSyncDatabase.build()` 的 `.addMigrations(...)`，同时递增 `@Database(version = ...)`。`exportSchema = false`。
 

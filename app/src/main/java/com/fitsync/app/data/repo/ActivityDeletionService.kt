@@ -20,8 +20,8 @@ class ActivityDeletionService(
         val importJobs = db.importJobDao().findByCanonical(activityId)
         val deliveryJobs = db.deliveryJobDao().findByCanonical(activityId)
         val paths = buildSet {
-            variants.mapTo(this) { it.localFilePath }
-            importJobs.mapNotNullTo(this) { it.localFilePath }
+            variants.mapNotNullTo(this) { it.localFilePath.takeIf(String::isNotBlank) }
+            importJobs.mapNotNullTo(this) { it.localFilePath?.takeIf(String::isNotBlank) }
         }
 
         db.withTransaction {

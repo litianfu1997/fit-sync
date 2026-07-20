@@ -60,9 +60,10 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
 ## 隐私
 
 - 数据仅存本机  
-- App 不保存平台账号密码；必要令牌使用 Android Keystore 加密  
+- 迈金 / 行者 / Garmin：主要保存 WebView Cookie 与会话令牌（Keystore 加密敏感字段）  
+- iGPSPORT / COROS：账号密码经 Android Keystore 加密保存在本机，**仅用于** access token 失效时自动重登  
 - Android 自动备份已关闭，Cookie、活动库和 FIT 仅保存在应用沙箱  
-- 默认同步成功 7 天后可清理原始 FIT（策略可配置）  
+- 默认同步成功 7 天后可清理原始 FIT（设置中可改：长期保留 / 成功后删除）；清理只删文件，活动元数据保留  
 - 换机不会自动同步库（后续提供导出备份）  
 
 ## 文档
