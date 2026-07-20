@@ -6,10 +6,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.SyncAlt
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -32,9 +30,12 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.fitsync.app.ui.screens.ActivitiesScreen
 import com.fitsync.app.ui.screens.ActivityDetailScreen
+import com.fitsync.app.ui.screens.BackgroundSettingsScreen
 import com.fitsync.app.ui.screens.HomeScreen
 import com.fitsync.app.ui.screens.PlatformsScreen
+import com.fitsync.app.ui.screens.PrivacyAboutScreen
 import com.fitsync.app.ui.screens.SettingsScreen
+import com.fitsync.app.ui.screens.StorageSettingsScreen
 import com.fitsync.app.ui.screens.SyncJobFilter
 import com.fitsync.app.ui.screens.SyncJobsScreen
 import com.fitsync.app.ui.screens.SyncRulesScreen
@@ -46,10 +47,8 @@ private data class MainDestination(
 )
 
 private val destinations = listOf(
-    MainDestination("home", "首页", Icons.Default.Home),
+    MainDestination("home", "概览", Icons.Default.Home),
     MainDestination("activities", "活动", Icons.AutoMirrored.Filled.List),
-    MainDestination("rules", "自动化", Icons.Default.SyncAlt),
-    MainDestination("platforms", "连接", Icons.Default.Devices),
     MainDestination("settings", "设置", Icons.Default.Settings),
 )
 
@@ -114,19 +113,42 @@ fun FitSyncAppRoot() {
                 HomeScreen(
                     onOpenActivities = { navigateToMainDestination("activities") },
                     onOpenJobs = { filter -> navController.navigate("jobs/${filter.routeValue}") },
+                    onOpenPlatforms = { navController.navigate("settings/platforms") },
                 )
             }
             composable("activities") {
                 ActivitiesScreen(
                     onOpenActivity = { id -> navController.navigate("activity/$id") },
-                    onOpenPlatforms = { navigateToMainDestination("platforms") },
+                    onOpenPlatforms = { navController.navigate("settings/platforms") },
                 )
             }
-            composable("rules") {
-                SyncRulesScreen(onOpenPlatforms = { navigateToMainDestination("platforms") })
+            composable("settings") {
+                SettingsScreen(
+                    onOpenPlatforms = { navController.navigate("settings/platforms") },
+                    onOpenRules = { navController.navigate("settings/rules") },
+                    onOpenBackground = { navController.navigate("settings/background") },
+                    onOpenStorage = { navController.navigate("settings/storage") },
+                    onOpenPrivacy = { navController.navigate("settings/privacy") },
+                )
             }
-            composable("platforms") { PlatformsScreen() }
-            composable("settings") { SettingsScreen() }
+            composable("settings/platforms") {
+                PlatformsScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/rules") {
+                SyncRulesScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenPlatforms = { navController.navigate("settings/platforms") },
+                )
+            }
+            composable("settings/background") {
+                BackgroundSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/storage") {
+                StorageSettingsScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/privacy") {
+                PrivacyAboutScreen(onBack = { navController.popBackStack() })
+            }
             composable(
                 route = "jobs/{filter}",
                 arguments = listOf(navArgument("filter") { type = NavType.StringType }),

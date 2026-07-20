@@ -5,6 +5,7 @@ import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.DeliveryJobEntity
 import com.fitsync.app.data.db.entity.SyncRuleEntity
 import com.fitsync.app.domain.model.Platform
+import com.fitsync.app.domain.model.SportType
 import java.security.MessageDigest
 
 class DeliveryPlanner(private val db: FitSyncDatabase) {
@@ -54,6 +55,56 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
                 executionMode = PlatformCapabilityRegistry.capabilities(destination.platform).uploadFitMode,
             ),
         )
+    }
+
+    /**
+     * 为首页发起的一次性同步建立任务。范围由来源、目标、活动类型和历史起点共同限定，
+     * 不读取也不修改长期自动化规则。
+     */
+    suspend fun planManualSelection(
+        sourcePlatform: Platform,
+        destinationAccountId: Long,
+        sportTypes: Set<SportType>,
+        fromEpochMs: Long,
+    ): Int {
+        if (sportTypes.isEmpty()) return 0
+        val destination = db.platformAccountDao().getById(destinationAccountId) ?: return 0
+        if (destination.platform == sourcePlatform) return 0
+        val sourceAccountId = if (sourcePlatform == Platform.LOCAL_IMPORT) {
+            null
+        } else {
+            db.platformAccountDao().getByPlatform(sourcePlatform)?.id
+        }
+
+        var count = 0
+        var offset = 0
+        var reachedHistoryStart = false
+        while (!reachedHistoryStart) {
+            val page = db.canonicalActivityDao().getPage(HISTORY_PAGE_SIZE, offset)
+            if (page.isEmpty()) break
+            for (activity in page) {
+                if (activity.startTimeEpochMs < fromEpochMs) {
+                    reachedHistoryStart = true
+                    break
+                }
+                if (activity.sportType !in sportTypes) continue
+                val hasSourceVariant = db.activityVariantDao().findByCanonical(activity.id).any { variant ->
+                    (variant.sourcePlatform ?: Platform.LOCAL_IMPORT) == sourcePlatform
+                }
+                val hasSourceCopy = sourceAccountId != null &&
+                    db.platformCopyDao().findByCanonicalAndAccount(activity.id, sourceAccountId) != null
+                val comesFromSource = matchesManualSyncSource(
+                    sourcePlatform = sourcePlatform,
+                    hasSourceVariant = hasSourceVariant,
+                    hasSourceCopy = hasSourceCopy,
+                )
+                if (!comesFromSource) continue
+                if (enqueueManual(activity.id, destinationAccountId) > 0) count++
+            }
+            offset += page.size
+            if (page.size < HISTORY_PAGE_SIZE) break
+        }
+        return count
     }
 
     suspend fun setRule(
@@ -112,3 +163,13 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
         }
     }
 }
+
+/**
+ * “本机导入”表示已经进入 FitSync 本地活动库的全部活动，不受原始平台标签限制。
+ * 云平台来源仍需存在对应的平台原始文件或平台副本。
+ */
+internal fun matchesManualSyncSource(
+    sourcePlatform: Platform,
+    hasSourceVariant: Boolean,
+    hasSourceCopy: Boolean,
+): Boolean = sourcePlatform == Platform.LOCAL_IMPORT || hasSourceVariant || hasSourceCopy

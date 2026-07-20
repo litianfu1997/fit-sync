@@ -16,11 +16,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Route
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -29,6 +29,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -47,7 +48,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.fitsync.app.FitSyncApp
@@ -76,7 +76,10 @@ private data class HistoryConfirmation(
 )
 
 @Composable
-fun SyncRulesScreen(onOpenPlatforms: () -> Unit = {}) {
+fun SyncRulesScreen(
+    onBack: () -> Unit = {},
+    onOpenPlatforms: () -> Unit = {},
+) {
     val app = FitSyncApp.instance
     val accounts by app.database.platformAccountDao().observeAll().collectAsState(initial = emptyList())
     val rules by app.database.syncRuleDao().observeAll().collectAsState(initial = emptyList())
@@ -139,18 +142,20 @@ fun SyncRulesScreen(onOpenPlatforms: () -> Unit = {}) {
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            AppTopBar(title = "同步自动化", subtitle = "先选择来源，再决定活动去向")
+            AppTopBar(
+                title = "同步自动化",
+                subtitle = "选择来源，再决定活动去向",
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                },
+            )
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                item {
-                    AutomationSummary(
-                        enabledCount = rules.count { it.enabled },
-                        connectedCount = connectedAccounts.size,
-                    )
-                }
                 if (connectedAccounts.isEmpty()) {
                     item {
                         EmptyState(
@@ -256,36 +261,6 @@ fun SyncRulesScreen(onOpenPlatforms: () -> Unit = {}) {
 }
 
 @Composable
-private fun AutomationSummary(enabledCount: Int, connectedCount: Int) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF151A22)),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(18.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Box(
-                modifier = Modifier.size(46.dp).clip(MaterialTheme.shapes.medium)
-                    .background(Color(0xFFF97316).copy(alpha = 0.18f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Default.Shield, contentDescription = null, tint = Color(0xFFFFB067))
-            }
-            Column(Modifier.weight(1f)) {
-                Text("$enabledCount 条路径正在运行", style = MaterialTheme.typography.titleMedium, color = Color.White)
-                Text(
-                    "$connectedCount 个平台可参与同步 · 启用即授权自动上传",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.62f),
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun SourceRouteHeader(source: Platform, enabledCount: Int) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -327,18 +302,18 @@ private fun RouteCard(
                     else MaterialTheme.colorScheme.outlineVariant,
                     MaterialTheme.shapes.large,
                 )
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                PlatformAvatar(source, 36.dp)
+                PlatformAvatar(source, 32.dp)
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowForward,
                     contentDescription = null,
                     tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )
-                PlatformAvatar(destination, 42.dp)
+                PlatformAvatar(destination, 38.dp)
                 Column(Modifier.weight(1f)) {
                     Text(destination.displayName, style = MaterialTheme.typography.titleSmall)
                     Text(

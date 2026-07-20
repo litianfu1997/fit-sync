@@ -3,13 +3,13 @@ package com.fitsync.app.sync
 import android.content.Context
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
+import androidx.work.Data
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.workDataOf
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.fitsync.app.FitSyncApp
@@ -29,7 +29,10 @@ class SyncWorker(
         val summary = if (deliveryOnly) {
             app.syncCoordinator.runDeliveryBatch()
         } else {
-            app.syncCoordinator.runSync(force = inputData.getBoolean(KEY_FORCE, false))
+            app.syncCoordinator.runSync(
+                force = inputData.getBoolean(KEY_FORCE, false),
+                manualSelection = inputData.toManualSyncSelection(),
+            )
         }
         if (summary.hasMoreDeliveries) {
             SyncScheduler.enqueueContinuation(applicationContext, summary.nextDeliveryDelayMs ?: 0)
@@ -81,8 +84,13 @@ object SyncScheduler {
         )
     }
 
-    fun enqueueNow(context: Context) {
-        val request = oneTimeRequest(force = true, deliveryOnly = false, expedited = true)
+    fun enqueueNow(context: Context, selection: ManualSyncSelection? = null) {
+        val request = oneTimeRequest(
+            force = true,
+            deliveryOnly = false,
+            expedited = true,
+            manualSelection = selection,
+        )
         WorkManager.getInstance(context)
             .enqueueUniqueWork(MANUAL_NAME, ExistingWorkPolicy.REPLACE, request)
     }
@@ -108,8 +116,17 @@ object SyncScheduler {
         deliveryOnly: Boolean,
         delayMs: Long = 0,
         expedited: Boolean = false,
+        manualSelection: ManualSyncSelection? = null,
     ) = OneTimeWorkRequestBuilder<SyncWorker>()
-        .setInputData(workDataOf(KEY_FORCE to force, KEY_DELIVERY_ONLY to deliveryOnly))
+        .setInputData(
+            Data.Builder()
+                .putBoolean(KEY_FORCE, force)
+                .putBoolean(KEY_DELIVERY_ONLY, deliveryOnly)
+                .apply {
+                    if (manualSelection != null) putManualSyncSelection(manualSelection)
+                }
+                .build(),
+        )
         .setConstraints(
             Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build(),
         )

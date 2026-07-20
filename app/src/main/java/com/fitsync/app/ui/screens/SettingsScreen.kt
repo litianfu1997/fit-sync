@@ -1,8 +1,8 @@
 package com.fitsync.app.ui.screens
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,17 +12,22 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Route
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
@@ -31,7 +36,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
@@ -61,6 +68,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.data.db.entity.AppSettingsEntity
+import com.fitsync.app.domain.model.AccountStatus
 import com.fitsync.app.domain.model.FitStoragePolicy
 import com.fitsync.app.sync.BackgroundRunGuard
 import com.fitsync.app.sync.BackgroundRunStatus
@@ -73,20 +81,34 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(
+    onOpenPlatforms: () -> Unit = {},
+    onOpenRules: () -> Unit = {},
+    onOpenBackground: () -> Unit = {},
+    onOpenStorage: () -> Unit = {},
+    onOpenPrivacy: () -> Unit = {},
+) {
     val app = FitSyncApp.instance
     val settings by app.database.appSettingsDao().observe().collectAsState(initial = null)
+    val accounts by app.database.platformAccountDao().observeAll().collectAsState(initial = emptyList())
+    val rules by app.database.syncRuleDao().observeAll().collectAsState(initial = emptyList())
     val current = settings ?: AppSettingsEntity()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val snackbarHostState = androidx.compose.runtime.remember { SnackbarHostState() }
+    val snackbarHostState = remember { SnackbarHostState() }
     val guard = remember(context) { BackgroundRunGuard(context.applicationContext) }
     var resumeTick by remember { mutableIntStateOf(0) }
     var showBackgroundPrompt by remember { mutableStateOf(false) }
     val backgroundStatus = remember(resumeTick, current.autoSyncEnabled) {
         guard.evaluate(current.autoSyncEnabled)
     }
+    val boundAccounts = accounts.filter { it.status != AccountStatus.DISABLED }
+    val accountsNeedingAttention = boundAccounts.count {
+        it.status == AccountStatus.AUTH_EXPIRED || it.status == AccountStatus.NEEDS_USER_ACTION
+    }
+    val enabledRuleCount = rules.count { it.enabled }
     val lifecycleOwner = LocalLifecycleOwner.current
+
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) resumeTick++
@@ -118,10 +140,7 @@ fun SettingsScreen() {
             title = { Text("允许后台运行") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "后台同步依赖系统调度。部分手机的「智能后台 / 省电策略」会限制 FitSync，" +
-                            "导致无法按时拉取与投递活动。",
-                    )
+                    Text("后台同步依赖系统调度，部分手机的省电策略会限制 FitSync 按时工作。")
                     Text(
                         BackgroundRunGuard.oemSummary(backgroundStatus.brand),
                         style = MaterialTheme.typography.bodyMedium,
@@ -152,41 +171,141 @@ fun SettingsScreen() {
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            AppTopBar(title = "偏好设置", subtitle = "自动化、存储与隐私")
+            AppTopBar(title = "设置", subtitle = "集中管理同步与本机数据")
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-            item {
-                SettingsCard(Icons.Default.AutoAwesome, "自动同步", "Android 会根据网络和电量安排后台任务") {
-                    SettingSwitchRow(
-                        title = "后台增量同步",
-                        subtitle = "目标周期 15 分钟，实际时间由系统决定",
-                        checked = current.autoSyncEnabled,
-                        onCheckedChange = { enabled ->
-                            save(current.copy(autoSyncEnabled = enabled)) {
-                                if (enabled &&
-                                    !guard.isIgnoringBatteryOptimizations() &&
-                                    !guard.isBatteryPromptDone()
-                                ) {
-                                    showBackgroundPrompt = true
+                item {
+                    SettingsGroup("同步") {
+                        SettingSwitchRow(
+                            title = "自动同步",
+                            subtitle = "由系统在后台增量拉取与投递",
+                            checked = current.autoSyncEnabled,
+                            onCheckedChange = { enabled ->
+                                save(current.copy(autoSyncEnabled = enabled)) {
+                                    if (enabled &&
+                                        !guard.isIgnoringBatteryOptimizations() &&
+                                        !guard.isBatteryPromptDone()
+                                    ) {
+                                        showBackgroundPrompt = true
+                                    }
                                 }
-                            }
-                        },
-                    )
-                    SettingSwitchRow(
-                        title = "需要操作时通知",
-                        subtitle = "登录失效、验证码或网页上传时提醒",
-                        checked = current.notificationsEnabled,
-                        onCheckedChange = { save(current.copy(notificationsEnabled = it)) },
-                        icon = Icons.Default.NotificationsActive,
-                    )
+                            },
+                            icon = Icons.Default.AutoAwesome,
+                        )
+                        SettingsDivider()
+                        SettingsLinkRow(
+                            icon = Icons.Default.Devices,
+                            title = "平台账号",
+                            subtitle = when {
+                                boundAccounts.isEmpty() -> "添加需要同步的平台"
+                                accountsNeedingAttention > 0 ->
+                                    "${boundAccounts.size} 个账号，$accountsNeedingAttention 个需处理"
+                                else -> "${boundAccounts.size} 个账号已连接"
+                            },
+                            onClick = onOpenPlatforms,
+                        )
+                        SettingsDivider()
+                        SettingsLinkRow(
+                            icon = Icons.Default.Route,
+                            title = "同步自动化",
+                            subtitle = when {
+                                rules.isEmpty() -> "设置活动来源与目标平台"
+                                enabledRuleCount == 0 -> "已有规则，尚未启用"
+                                else -> "$enabledRuleCount 条路径已启用"
+                            },
+                            onClick = onOpenRules,
+                        )
+                    }
+                }
+                item {
+                    SettingsGroup("系统") {
+                        SettingsLinkRow(
+                            icon = Icons.Default.BatteryChargingFull,
+                            title = "后台运行",
+                            subtitle = if (backgroundStatus.needsAttention) "系统设置可能影响同步" else "后台运行状态正常",
+                            onClick = onOpenBackground,
+                            trailing = {
+                                StatusPill(
+                                    if (backgroundStatus.needsAttention) "需检查" else "正常",
+                                    if (backgroundStatus.needsAttention) StatusTone.WARNING else StatusTone.SUCCESS,
+                                )
+                            },
+                        )
+                        SettingsDivider()
+                        SettingSwitchRow(
+                            title = "操作提醒",
+                            subtitle = "登录失效、验证码或网页操作时通知",
+                            checked = current.notificationsEnabled,
+                            onCheckedChange = { save(current.copy(notificationsEnabled = it)) },
+                            icon = Icons.Default.NotificationsActive,
+                        )
+                    }
+                }
+                item {
+                    SettingsGroup("数据") {
+                        SettingsLinkRow(
+                            icon = Icons.Default.Storage,
+                            title = "数据与存储",
+                            subtitle = "历史范围、FIT 保留与文件清理",
+                            onClick = onOpenStorage,
+                        )
+                        SettingsDivider()
+                        SettingsLinkRow(
+                            icon = Icons.Default.Security,
+                            title = "隐私与关于",
+                            subtitle = "本地架构、安全说明与版本信息",
+                            onClick = onOpenPrivacy,
+                        )
+                    }
                 }
             }
+        }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
+    }
+}
+
+@Composable
+fun BackgroundSettingsScreen(onBack: () -> Unit) {
+    val settings by FitSyncApp.instance.database.appSettingsDao().observe().collectAsState(initial = null)
+    val context = LocalContext.current
+    val guard = remember(context) { BackgroundRunGuard(context.applicationContext) }
+    var resumeTick by remember { mutableIntStateOf(0) }
+    val status = remember(resumeTick, settings?.autoSyncEnabled) {
+        guard.evaluate(settings?.autoSyncEnabled != false)
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumeTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        AppTopBar(
+            title = "后台运行",
+            subtitle = "确保系统不会中断同步",
+            navigationIcon = {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                }
+            },
+        )
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
+        ) {
             item {
                 BackgroundProtectionCard(
-                    status = backgroundStatus,
+                    status = status,
                     onAllowBackground = {
                         guard.openBackgroundSettings(preferBatteryRequest = true)
                         resumeTick++
@@ -201,140 +320,251 @@ fun SettingsScreen() {
                     },
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun StorageSettingsScreen(onBack: () -> Unit) {
+    val app = FitSyncApp.instance
+    val settings by app.database.appSettingsDao().observe().collectAsState(initial = null)
+    val current = settings ?: AppSettingsEntity()
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    fun save(next: AppSettingsEntity) {
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    app.database.appSettingsDao().upsert(next)
+                    SyncScheduler.schedule(context, next.autoSyncEnabled, next.syncIntervalMinutes)
+                }
+            }
+            result.exceptionOrNull()?.let {
+                snackbarHostState.showSnackbar("保存失败：${it.message ?: "请稍后重试"}")
+            }
+        }
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            AppTopBar(
+                title = "数据与存储",
+                subtitle = "控制拉取范围与原始 FIT 保留",
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                    }
+                },
+            )
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                item {
+                    SettingsCard(Icons.Default.History, "首次历史范围", "新绑定账号第一次拉取的时间跨度") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            listOf(30, 90, 180, 365).forEach { days ->
+                                FilterChip(
+                                    modifier = Modifier.height(44.dp),
+                                    selected = current.initialHistoryDays == days,
+                                    onClick = { save(current.copy(initialHistoryDays = days)) },
+                                    label = { Text("$days 天") },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                        selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    ),
+                                )
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            OutlinedButton(
+                                enabled = current.initialHistoryDays > 1,
+                                onClick = {
+                                    save(current.copy(initialHistoryDays = (current.initialHistoryDays - 30).coerceAtLeast(1)))
+                                },
+                            ) { Text("−30") }
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("${current.initialHistoryDays} 天", style = MaterialTheme.typography.titleLarge)
+                                Text("当前设置", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            OutlinedButton(
+                                enabled = current.initialHistoryDays < 3650,
+                                onClick = {
+                                    save(current.copy(initialHistoryDays = (current.initialHistoryDays + 30).coerceAtMost(3650)))
+                                },
+                            ) { Text("+30") }
+                        }
+                        Text(
+                            "后续增量同步固定使用 48 小时重叠窗口，避免平台延迟导致漏单。",
+                            modifier = Modifier.padding(top = 10.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                item {
+                    SettingsCard(Icons.Default.Storage, "原始 FIT 存储", "清理文件不会删除活动记录与平台映射") {
+                        StorageOption(
+                            title = "长期保存",
+                            subtitle = "永不自动删除原始 FIT，便于随时补发",
+                            selected = current.storagePolicy == FitStoragePolicy.KEEP_FOREVER,
+                            onClick = { save(current.copy(storagePolicy = FitStoragePolicy.KEEP_FOREVER)) },
+                        )
+                        StorageOption(
+                            title = "成功 7 天后删除",
+                            subtitle = "无未完成任务并满 7 天后清理原始文件",
+                            selected = current.storagePolicy == FitStoragePolicy.DELETE_AFTER_7_DAYS,
+                            onClick = { save(current.copy(storagePolicy = FitStoragePolicy.DELETE_AFTER_7_DAYS)) },
+                            recommended = true,
+                        )
+                        StorageOption(
+                            title = "同步成功后删除",
+                            subtitle = "成功投递且无未完成任务后立即清理",
+                            selected = current.storagePolicy == FitStoragePolicy.DELETE_AFTER_SYNC,
+                            onClick = { save(current.copy(storagePolicy = FitStoragePolicy.DELETE_AFTER_SYNC)) },
+                        )
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    val result = withContext(Dispatchers.IO) {
+                                        runCatching {
+                                            app.fitFileStore.cleanupTemporaryFiles()
+                                            app.fitStorageJanitor.run()
+                                        }
+                                    }
+                                    snackbarHostState.showSnackbar(
+                                        result.fold(
+                                            onSuccess = { janitor -> "已清理临时文件；按策略删除 ${janitor.deletedFiles} 个 FIT" },
+                                            onFailure = { "清理失败：${it.message ?: "请稍后重试"}" },
+                                        ),
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        ) {
+                            Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Text("立即清理文件", modifier = Modifier.padding(start = 8.dp))
+                        }
+                    }
+                }
+            }
+        }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
+    }
+}
+
+@Composable
+fun PrivacyAboutScreen(onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize()) {
+        AppTopBar(
+            title = "隐私与关于",
+            subtitle = "本地优先，不经过自建服务器",
+            navigationIcon = {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                }
+            },
+        )
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
             item {
-                SettingsCard(Icons.Default.History, "首次历史范围", "新绑定账号第一次拉取的时间跨度") {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        listOf(30, 90, 180, 365).forEach { days ->
-                            FilterChip(
-                                modifier = Modifier.height(44.dp),
-                                selected = current.initialHistoryDays == days,
-                                onClick = { save(current.copy(initialHistoryDays = days)) },
-                                label = { Text("$days 天") },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                ),
-                            )
-                        }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        OutlinedButton(
-                            enabled = current.initialHistoryDays > 1,
-                            onClick = { save(current.copy(initialHistoryDays = (current.initialHistoryDays - 30).coerceAtLeast(1))) },
-                        ) { Text("−30") }
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("${current.initialHistoryDays} 天", style = MaterialTheme.typography.titleLarge)
-                            Text("当前设置", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        OutlinedButton(
-                            enabled = current.initialHistoryDays < 3650,
-                            onClick = { save(current.copy(initialHistoryDays = (current.initialHistoryDays + 30).coerceAtMost(3650))) },
-                        ) { Text("+30") }
-                    }
+                SettingsCard(Icons.Default.Security, "隐私优先的本地架构", "账号会话与活动数据仅保存在本机") {
                     Text(
-                        "后续增量同步固定使用 48 小时重叠窗口，避免平台延迟导致漏单。",
-                        modifier = Modifier.padding(top = 10.dp),
-                        style = MaterialTheme.typography.bodySmall,
+                        "平台 Cookie、会话令牌和需要自动重登的平台凭据由 WebView 或 Android Keystore 管理。" +
+                            "活动库与原始 FIT 只保存在应用沙箱，系统备份已关闭。",
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
             item {
-                SettingsCard(Icons.Default.Storage, "原始 FIT 存储", "仅删除本地文件，活动记录与平台映射仍保留") {
-                    StorageOption(
-                        title = "长期保存",
-                        subtitle = "永不自动删除原始 FIT，便于随时补发",
-                        selected = current.storagePolicy == FitStoragePolicy.KEEP_FOREVER,
-                        onClick = { save(current.copy(storagePolicy = FitStoragePolicy.KEEP_FOREVER)) },
-                    )
-                    StorageOption(
-                        title = "成功 7 天后删除",
-                        subtitle = "无未完成投递，且距成功投递（或导入）满 7 天后清理文件",
-                        selected = current.storagePolicy == FitStoragePolicy.DELETE_AFTER_7_DAYS,
-                        onClick = { save(current.copy(storagePolicy = FitStoragePolicy.DELETE_AFTER_7_DAYS)) },
-                        recommended = true,
-                    )
-                    StorageOption(
-                        title = "同步成功后删除",
-                        subtitle = "至少成功投递过一次且无未完成任务后立即清理；之后无法再从本地上传",
-                        selected = current.storagePolicy == FitStoragePolicy.DELETE_AFTER_SYNC,
-                        onClick = { save(current.copy(storagePolicy = FitStoragePolicy.DELETE_AFTER_SYNC)) },
-                    )
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                val result = withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        app.fitFileStore.cleanupTemporaryFiles()
-                                        app.fitStorageJanitor.run()
-                                    }
-                                }
-                                snackbarHostState.showSnackbar(
-                                    result.fold(
-                                        onSuccess = { janitor ->
-                                            "已清理临时文件；按策略删除 ${janitor.deletedFiles} 个 FIT"
-                                        },
-                                        onFailure = { "清理失败：${it.message ?: "请稍后重试"}" },
-                                    ),
-                                )
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    ) {
-                        Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Text("清理下载临时文件", modifier = Modifier.padding(start = 8.dp))
-                    }
-                }
-            }
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF151A22)),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        verticalAlignment = Alignment.Top,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Box(
-                            modifier = Modifier.size(44.dp).clip(CircleShape)
-                                .background(Color(0xFF22C55E).copy(alpha = 0.16f)),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(Icons.Default.Security, contentDescription = null, tint = Color(0xFF6EE7A0))
-                        }
-                        Column(Modifier.weight(1f)) {
-                            Text("隐私优先的本地架构", style = MaterialTheme.typography.titleMedium, color = Color.White)
-                            Text(
-                                "无自建服务器。迈金/行者/Garmin 主要保存 Cookie 与会话令牌；iGPSPORT/COROS 的账号密码经 Android Keystore 加密保存在本机，仅用于 token 失效时自动重登。活动库与 FIT 仅在应用沙箱，系统备份已关闭。",
-                                modifier = Modifier.padding(top = 4.dp),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = Color.White.copy(alpha = 0.66f),
-                            )
-                        }
-                    }
-                }
-            }
-            item {
                 Text(
-                    "FitSync 0.1.0 · 本地优先五平台同步",
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    "FitSync 0.2.0",
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 8.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun SettingsGroup(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column {
+        Text(
+            title,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        ) {
+            Column(
+                modifier = Modifier.border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.large),
+                content = content,
+            )
         }
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+    }
+}
+
+@Composable
+private fun SettingsDivider() {
+    HorizontalDivider(
+        modifier = Modifier.padding(start = 66.dp),
+        color = MaterialTheme.colorScheme.outlineVariant,
+    )
+}
+
+@Composable
+private fun SettingsLinkRow(
+    icon: ImageVector,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    trailing: @Composable (() -> Unit)? = null,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
+            .heightIn(min = 72.dp).padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(
+            modifier = Modifier.size(40.dp).clip(MaterialTheme.shapes.small)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(21.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        trailing?.invoke()
+        Icon(
+            Icons.Default.ChevronRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
         )
     }
 }
@@ -346,11 +576,7 @@ private fun BackgroundProtectionCard(
     onOpenAppDetails: () -> Unit,
     onOpenNotifications: () -> Unit,
 ) {
-    SettingsCard(
-        Icons.Default.BatteryChargingFull,
-        "后台运行保护",
-        "避免智能省电/自启动管理中断同步",
-    ) {
+    SettingsCard(Icons.Default.BatteryChargingFull, "后台运行保护", "按当前系统状态完成必要设置") {
         StatusLine(
             label = "电池优化",
             ok = status.batteryOptimizationIgnored,
@@ -367,7 +593,7 @@ private fun BackgroundProtectionCard(
             label = "通知权限",
             ok = status.notificationsGranted,
             okText = "已开启",
-            badText = "未开启（进度与提醒可能静默）",
+            badText = "未开启",
         )
         Text(
             BackgroundRunGuard.oemSummary(status.brand),
@@ -397,23 +623,15 @@ private fun BackgroundProtectionCard(
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            OutlinedButton(
-                onClick = onOpenAppDetails,
-                modifier = Modifier.weight(1f),
-            ) { Text("应用详情") }
+            OutlinedButton(onClick = onOpenAppDetails, modifier = Modifier.weight(1f)) {
+                Text("应用详情")
+            }
             if (!status.notificationsGranted) {
-                OutlinedButton(
-                    onClick = onOpenNotifications,
-                    modifier = Modifier.weight(1f),
-                ) { Text("通知设置") }
+                OutlinedButton(onClick = onOpenNotifications, modifier = Modifier.weight(1f)) {
+                    Text("通知设置")
+                }
             }
         }
-        Text(
-            "自动同步依赖系统调度；若首页「最近成功同步」长期不更新，请按上表检查设置。",
-            modifier = Modifier.padding(top = 10.dp),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 
@@ -479,16 +697,25 @@ private fun SettingSwitchRow(
     icon: ImageVector? = null,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 7.dp),
+        modifier = Modifier.fillMaxWidth().clickable { onCheckedChange(!checked) }
+            .heightIn(min = 72.dp).padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        icon?.let { Icon(it, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+        if (icon != null) {
+            Box(
+                modifier = Modifier.size(40.dp).clip(MaterialTheme.shapes.small)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(21.dp))
+            }
+        }
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.labelLarge)
+            Text(title, style = MaterialTheme.typography.titleSmall)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
 

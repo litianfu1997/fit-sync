@@ -42,14 +42,40 @@ class SyncCoordinator(
 ) {
     private val syncMutex = Mutex()
 
-    suspend fun runSync(force: Boolean = false): SyncRunSummary = syncMutex.withLock sync@{
+    suspend fun runSync(
+        force: Boolean = false,
+        manualSelection: ManualSyncSelection? = null,
+    ): SyncRunSummary = syncMutex.withLock sync@{
         val settings = db.appSettingsDao().get()
         if (!force && settings?.autoSyncEnabled == false) return@sync SyncRunSummary()
         var pulled = 0
         var queued = 0
         var failedAccounts = 0
-        val enabledRuleCount = db.syncRuleDao().getEnabled().size
-        val accounts = db.platformAccountDao().getAll().filter { it.status != AccountStatus.DISABLED }
+        val historyDays = settings?.initialHistoryDays ?: 90
+        val allAccounts = db.platformAccountDao().getAll()
+        val destinationAccount = manualSelection?.let { selection ->
+            val destination = allAccounts.firstOrNull { it.id == selection.destinationAccountId }
+                ?: throw IllegalArgumentException("目标平台账号已不存在")
+            require(destination.status == AccountStatus.ACTIVE || destination.status == AccountStatus.EXPERIMENTAL) {
+                "目标平台需要先完成登录"
+            }
+            require(destination.platform != selection.sourcePlatform) { "来源和目标不能相同" }
+            require(PlatformCapabilityRegistry.capabilities(destination.platform).canUploadActivity) {
+                "目标平台暂不支持活动上传"
+            }
+            destination
+        }
+        val accounts = when {
+            manualSelection == null -> allAccounts.filter { it.status != AccountStatus.DISABLED }
+            manualSelection.sourcePlatform == Platform.LOCAL_IMPORT -> emptyList()
+            else -> allAccounts.filter {
+                it.platform == manualSelection.sourcePlatform &&
+                    (it.status == AccountStatus.ACTIVE || it.status == AccountStatus.EXPERIMENTAL)
+            }.also {
+                require(it.isNotEmpty()) { "来源平台需要先完成登录" }
+            }
+        }
+        val enabledRuleCount = if (manualSelection == null) db.syncRuleDao().getEnabled().size else 1
         accounts.forEach { account ->
             val connector = connectors.get(account.platform)
             if (connector == null) {
@@ -95,16 +121,39 @@ class SyncCoordinator(
             }
             val result = pullAccount(
                 account.id,
-                settings?.initialHistoryDays ?: 90,
+                historyDays,
                 forceFullHistory = force,
+                planWithRules = manualSelection == null,
             )
             pulled += result.pulled
             queued += result.queued
             if (!result.completedNormally) failedAccounts++
         }
+        if (manualSelection != null) {
+            val fromEpochMs = calculatePullSince(
+                nowEpochMs = System.currentTimeMillis(),
+                previousSyncEpochMs = null,
+                historyDays = historyDays,
+                forceFullHistory = true,
+            )
+            queued += mutationGate.withLock {
+                planner.planManualSelection(
+                    sourcePlatform = manualSelection.sourcePlatform,
+                    destinationAccountId = manualSelection.destinationAccountId,
+                    sportTypes = manualSelection.sportTypes,
+                    fromEpochMs = fromEpochMs,
+                )
+            }
+        }
         val delivered = processDeliveryJobs()
         runCatching { storageJanitor?.run() }
-        val actionRequiredAccounts = db.platformAccountDao().getAll().count { it.needsUserAction }
+        val actionRequiredAccounts = db.platformAccountDao().getAll().count { account ->
+            account.needsUserAction && (
+                manualSelection == null ||
+                    account.id == destinationAccount?.id ||
+                    accounts.any { it.id == account.id }
+                )
+        }
         val deliverySchedule = deliverySchedule()
         SyncRunSummary(
             pulledActivities = pulled,
@@ -112,7 +161,7 @@ class SyncCoordinator(
             completedDeliveries = delivered,
             hasMoreDeliveries = deliverySchedule.hasMore,
             nextDeliveryDelayMs = deliverySchedule.delayMs,
-            checkedAccounts = accounts.size,
+            checkedAccounts = if (manualSelection?.sourcePlatform == Platform.LOCAL_IMPORT) 1 else accounts.size,
             enabledRules = enabledRuleCount,
             actionRequiredAccounts = actionRequiredAccounts,
             failedAccounts = failedAccounts,
@@ -428,6 +477,7 @@ class SyncCoordinator(
         accountId: Long,
         historyDays: Int,
         forceFullHistory: Boolean,
+        planWithRules: Boolean = true,
     ): PullAccountResult {
         var account = db.platformAccountDao().getById(accountId) ?: return PullAccountResult()
         val connector = connectors.get(account.platform) ?: return PullAccountResult()
@@ -453,7 +503,8 @@ class SyncCoordinator(
                                 pulled++
                                 queued += mutationGate.withLock {
                                     if (db.canonicalActivityDao().getById(imported.value) == null) 0
-                                    else planner.planForActivity(imported.value, account.platform)
+                                    else if (planWithRules) planner.planForActivity(imported.value, account.platform)
+                                    else 0
                                 }
                             }
                             is ConnectorResult.RequiresLogin -> {
