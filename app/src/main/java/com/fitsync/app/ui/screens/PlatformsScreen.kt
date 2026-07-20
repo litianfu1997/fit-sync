@@ -51,6 +51,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.connectors.PlatformCapabilityRegistry
+import com.fitsync.app.connectors.ConnectorCapabilities
 import com.fitsync.app.domain.model.AccountStatus
 import com.fitsync.app.domain.model.ConnectorExecution
 import com.fitsync.app.domain.model.Platform
@@ -64,6 +65,7 @@ import com.fitsync.app.ui.components.executionText
 import com.fitsync.app.ui.components.platformColor
 import com.fitsync.app.web.PlatformWebActivity
 import com.fitsync.app.web.PlatformWebConfigs
+import com.fitsync.app.strava.StravaAuthActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -84,6 +86,7 @@ fun PlatformsScreen() {
     var busyPlatform by remember { mutableStateOf<Platform?>(null) }
     var pendingDisconnect by remember { mutableStateOf<Platform?>(null) }
     var credentialsLogin by remember { mutableStateOf<Platform?>(null) }
+    var configureStrava by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val dateFormat = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
     val knownPlatforms = PlatformCapabilityRegistry.allKnownPlatforms()
@@ -137,8 +140,9 @@ fun PlatformsScreen() {
                 }
             }
             items(knownPlatforms, key = { it.name }) { platform ->
-                val caps = PlatformCapabilityRegistry.capabilities(platform)
                 val account = bound[platform]
+                val caps = ConnectorCapabilities.deserialize(account?.capabilitySnapshot)
+                    ?: PlatformCapabilityRegistry.capabilities(platform)
                 val isBusy = busyPlatform == platform
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -173,9 +177,21 @@ fun PlatformsScreen() {
                         }
                         if (caps.experimental) {
                             Text(
-                                "该连接使用平台网页接口，页面变化时会自动暂停并要求确认。",
+                                if (platform == Platform.STRAVA) {
+                                    "活动列表和上传使用官方 API；原文件读取依赖实验性网页接口，变化时只暂停拉取。"
+                                } else {
+                                    "该连接使用平台网页接口，页面变化时会自动暂停并要求确认。"
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.tertiary,
+                            )
+                        }
+                        if (platform == Platform.STRAVA && account != null) {
+                            Text(
+                                "API 授权：${if (account.status == AccountStatus.AUTH_EXPIRED) "已失效" else "有效"} · " +
+                                    "网页原文件会话：${if (caps.downloadFitMode == ConnectorExecution.BACKGROUND) "有效" else "未登录（仅上传）"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                         if (account?.needsUserAction == true) {
@@ -192,7 +208,27 @@ fun PlatformsScreen() {
                         ) {
                             Button(
                                 onClick = {
-                                    if (platform == Platform.COROS &&
+                                    if (platform == Platform.STRAVA) {
+                                        when {
+                                            account == null || account.status == AccountStatus.AUTH_EXPIRED -> {
+                                                if (app.stravaOAuthService.isConfigured()) {
+                                                    context.startActivity(StravaAuthActivity.createIntent(context))
+                                                } else {
+                                                    configureStrava = true
+                                                }
+                                            }
+                                            account.needsUserAction -> context.startActivity(
+                                                PlatformWebActivity.createIntent(context, platform),
+                                            )
+                                            else -> context.startActivity(
+                                                PlatformWebActivity.createIntent(
+                                                    context,
+                                                    platform,
+                                                    url = PlatformWebConfigs.get(platform).uploadUrl,
+                                                ),
+                                            )
+                                        }
+                                    } else if (platform == Platform.COROS &&
                                         account != null && account.status != AccountStatus.AUTH_EXPIRED
                                     ) {
                                         context.startActivity(
@@ -220,6 +256,9 @@ fun PlatformsScreen() {
                                 )
                                 Text(
                                     when {
+                                        platform == Platform.STRAVA && account == null -> "配置并授权"
+                                        platform == Platform.STRAVA && account?.status == AccountStatus.AUTH_EXPIRED -> "重新授权"
+                                        platform == Platform.STRAVA && account?.needsUserAction == true -> "登录网页启用拉取"
                                         account == null -> "登录平台"
                                         platform == Platform.COROS && account.status == AccountStatus.AUTH_EXPIRED -> "重新登录"
                                         else -> "打开平台"
@@ -256,6 +295,20 @@ fun PlatformsScreen() {
                                     modifier = Modifier.height(48.dp),
                                     enabled = !isBusy,
                                 ) { Text("断开", color = MaterialTheme.colorScheme.error) }
+                            }
+                        }
+                        if (platform == Platform.STRAVA && account != null) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                TextButton(onClick = { configureStrava = true }) { Text("更新凭据") }
+                                TextButton(onClick = {
+                                    context.startActivity(StravaAuthActivity.createIntent(context))
+                                }) { Text("重新授权") }
+                                TextButton(onClick = {
+                                    context.startActivity(PlatformWebActivity.createIntent(context, platform))
+                                }) { Text("登录网页") }
                             }
                         }
                     }
@@ -328,6 +381,23 @@ fun PlatformsScreen() {
                 },
             )
         }
+    }
+
+    if (configureStrava) {
+        StravaCredentialsDialog(
+            currentClientId = app.webSessionManager.stravaClientId(),
+            onDismiss = { configureStrava = false },
+            onSaveAndAuthorize = { clientId, clientSecret ->
+                runCatching { app.stravaOAuthService.saveCredentials(clientId, clientSecret) }
+                    .onSuccess {
+                        configureStrava = false
+                        context.startActivity(StravaAuthActivity.createIntent(context))
+                    }
+                    .onFailure { error ->
+                        scope.launch { snackbarHostState.showSnackbar(error.message ?: "Strava 凭据保存失败") }
+                    }
+            },
+        )
     }
 }
 

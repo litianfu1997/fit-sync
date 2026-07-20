@@ -39,4 +39,20 @@ data class ConnectorCapabilities(
         shareImportSupported -> "仅分享导入"
         else -> "暂不支持"
     }
+
+    companion object {
+        fun deserialize(value: String?): ConnectorCapabilities? {
+            if (value.isNullOrBlank()) return null
+            val parts = value.split('|')
+            if (parts.size != 4) return null
+            return runCatching {
+                ConnectorCapabilities(
+                    listActivitiesMode = ConnectorExecution.valueOf(parts[0]),
+                    downloadFitMode = ConnectorExecution.valueOf(parts[1]),
+                    uploadFitMode = ConnectorExecution.valueOf(parts[2]),
+                    experimental = parts[3].toBooleanStrict(),
+                )
+            }.getOrNull()
+        }
+    }
 }

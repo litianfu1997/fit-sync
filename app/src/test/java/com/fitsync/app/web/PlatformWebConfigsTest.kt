@@ -14,6 +14,7 @@ class PlatformWebConfigsTest {
             Platform.GARMIN,
             Platform.COROS,
             Platform.IGPSPORT,
+            Platform.STRAVA,
         ).forEach { platform ->
             val uri = URI(PlatformWebConfigs.get(platform).loginUrl)
 

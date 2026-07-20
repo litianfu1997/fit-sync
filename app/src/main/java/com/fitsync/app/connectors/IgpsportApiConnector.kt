@@ -133,6 +133,8 @@ internal class IgpsportApiConnector(
                 is ConnectorResult.RequiresUserAction -> return d
                 is ConnectorResult.Duplicate<*> ->
                     return ConnectorResult.PermanentFailure("IGPSPORT_FIT_URL_MISSING", "iGPSPORT 未返回该活动的 FIT 下载地址")
+                is ConnectorResult.Processing ->
+                    return ConnectorResult.PermanentFailure("IGPSPORT_FIT_URL_MISSING", "iGPSPORT 返回了无效的下载状态")
             }
         }
         if (!fitUrl.startsWith("http")) {

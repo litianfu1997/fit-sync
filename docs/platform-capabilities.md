@@ -1,4 +1,4 @@
-# 五平台能力矩阵（纯 Android 本地版）
+# 六平台能力矩阵（纯 Android 本地版）
 
 > 应用不经过自建服务器。用户在 App 内 WebView 自行登录；运行时验证失败时会降级为前台网页或手动分享，不绕过验证码和二次认证。
 
@@ -9,6 +9,7 @@
 | Garmin Connect 中国站 | 已实现：`gc-api/activitylist-service` | 已实现：`gc-api/download-service/files/activity/{id}/fit`、`gc-api/upload-service/upload` | 登录有效时后台双向同步；JWT_WEB/CSRF 失效要求重新登录（实验性） |
 | COROS 高驰 | 已实现：`activity/query` + `activity/detail/download` | 已实现：OSS 直传 + `activity/fit/import` | 账号密码 API 登录，后台 list→download→upload（实验性，仅中国站） |
 | iGPSPORT | 已实现：`web-analyze/activity/queryMyActivity` + OSS 公共读直链 | 已实现：OSS 直传 + `uploadByOss` | 账号密码 API 登录，后台 list→download→upload（实验性） |
+| Strava | 官方 `/athlete/activities` + 网页 `/activities/{id}/export_original` | 官方 `/uploads` + 状态轮询 | OAuth 有效时列表/上传后台执行；网页 Cookie 有效时原文件后台下载（读取侧实验性） |
 
 ## 运行时能力
 
@@ -23,6 +24,24 @@
 - 首次拉取最近 90 天，后续使用 48 小时重叠窗口；WorkManager 周期为 15 分钟，但实际时间由 Android 系统决定。
 - 默认只投递规则启用后的新活动；历史回填必须单独勾选。
 - “本地导入”是独立来源，可单独配置目标平台。
+
+## 后台同步与系统限制
+
+- 周期任务由 WorkManager 调度，**目标间隔 ≥15 分钟**；Doze、待机桶与厂商「智能后台」可能显著推迟执行。
+- 同步 Worker 运行期间会提升为 `dataSync` 前台服务并显示低打扰进度通知；Android 13+ 需授予通知权限，否则进度与「需要操作」提醒可能静默失败。
+- 应用会检测「电池优化 / 后台限制 / 通知权限」：设置页提供「后台运行保护」引导，首页在受限时显示可关闭横幅；侧载场景可一键申请忽略电池优化。
+- 小米、华为、荣耀、OPPO/一加/realme、vivo/iQOO、三星等提供品牌相关说明，并尝试跳转自启动/省电页；跳转失败则打开应用详情。
+- 开机与覆盖安装后会补注册周期任务，与冷启动调度互补；**不能**保证在被厂商强杀后仍按时运行，长期无「最近成功同步」更新时请检查系统白名单。
+
+## Strava 同步说明
+
+- 账号：每位用户自行创建 Strava 开发者应用，在 FitSync 中录入 Client ID / Client Secret。开发者后台的 Callback Domain 填 `localhost`，固定回调 URI 为 `com.fitsync.app://localhost/strava/oauth`。
+- OAuth：请求 `read,activity:read_all,activity:write`，access token 到期前 5 分钟自动刷新；refresh token 轮换时原子保存最新值。OAuth 失效只要求重新授权。
+- 读取：活动列表使用官方 API；原始文件使用 Strava 网页已提供的 `export_original` 路由和 WebView Cookie。支持 FIT/FIT.GZ；TCX、GPX 与未知格式不转换，并写入永久跳过记录，避免周期同步反复失败。
+- 会话隔离：网页 Cookie 失效时账号仍保持可上传，已有规则和 Strava 上传任务不删除；用户重新登录网页后恢复来源拉取。
+- 下载安全：初始请求固定 `https://www.strava.com`，最多跟随 3 次 HTTPS 跳转；跨域跳转不携带 Cookie 或 OAuth 头；压缩前后各限制 50 MB；HTML/JSON 错误页不会进入 FIT 导入。
+- 上传：官方 Upload API 使用稳定的 `external_id=fitsync-{sha256}.fit`。任务保存 upload ID，App 或 Worker 中断后只恢复轮询，不会重新 POST 文件。
+- 边界：`export_original` 是未公开网页能力，整体连接标记为实验性。接口变化时降级为打开活动页，让用户点“导出原来的活动”，不会用 streams 重建或伪造 FIT。
 
 ## Garmin 同步说明
 

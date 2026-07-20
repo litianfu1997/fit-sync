@@ -19,11 +19,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -37,20 +39,31 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.data.db.entity.AppSettingsEntity
 import com.fitsync.app.domain.model.FitStoragePolicy
+import com.fitsync.app.sync.BackgroundRunGuard
+import com.fitsync.app.sync.BackgroundRunStatus
 import com.fitsync.app.sync.SyncScheduler
 import com.fitsync.app.ui.components.AppTopBar
 import com.fitsync.app.ui.components.StatusPill
@@ -67,8 +80,22 @@ fun SettingsScreen() {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val snackbarHostState = androidx.compose.runtime.remember { SnackbarHostState() }
+    val guard = remember(context) { BackgroundRunGuard(context.applicationContext) }
+    var resumeTick by remember { mutableIntStateOf(0) }
+    var showBackgroundPrompt by remember { mutableStateOf(false) }
+    val backgroundStatus = remember(resumeTick, current.autoSyncEnabled) {
+        guard.evaluate(current.autoSyncEnabled)
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumeTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
-    fun save(next: AppSettingsEntity) {
+    fun save(next: AppSettingsEntity, afterSaved: (() -> Unit)? = null) {
         scope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
@@ -78,8 +105,49 @@ fun SettingsScreen() {
             }
             result.exceptionOrNull()?.let {
                 snackbarHostState.showSnackbar("保存失败：${it.message ?: "请稍后重试"}")
-            }
+            } ?: afterSaved?.invoke()
         }
+    }
+
+    if (showBackgroundPrompt) {
+        AlertDialog(
+            onDismissRequest = {
+                showBackgroundPrompt = false
+                guard.markBatteryPromptDone()
+            },
+            title = { Text("允许后台运行") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "后台同步依赖系统调度。部分手机的「智能后台 / 省电策略」会限制 FitSync，" +
+                            "导致无法按时拉取与投递活动。",
+                    )
+                    Text(
+                        BackgroundRunGuard.oemSummary(backgroundStatus.brand),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showBackgroundPrompt = false
+                        guard.markBatteryPromptDone()
+                        guard.openBackgroundSettings(preferBatteryRequest = true)
+                        resumeTick++
+                    },
+                ) { Text("立即设置") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showBackgroundPrompt = false
+                        guard.markBatteryPromptDone()
+                    },
+                ) { Text("稍后") }
+            },
+        )
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -96,7 +164,16 @@ fun SettingsScreen() {
                         title = "后台增量同步",
                         subtitle = "目标周期 15 分钟，实际时间由系统决定",
                         checked = current.autoSyncEnabled,
-                        onCheckedChange = { save(current.copy(autoSyncEnabled = it)) },
+                        onCheckedChange = { enabled ->
+                            save(current.copy(autoSyncEnabled = enabled)) {
+                                if (enabled &&
+                                    !guard.isIgnoringBatteryOptimizations() &&
+                                    !guard.isBatteryPromptDone()
+                                ) {
+                                    showBackgroundPrompt = true
+                                }
+                            }
+                        },
                     )
                     SettingSwitchRow(
                         title = "需要操作时通知",
@@ -106,6 +183,23 @@ fun SettingsScreen() {
                         icon = Icons.Default.NotificationsActive,
                     )
                 }
+            }
+            item {
+                BackgroundProtectionCard(
+                    status = backgroundStatus,
+                    onAllowBackground = {
+                        guard.openBackgroundSettings(preferBatteryRequest = true)
+                        resumeTick++
+                    },
+                    onOpenAppDetails = {
+                        guard.openAppDetails()
+                        resumeTick++
+                    },
+                    onOpenNotifications = {
+                        guard.openNotificationSettings()
+                        resumeTick++
+                    },
+                )
             }
             item {
                 SettingsCard(Icons.Default.History, "首次历史范围", "新绑定账号第一次拉取的时间跨度") {
@@ -241,6 +335,104 @@ fun SettingsScreen() {
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
+    }
+}
+
+@Composable
+private fun BackgroundProtectionCard(
+    status: BackgroundRunStatus,
+    onAllowBackground: () -> Unit,
+    onOpenAppDetails: () -> Unit,
+    onOpenNotifications: () -> Unit,
+) {
+    SettingsCard(
+        Icons.Default.BatteryChargingFull,
+        "后台运行保护",
+        "避免智能省电/自启动管理中断同步",
+    ) {
+        StatusLine(
+            label = "电池优化",
+            ok = status.batteryOptimizationIgnored,
+            okText = "已允许无限制",
+            badText = "受系统省电限制",
+        )
+        StatusLine(
+            label = "后台运行",
+            ok = !status.isBackgroundRestricted,
+            okText = "正常",
+            badText = "已被系统限制后台",
+        )
+        StatusLine(
+            label = "通知权限",
+            ok = status.notificationsGranted,
+            okText = "已开启",
+            badText = "未开启（进度与提醒可能静默）",
+        )
+        Text(
+            BackgroundRunGuard.oemSummary(status.brand),
+            modifier = Modifier.padding(top = 10.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Column(
+            modifier = Modifier.padding(top = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            BackgroundRunGuard.oemChecklist(status.brand).forEach { line ->
+                Text(
+                    "· $line",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Button(
+            onClick = onAllowBackground,
+            modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+        ) {
+            Text(if (status.needsAttention) "允许后台运行" else "检查系统设置")
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(
+                onClick = onOpenAppDetails,
+                modifier = Modifier.weight(1f),
+            ) { Text("应用详情") }
+            if (!status.notificationsGranted) {
+                OutlinedButton(
+                    onClick = onOpenNotifications,
+                    modifier = Modifier.weight(1f),
+                ) { Text("通知设置") }
+            }
+        }
+        Text(
+            "自动同步依赖系统调度；若首页「最近成功同步」长期不更新，请按上表检查设置。",
+            modifier = Modifier.padding(top = 10.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun StatusLine(
+    label: String,
+    ok: Boolean,
+    okText: String,
+    badText: String,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelLarge)
+        StatusPill(
+            if (ok) okText else badText,
+            if (ok) StatusTone.SUCCESS else StatusTone.WARNING,
         )
     }
 }

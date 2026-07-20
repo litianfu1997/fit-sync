@@ -18,6 +18,7 @@ import com.fitsync.app.sync.SyncCoordinator
 import com.fitsync.app.sync.SyncScheduler
 import com.fitsync.app.web.GarminUploadFilePreparer
 import com.fitsync.app.web.WebSessionManager
+import com.fitsync.app.strava.StravaOAuthService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -45,6 +46,8 @@ class FitSyncApp : Application() {
         private set
     lateinit var connectorRegistry: ConnectorRegistry
         private set
+    lateinit var stravaOAuthService: StravaOAuthService
+        private set
     lateinit var platformAccountRepository: PlatformAccountRepository
         private set
     lateinit var syncCoordinator: SyncCoordinator
@@ -63,6 +66,7 @@ class FitSyncApp : Application() {
         garminUploadFilePreparer = GarminUploadFilePreparer(this, fitEngine)
         val activityMutationGate = ActivityMutationGate()
         webSessionManager = WebSessionManager(SecureSessionStore(this)).also { it.prepareCookies() }
+        stravaOAuthService = StravaOAuthService(webSessionManager)
         importService = ImportService(
             db = database,
             fileStore = fitFileStore,
@@ -73,6 +77,7 @@ class FitSyncApp : Application() {
             db = database,
             fileStore = fitFileStore,
             sessionManager = webSessionManager,
+            stravaOAuthService = stravaOAuthService,
         )
         syncNotificationManager = SyncNotificationManager(this).also { it.createChannel() }
         activityDeletionService = ActivityDeletionService(
@@ -105,6 +110,7 @@ class FitSyncApp : Application() {
             db = database,
             connectors = connectorRegistry,
             sessions = webSessionManager,
+            stravaOAuthService = stravaOAuthService,
         )
         applicationScope.launch {
             try {
@@ -117,12 +123,7 @@ class FitSyncApp : Application() {
             } catch (_: Exception) {
                 // 启动清理失败不阻塞后台同步
             }
-            val settings = database.appSettingsDao().get()
-            SyncScheduler.schedule(
-                this@FitSyncApp,
-                settings?.autoSyncEnabled != false,
-                settings?.syncIntervalMinutes ?: 15,
-            )
+            SyncScheduler.ensureScheduled(this@FitSyncApp)
         }
     }
 

@@ -235,6 +235,7 @@ fun platformColor(platform: Platform): Color = when (platform) {
     Platform.GARMIN -> Color(0xFF1887C9)
     Platform.COROS -> Color(0xFFF2673A)
     Platform.IGPSPORT -> Color(0xFF8A5CF5)
+    Platform.STRAVA -> Color(0xFFFC5200)
     Platform.LOCAL_IMPORT -> Color(0xFF647089)
     Platform.UNKNOWN -> Color(0xFF8992A5)
 }
@@ -245,6 +246,7 @@ fun platformShortName(platform: Platform): String = when (platform) {
     Platform.GARMIN -> "G"
     Platform.COROS -> "C"
     Platform.IGPSPORT -> "iG"
+    Platform.STRAVA -> "S"
     Platform.LOCAL_IMPORT -> "本"
     Platform.UNKNOWN -> "?"
 }

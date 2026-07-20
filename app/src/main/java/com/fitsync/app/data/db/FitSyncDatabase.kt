@@ -14,6 +14,7 @@ import com.fitsync.app.data.db.dao.DeliveryJobDao
 import com.fitsync.app.data.db.dao.ImportJobDao
 import com.fitsync.app.data.db.dao.PlatformAccountDao
 import com.fitsync.app.data.db.dao.PlatformCopyDao
+import com.fitsync.app.data.db.dao.RemoteActivitySkipDao
 import com.fitsync.app.data.db.dao.SyncRuleDao
 import com.fitsync.app.data.db.entity.ActivityVariantEntity
 import com.fitsync.app.data.db.entity.AppSettingsEntity
@@ -22,6 +23,7 @@ import com.fitsync.app.data.db.entity.DeliveryJobEntity
 import com.fitsync.app.data.db.entity.ImportJobEntity
 import com.fitsync.app.data.db.entity.PlatformAccountEntity
 import com.fitsync.app.data.db.entity.PlatformCopyEntity
+import com.fitsync.app.data.db.entity.RemoteActivitySkipEntity
 import com.fitsync.app.data.db.entity.SyncRuleEntity
 import com.fitsync.app.domain.model.FitStoragePolicy
 @Database(
@@ -30,12 +32,13 @@ import com.fitsync.app.domain.model.FitStoragePolicy
         CanonicalActivityEntity::class,
         ActivityVariantEntity::class,
         PlatformCopyEntity::class,
+        RemoteActivitySkipEntity::class,
         DeliveryJobEntity::class,
         SyncRuleEntity::class,
         ImportJobEntity::class,
         AppSettingsEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 @TypeConverters(Converters::class)
@@ -44,6 +47,7 @@ abstract class FitSyncDatabase : RoomDatabase() {
     abstract fun canonicalActivityDao(): CanonicalActivityDao
     abstract fun activityVariantDao(): ActivityVariantDao
     abstract fun platformCopyDao(): PlatformCopyDao
+    abstract fun remoteActivitySkipDao(): RemoteActivitySkipDao
     abstract fun deliveryJobDao(): DeliveryJobDao
     abstract fun syncRuleDao(): SyncRuleDao
     abstract fun importJobDao(): ImportJobDao
@@ -61,7 +65,7 @@ abstract class FitSyncDatabase : RoomDatabase() {
 
         private fun build(context: Context): FitSyncDatabase {
             return Room.databaseBuilder(context, FitSyncDatabase::class.java, "fitsync.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .addCallback(
                     object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
@@ -119,6 +123,29 @@ abstract class FitSyncDatabase : RoomDatabase() {
         val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE canonical_activity ADD COLUMN reviewCandidateCanonicalId INTEGER")
+            }
+        }
+
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS remote_activity_skip (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        platformAccountId INTEGER NOT NULL,
+                        remoteActivityId TEXT NOT NULL,
+                        reasonCode TEXT NOT NULL,
+                        errorMessage TEXT,
+                        createdAtEpochMs INTEGER NOT NULL,
+                        updatedAtEpochMs INTEGER NOT NULL
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS " +
+                        "index_remote_activity_skip_platformAccountId_remoteActivityId " +
+                        "ON remote_activity_skip(platformAccountId, remoteActivityId)",
+                )
             }
         }
     }

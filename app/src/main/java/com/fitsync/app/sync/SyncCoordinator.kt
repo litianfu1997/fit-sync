@@ -1,14 +1,18 @@
 package com.fitsync.app.sync
 
 import com.fitsync.app.connectors.ConnectorRegistry
+import com.fitsync.app.connectors.ConnectorCapabilities
 import com.fitsync.app.connectors.ConnectorResult
+import com.fitsync.app.connectors.FitFile
 import com.fitsync.app.connectors.PlatformConnector
+import com.fitsync.app.connectors.PlatformCapabilityRegistry
 import com.fitsync.app.connectors.RemoteActivitySummary
 import com.fitsync.app.connectors.SyncCursor
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
 import com.fitsync.app.data.db.entity.DeliveryJobEntity
 import com.fitsync.app.data.db.entity.PlatformCopyEntity
+import com.fitsync.app.data.db.entity.RemoteActivitySkipEntity
 import com.fitsync.app.data.repo.ActivityMutationGate
 import com.fitsync.app.data.repo.FitStorageJanitor
 import com.fitsync.app.data.repo.ImportOutcome
@@ -52,7 +56,16 @@ class SyncCoordinator(
                 failedAccounts++
                 return@forEach
             }
-            val listMode = connector.detectCapabilities().listActivitiesMode
+            val capabilities = connector.detectCapabilities()
+            if (account.capabilitySnapshot != capabilities.serialize()) {
+                db.platformAccountDao().update(
+                    account.copy(
+                        capabilitySnapshot = capabilities.serialize(),
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                    ),
+                )
+            }
+            val listMode = capabilities.listActivitiesMode
             if (listMode != ConnectorExecution.BACKGROUND) {
                 if (force && listMode != ConnectorExecution.UNSUPPORTED) {
                     val url = PlatformWebConfigs.get(account.platform).loginUrl
@@ -68,6 +81,18 @@ class SyncCoordinator(
                 }
                 return@forEach
             }
+            if (capabilities.downloadFitMode != ConnectorExecution.BACKGROUND) {
+                markAccountNeedsAction(account.id, false)
+                if (force && settings?.notificationsEnabled != false) {
+                    notifications.notifyAccountAction(
+                        account.id,
+                        account.platform,
+                        PlatformWebConfigs.get(account.platform).loginUrl,
+                        "请登录 ${account.platform.displayName} 网页以启用原文件拉取",
+                    )
+                }
+                return@forEach
+            }
             val result = pullAccount(
                 account.id,
                 settings?.initialHistoryDays ?: 90,
@@ -79,14 +104,14 @@ class SyncCoordinator(
         }
         val delivered = processDeliveryJobs()
         runCatching { storageJanitor?.run() }
-        val actionRequiredAccounts = db.platformAccountDao().getAll().count {
-            it.status == AccountStatus.AUTH_EXPIRED || it.status == AccountStatus.NEEDS_USER_ACTION
-        }
+        val actionRequiredAccounts = db.platformAccountDao().getAll().count { it.needsUserAction }
+        val deliverySchedule = deliverySchedule()
         SyncRunSummary(
             pulledActivities = pulled,
             queuedDeliveries = queued,
             completedDeliveries = delivered,
-            hasMoreDeliveries = hasRunnableDeliveries(),
+            hasMoreDeliveries = deliverySchedule.hasMore,
+            nextDeliveryDelayMs = deliverySchedule.delayMs,
             checkedAccounts = accounts.size,
             enabledRules = enabledRuleCount,
             actionRequiredAccounts = actionRequiredAccounts,
@@ -97,9 +122,11 @@ class SyncCoordinator(
     suspend fun runDeliveryBatch(): SyncRunSummary = syncMutex.withLock {
         val delivered = processDeliveryJobs()
         runCatching { storageJanitor?.run() }
+        val deliverySchedule = deliverySchedule()
         SyncRunSummary(
             completedDeliveries = delivered,
-            hasMoreDeliveries = hasRunnableDeliveries(),
+            hasMoreDeliveries = deliverySchedule.hasMore,
+            nextDeliveryDelayMs = deliverySchedule.delayMs,
         )
     }
 
@@ -110,6 +137,31 @@ class SyncCoordinator(
             else -> return@withLock 0
         }
         planner.planForActivity(canonicalId, sourcePlatform)
+    }
+
+    suspend fun importRemoteDownloadedFile(
+        accountId: Long,
+        platform: Platform,
+        remoteActivityId: String,
+        fitFile: FitFile,
+        preferredTitle: String? = null,
+    ): ConnectorResult<Long> {
+        val imported = importDownloadedFit(
+            accountId = accountId,
+            platform = platform,
+            remoteActivityId = remoteActivityId,
+            fitFile = fitFile,
+            preferredTitle = preferredTitle,
+            remoteUrl = if (platform == Platform.STRAVA) {
+                "https://www.strava.com/activities/$remoteActivityId"
+            } else {
+                null
+            },
+        )
+        if (imported is ConnectorResult.Success) {
+            mutationGate.withLock { planner.planForActivity(imported.value, platform) }
+        }
+        return imported
     }
 
     suspend fun processDeliveryJobs(): Int {
@@ -156,15 +208,26 @@ class SyncCoordinator(
                     currentJob.copy(
                         status = DeliveryJobStatus.UPLOADING,
                         executionMode = currentMode,
-                        attemptCount = currentJob.attemptCount + 1,
                         updatedAtEpochMs = now,
                     ),
                 )
-                PreparedDelivery(currentJob.copy(executionMode = currentMode), account.id, activity, connector)
+                PreparedDelivery(
+                    job = currentJob.copy(executionMode = currentMode),
+                    accountId = account.id,
+                    activity = activity,
+                    connector = connector,
+                    polling = !currentJob.remoteUploadId.isNullOrBlank(),
+                )
             } ?: return@forEach
 
             // 任何 connector 异常（DB/IO/解析）都转可重试失败，避免 job 永久卡在 UPLOADING。
-            val result = runCatching { prepared.connector.uploadFit(prepared.activity) }
+            val result = runCatching {
+                if (prepared.polling) {
+                    prepared.connector.checkUpload(requireNotNull(prepared.job.remoteUploadId))
+                } else {
+                    prepared.connector.uploadFit(prepared.activity)
+                }
+            }
                 .getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "上传过程发生异常") }
             mutationGate.withLock {
                 val currentJob = db.deliveryJobDao().getById(prepared.job.id)
@@ -172,7 +235,7 @@ class SyncCoordinator(
                 if (currentJob == null || currentActivity == null || currentJob.status != DeliveryJobStatus.UPLOADING) {
                     return@withLock
                 }
-                val job = prepared.job
+                val job = currentJob
                 val accountId = prepared.accountId
                 when (result) {
                     is ConnectorResult.Success -> {
@@ -181,6 +244,7 @@ class SyncCoordinator(
                             job.copy(
                                 status = DeliveryJobStatus.SUCCEEDED,
                                 attemptCount = job.attemptCount + 1,
+                                nextRetryAtEpochMs = null,
                                 remoteActivityId = result.value.remoteActivityId,
                                 errorCode = null,
                                 errorMessage = null,
@@ -195,11 +259,26 @@ class SyncCoordinator(
                             job.copy(
                                 status = DeliveryJobStatus.DUPLICATE_REMOTE,
                                 attemptCount = job.attemptCount + 1,
+                                nextRetryAtEpochMs = null,
                                 remoteActivityId = result.value?.remoteActivityId,
                                 updatedAtEpochMs = System.currentTimeMillis(),
                             ),
                         )
                         completed++
+                    }
+                    is ConnectorResult.Processing -> {
+                        db.deliveryJobDao().update(
+                            job.copy(
+                                status = DeliveryJobStatus.WAITING_REMOTE_PROCESS,
+                                attemptCount = job.attemptCount + 1,
+                                remoteUploadId = result.remoteUploadId,
+                                nextRetryAtEpochMs = System.currentTimeMillis() +
+                                    result.pollAfterMs.coerceAtLeast(1_000L),
+                                errorCode = null,
+                                errorMessage = null,
+                                updatedAtEpochMs = System.currentTimeMillis(),
+                            ),
+                        )
                     }
                     is ConnectorResult.RequiresLogin -> {
                         markAccountNeedsAction(accountId, true)
@@ -216,7 +295,11 @@ class SyncCoordinator(
                         val delay = min(6 * 60 * 60_000L, 15 * 60_000L * 2.0.pow((attempt - 1).coerceAtMost(5)).toLong())
                         db.deliveryJobDao().update(
                             job.copy(
-                                status = DeliveryJobStatus.RETRY_WAIT,
+                                status = if (job.remoteUploadId != null) {
+                                    DeliveryJobStatus.WAITING_REMOTE_PROCESS
+                                } else {
+                                    DeliveryJobStatus.RETRY_WAIT
+                                },
                                 attemptCount = attempt,
                                 nextRetryAtEpochMs = System.currentTimeMillis() + delay,
                                 errorCode = result.code,
@@ -331,10 +414,15 @@ class SyncCoordinator(
         val accountId: Long,
         val activity: CanonicalActivityEntity,
         val connector: PlatformConnector,
+        val polling: Boolean,
     )
 
-    private suspend fun hasRunnableDeliveries(): Boolean =
-        db.deliveryJobDao().countRunnable(System.currentTimeMillis()) > 0
+    private suspend fun deliverySchedule(): DeliverySchedule {
+        val now = System.currentTimeMillis()
+        if (db.deliveryJobDao().countRunnable(now) > 0) return DeliverySchedule(true, 0)
+        val next = db.deliveryJobDao().findNextScheduledAt() ?: return DeliverySchedule(false, null)
+        return DeliverySchedule(true, (next - now).coerceAtLeast(0))
+    }
 
     private suspend fun pullAccount(
         accountId: Long,
@@ -359,6 +447,7 @@ class SyncCoordinator(
                     var abortAccount = false
                     for (remote in pageResult.value.items) {
                         if (db.platformCopyDao().findByRemote(account.id, remote.remoteActivityId) != null) continue
+                        if (db.remoteActivitySkipDao().findByRemote(account.id, remote.remoteActivityId) != null) continue
                         when (val imported = downloadAndImport(account.id, account.platform, connector, remote)) {
                             is ConnectorResult.Success -> {
                                 pulled++
@@ -388,6 +477,23 @@ class SyncCoordinator(
                                 )
                                 completedNormally = false
                                 abortAccount = true
+                            }
+                            is ConnectorResult.PermanentFailure -> {
+                                if (imported.code in PERMANENT_REMOTE_SKIP_CODES) {
+                                    val skipNow = System.currentTimeMillis()
+                                    db.remoteActivitySkipDao().upsert(
+                                        RemoteActivitySkipEntity(
+                                            platformAccountId = account.id,
+                                            remoteActivityId = remote.remoteActivityId,
+                                            reasonCode = requireNotNull(imported.code),
+                                            errorMessage = imported.message,
+                                            createdAtEpochMs = skipNow,
+                                            updatedAtEpochMs = skipNow,
+                                        ),
+                                    )
+                                } else {
+                                    completedNormally = false
+                                }
                             }
                             else -> {
                                 // 单条永久/可重试失败：跳过本条继续拉同页，不中断整页；下次同步再试
@@ -456,45 +562,62 @@ class SyncCoordinator(
         remote: RemoteActivitySummary,
     ): ConnectorResult<Long> {
         return when (val downloaded = connector.downloadFit(remote)) {
-            is ConnectorResult.Success -> {
-                val outcome = importService.importFromFile(
-                    downloaded.value.file,
-                    downloaded.value.displayName,
-                    sourcePlatform = platform,
-                    collectorType = CollectorType.CLOUD,
-                    remoteActivityId = remote.remoteActivityId,
-                    preferredTitle = remote.name,
-                )
-                val ids = when (outcome) {
-                    is ImportOutcome.Success -> outcome.canonicalActivityId to outcome.variantId
-                    is ImportOutcome.DuplicateFile -> outcome.canonicalActivityId to outcome.variantId
-                    is ImportOutcome.Invalid -> return ConnectorResult.PermanentFailure(
-                        outcome.validationStatus.name,
-                        outcome.message ?: "下载的 FIT 无效",
-                    )
-                    is ImportOutcome.Failed -> return ConnectorResult.RetryableFailure(null, outcome.message ?: "FIT 导入失败")
-                }
-                mutationGate.withLock {
-                    if (db.canonicalActivityDao().getById(ids.first) == null) {
-                        return@withLock ConnectorResult.PermanentFailure(null, "本地活动已删除")
-                    }
-                    upsertPlatformCopy(
-                        canonicalId = ids.first,
-                        accountId = accountId,
-                        remoteActivityId = remote.remoteActivityId,
-                        remoteUrl = remote.metadata["remote_url"],
-                        fileSha256 = downloaded.value.sha256,
-                        sourceVariantId = ids.second,
-                        createdBySync = false,
-                    )
-                    ConnectorResult.Success(ids.first)
-                }
-            }
+            is ConnectorResult.Success -> importDownloadedFit(
+                accountId = accountId,
+                platform = platform,
+                remoteActivityId = remote.remoteActivityId,
+                fitFile = downloaded.value,
+                preferredTitle = remote.name,
+                remoteUrl = remote.metadata["remote_url"],
+            )
             is ConnectorResult.Duplicate -> ConnectorResult.PermanentFailure(null, "平台返回了重复下载结果")
+            is ConnectorResult.Processing -> ConnectorResult.PermanentFailure(null, "平台返回了无效的下载状态")
             is ConnectorResult.RequiresLogin -> downloaded
             is ConnectorResult.RequiresUserAction -> downloaded
             is ConnectorResult.RetryableFailure -> downloaded
             is ConnectorResult.PermanentFailure -> downloaded
+        }
+    }
+
+    private suspend fun importDownloadedFit(
+        accountId: Long,
+        platform: Platform,
+        remoteActivityId: String,
+        fitFile: FitFile,
+        preferredTitle: String?,
+        remoteUrl: String? = null,
+    ): ConnectorResult<Long> {
+        val outcome = importService.importFromFile(
+            fitFile.file,
+            fitFile.displayName,
+            sourcePlatform = platform,
+            collectorType = CollectorType.CLOUD,
+            remoteActivityId = remoteActivityId,
+            preferredTitle = preferredTitle,
+        )
+        val ids = when (outcome) {
+            is ImportOutcome.Success -> outcome.canonicalActivityId to outcome.variantId
+            is ImportOutcome.DuplicateFile -> outcome.canonicalActivityId to outcome.variantId
+            is ImportOutcome.Invalid -> return ConnectorResult.PermanentFailure(
+                outcome.validationStatus.name,
+                outcome.message ?: "下载的 FIT 无效",
+            )
+            is ImportOutcome.Failed -> return ConnectorResult.RetryableFailure(null, outcome.message ?: "FIT 导入失败")
+        }
+        return mutationGate.withLock {
+            if (db.canonicalActivityDao().getById(ids.first) == null) {
+                return@withLock ConnectorResult.PermanentFailure(null, "本地活动已删除")
+            }
+            upsertPlatformCopy(
+                canonicalId = ids.first,
+                accountId = accountId,
+                remoteActivityId = remoteActivityId,
+                remoteUrl = remoteUrl,
+                fileSha256 = fitFile.sha256,
+                sourceVariantId = ids.second,
+                createdBySync = false,
+            )
+            ConnectorResult.Success(ids.first)
         }
     }
 
@@ -573,10 +696,25 @@ class SyncCoordinator(
 
     private suspend fun markAccountNeedsAction(accountId: Long, expired: Boolean) {
         val account = db.platformAccountDao().getById(accountId) ?: return
+        val capabilitySnapshot = when {
+            expired && account.platform == Platform.STRAVA ->
+                ConnectorCapabilities(shareImportSupported = true, experimental = true).serialize()
+            account.platform == Platform.STRAVA -> {
+                val current = ConnectorCapabilities.deserialize(account.capabilitySnapshot)
+                    ?: PlatformCapabilityRegistry.capabilities(Platform.STRAVA)
+                current.copy(downloadFitMode = ConnectorExecution.MANUAL).serialize()
+            }
+            else -> account.capabilitySnapshot
+        }
         db.platformAccountDao().update(
             account.copy(
-                status = if (expired) AccountStatus.AUTH_EXPIRED else AccountStatus.NEEDS_USER_ACTION,
+                status = when {
+                    expired -> AccountStatus.AUTH_EXPIRED
+                    account.platform == Platform.STRAVA -> AccountStatus.ACTIVE
+                    else -> AccountStatus.NEEDS_USER_ACTION
+                },
                 needsUserAction = true,
+                capabilitySnapshot = capabilitySnapshot,
                 updatedAtEpochMs = System.currentTimeMillis(),
             ),
         )
@@ -614,14 +752,22 @@ data class SyncRunSummary(
     val queuedDeliveries: Int = 0,
     val completedDeliveries: Int = 0,
     val hasMoreDeliveries: Boolean = false,
+    val nextDeliveryDelayMs: Long? = null,
     val checkedAccounts: Int = 0,
     val enabledRules: Int = 0,
     val actionRequiredAccounts: Int = 0,
     val failedAccounts: Int = 0,
 )
 
+private data class DeliverySchedule(val hasMore: Boolean, val delayMs: Long?)
+
 private data class PullAccountResult(
     val pulled: Int = 0,
     val queued: Int = 0,
     val completedNormally: Boolean = false,
+)
+
+private val PERMANENT_REMOTE_SKIP_CODES = setOf(
+    "NO_ORIGINAL_FILE",
+    "UNSUPPORTED_ORIGINAL_FORMAT",
 )

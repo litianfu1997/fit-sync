@@ -109,6 +109,20 @@ data class PlatformCopyEntity(
 )
 
 @Entity(
+    tableName = "remote_activity_skip",
+    indices = [Index(value = ["platformAccountId", "remoteActivityId"], unique = true)],
+)
+data class RemoteActivitySkipEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val platformAccountId: Long,
+    val remoteActivityId: String,
+    val reasonCode: String,
+    val errorMessage: String? = null,
+    val createdAtEpochMs: Long = System.currentTimeMillis(),
+    val updatedAtEpochMs: Long = System.currentTimeMillis(),
+)
+
+@Entity(
     tableName = "delivery_job",
     indices = [
         Index(value = ["canonicalActivityId", "destinationAccountId"], unique = true),

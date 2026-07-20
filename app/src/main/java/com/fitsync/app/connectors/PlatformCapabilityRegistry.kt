@@ -60,6 +60,16 @@ object PlatformCapabilityRegistry {
             supportsBulkHistory = true,
             experimental = true,
         )
+        Platform.STRAVA -> ConnectorCapabilities(
+            shareImportSupported = true,
+            listActivitiesMode = ConnectorExecution.BACKGROUND,
+            downloadFitMode = ConnectorExecution.BACKGROUND,
+            uploadFitMode = ConnectorExecution.BACKGROUND,
+            supportsIncrementalCursor = true,
+            supportsBulkHistory = true,
+            supportsIdempotencyKey = true,
+            experimental = true,
+        )
         Platform.UNKNOWN -> ConnectorCapabilities(
             shareImportSupported = true,
         )
@@ -71,5 +81,6 @@ object PlatformCapabilityRegistry {
         Platform.GARMIN,
         Platform.IGPSPORT,
         Platform.COROS,
+        Platform.STRAVA,
     )
 }

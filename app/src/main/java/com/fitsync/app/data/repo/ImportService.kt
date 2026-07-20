@@ -337,7 +337,8 @@ class ImportService(
                     elapsedSeconds = parsed.elapsedSeconds ?: canonical.elapsedSeconds,
                     movingSeconds = parsed.movingSeconds ?: canonical.movingSeconds,
                     distanceMeters = parsed.distanceMeters ?: canonical.distanceMeters,
-                    elevationGain = parsed.elevationGain ?: canonical.elevationGain,
+                    // parser 版本升级时强制覆盖爬升（允许 null 清掉旧错误值）
+                    elevationGain = parsed.elevationGain,
                     avgHeartRate = parsed.avgHeartRate ?: canonical.avgHeartRate,
                     activityFingerprint = if (parsed.startTimeEpochMs != null) {
                         ActivityFingerprint.compute(parsed)
@@ -402,7 +403,7 @@ class ImportService(
     private data class ReparsedVariant(val variantId: Long, val result: FitParseResult)
 
     private companion object {
-        const val CURRENT_PARSER_VERSION = 3
+        const val CURRENT_PARSER_VERSION = 4
 
         // 标题回填闸门：仅对 fitParserVersion < 此值的历史数据回填 displayTitle。
         // 固定为本次命名重构引入时的 CURRENT_PARSER_VERSION(=3)，实现「v2→v3 一次性回填」语义；

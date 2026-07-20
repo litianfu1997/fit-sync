@@ -52,6 +52,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.connectors.PlatformCapabilityRegistry
+import com.fitsync.app.connectors.ConnectorCapabilities
+import com.fitsync.app.data.db.entity.PlatformAccountEntity
 import com.fitsync.app.domain.model.AccountStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.sync.SyncScheduler
@@ -91,7 +93,7 @@ fun SyncRulesScreen(onOpenPlatforms: () -> Unit = {}) {
     }
     val sources = (
         listOf(Platform.LOCAL_IMPORT) + connectedAccounts.map { it.platform }.filter { platform ->
-            PlatformCapabilityRegistry.capabilities(platform).let {
+            connectedAccounts.firstOrNull { it.platform == platform }.capabilities().let {
                 it.canListActivities && it.canDownloadOriginalFit
             }
         }
@@ -132,7 +134,7 @@ fun SyncRulesScreen(onOpenPlatforms: () -> Unit = {}) {
 
     val destinations = connectedAccounts.filter { account ->
         account.platform != selectedSource &&
-            PlatformCapabilityRegistry.capabilities(account.platform).canUploadActivity
+            account.capabilities().canUploadActivity
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -205,6 +207,7 @@ fun SyncRulesScreen(onOpenPlatforms: () -> Unit = {}) {
                                 destination = destination.platform,
                                 enabled = rule != null,
                                 includeHistory = rule?.includeHistory == true,
+                                uploadMode = destination.capabilities().uploadFitMode,
                                 busy = busyRoute == key,
                                 onEnabledChange = { enabled ->
                                     updateRule(selectedSource, destination.id, enabled, false)
@@ -307,6 +310,7 @@ private fun RouteCard(
     destination: Platform,
     enabled: Boolean,
     includeHistory: Boolean,
+    uploadMode: com.fitsync.app.domain.model.ConnectorExecution,
     busy: Boolean,
     onEnabledChange: (Boolean) -> Unit,
     onHistoryChange: (Boolean) -> Unit,
@@ -338,7 +342,7 @@ private fun RouteCard(
                 Column(Modifier.weight(1f)) {
                     Text(destination.displayName, style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "${executionText(PlatformCapabilityRegistry.capabilities(destination).uploadFitMode)}上传",
+                        "${executionText(uploadMode)}上传",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -372,4 +376,10 @@ private fun RouteCard(
             }
         }
     }
+}
+
+private fun PlatformAccountEntity?.capabilities(): ConnectorCapabilities {
+    if (this == null) return ConnectorCapabilities()
+    return ConnectorCapabilities.deserialize(capabilitySnapshot)
+        ?: PlatformCapabilityRegistry.capabilities(platform)
 }

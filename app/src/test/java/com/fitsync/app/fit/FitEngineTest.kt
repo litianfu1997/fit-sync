@@ -128,7 +128,7 @@ class FitEngineTest {
                 writeLe32(1_000)
                 write(100)
                 writeLe32(10_000)
-                writeLe16(5_000)
+                writeLe16(altitudeRaw(500.0))
             }
 
             definition(
@@ -136,27 +136,181 @@ class FitEngineTest {
                 global = 20,
                 fields = listOf(Field(3, 1, 0x02), Field(5, 4, 0x86), Field(2, 2, 0x84)),
             )
+            // 抬升后在高点停留几拍，避免中值窗口截断末尾爬升
             compressedData(local = 0, timestamp = 1_005) {
                 write(110)
                 writeLe32(20_000)
-                writeLe16(5_050)
+                writeLe16(altitudeRaw(510.0))
             }
             compressedData(local = 0, timestamp = 1_010) {
                 write(120)
                 writeLe32(30_000)
-                writeLe16(5_100)
+                writeLe16(altitudeRaw(520.0))
+            }
+            compressedData(local = 0, timestamp = 1_015) {
+                write(120)
+                writeLe32(30_000)
+                writeLe16(altitudeRaw(520.0))
+            }
+            compressedData(local = 0, timestamp = 1_020) {
+                write(120)
+                writeLe32(30_000)
+                writeLe16(altitudeRaw(520.0))
             }
         }.toByteArray()
 
         val result = FitEngine().parseBytes(fitFile(data))
 
-        assertThat(result.recordCount).isEqualTo(3)
-        assertThat(result.elapsedSeconds).isEqualTo(10)
+        assertThat(result.recordCount).isEqualTo(5)
+        assertThat(result.elapsedSeconds).isEqualTo(20)
         assertThat(result.distanceMeters).isWithin(0.01).of(300.0)
-        assertThat(result.elevationGain).isWithin(0.01).of(20.0)
-        assertThat(result.avgHeartRate).isEqualTo(110)
+        assertThat(result.elevationGain).isWithin(0.5).of(20.0)
+        assertThat(result.avgHeartRate).isEqualTo(114)
         assertThat(result.hasHeartRate).isTrue()
     }
+
+    @Test
+    fun multiSession_sumsTotalAscent() {
+        val data = ByteArrayOutputStream().apply {
+            definition(
+                local = 0,
+                global = 18,
+                fields = listOf(Field(22, 2, 0x84), Field(5, 1, 0x00)),
+            )
+            data(local = 0) {
+                writeLe16(10)
+                write(1) // running
+            }
+            data(local = 0) {
+                writeLe16(20)
+                write(2) // cycling
+            }
+        }.toByteArray()
+
+        val result = FitEngine().parseBytes(fitFile(data))
+        assertThat(result.elevationGain).isWithin(0.01).of(30.0)
+    }
+
+    @Test
+    fun lapAscent_usedWhenSessionAscentMissing() {
+        val data = ByteArrayOutputStream().apply {
+            definition(
+                local = 0,
+                global = 19,
+                fields = listOf(Field(22, 2, 0x84)),
+            )
+            data(local = 0) { writeLe16(15) }
+            data(local = 0) { writeLe16(25) }
+        }.toByteArray()
+
+        val result = FitEngine().parseBytes(fitFile(data))
+        assertThat(result.hasLaps).isTrue()
+        assertThat(result.elevationGain).isWithin(0.01).of(40.0)
+    }
+
+    @Test
+    fun sessionAscentZero_doesNotFallBackToNoisyRecords() {
+        val data = ByteArrayOutputStream().apply {
+            definition(
+                local = 0,
+                global = 18,
+                fields = listOf(Field(22, 2, 0x84)),
+            )
+            data(local = 0) { writeLe16(0) }
+
+            definition(
+                local = 1,
+                global = 20,
+                fields = listOf(Field(2, 2, 0x84)),
+            )
+            // 若错误回退到 Record，旧 0.5m 算法会得到大量假爬升
+            listOf(100.0, 102.0, 99.0, 101.5, 98.0, 103.0, 100.0).forEach { alt ->
+                data(local = 1) { writeLe16(altitudeRaw(alt)) }
+            }
+        }.toByteArray()
+
+        val result = FitEngine().parseBytes(fitFile(data))
+        assertThat(result.elevationGain).isWithin(0.01).of(0.0)
+    }
+
+    @Test
+    fun recordAscent_ignoresGpsNoiseAndSpikes() {
+        val acc = FitEngine.AscentAccumulator()
+        // 平路 ±2m 抖动
+        listOf(100.0, 101.5, 99.0, 102.0, 98.5, 101.0, 100.0, 99.5).forEach { acc.add(it) }
+        assertThat(acc.total).isLessThan(3.0)
+
+        // 尖峰 +100m 后回落，不应计入
+        acc.add(200.0)
+        acc.add(100.0)
+        acc.add(100.0)
+        acc.add(100.0)
+        assertThat(acc.total).isLessThan(5.0)
+    }
+
+    @Test
+    fun recordAscent_countsSustainedClimb() {
+        val acc = FitEngine.AscentAccumulator()
+        // 平滑抬升 0 → 50m，末尾停留
+        for (m in 0..50) acc.add(m.toDouble())
+        repeat(5) { acc.add(50.0) }
+        assertThat(acc.total).isWithin(5.0).of(50.0)
+    }
+
+    @Test
+    fun resolveElevationGain_priority() {
+        assertThat(
+            FitEngine.resolveElevationGain(
+                hasSessionAscent = true,
+                sessionAscentSum = 12.0,
+                hasLapAscent = true,
+                lapAscentSum = 99.0,
+                recordAscent = 200.0,
+            ),
+        ).isWithin(0.01).of(12.0)
+
+        assertThat(
+            FitEngine.resolveElevationGain(
+                hasSessionAscent = false,
+                sessionAscentSum = 0.0,
+                hasLapAscent = true,
+                lapAscentSum = 40.0,
+                recordAscent = 200.0,
+            ),
+        ).isWithin(0.01).of(40.0)
+
+        // Lap 全 0 时回退 Record
+        assertThat(
+            FitEngine.resolveElevationGain(
+                hasSessionAscent = false,
+                sessionAscentSum = 0.0,
+                hasLapAscent = true,
+                lapAscentSum = 0.0,
+                recordAscent = 33.0,
+            ),
+        ).isWithin(0.01).of(33.0)
+
+        assertThat(
+            FitEngine.resolveElevationGain(
+                hasSessionAscent = true,
+                sessionAscentSum = 0.0,
+                hasLapAscent = false,
+                lapAscentSum = 0.0,
+                recordAscent = 33.0,
+            ),
+        ).isWithin(0.01).of(0.0)
+    }
+
+    @Test
+    fun decodeAltitudeMeters_matchesFitProfile() {
+        // raw 2500 → 2500/5 - 500 = 0m
+        assertThat(FitEngine.decodeAltitudeMeters(2500)).isWithin(0.01).of(0.0)
+        // raw 5000 → 500m
+        assertThat(FitEngine.decodeAltitudeMeters(5000)).isWithin(0.01).of(500.0)
+    }
+
+    /** metres → FIT altitude raw (scale 5, offset 500) */
+    private fun altitudeRaw(meters: Double): Int = ((meters + 500.0) * 5.0).toInt()
 
     private data class Field(val number: Int, val size: Int, val baseType: Int)
 

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -36,25 +37,33 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.domain.model.DedupStatus
 import com.fitsync.app.domain.model.ImportJobStatus
 import com.fitsync.app.domain.model.Platform
+import com.fitsync.app.sync.BackgroundRunGuard
 import com.fitsync.app.sync.SyncScheduler
 import com.fitsync.app.sync.syncErrorMessage
 import com.fitsync.app.sync.toSyncWorkResult
@@ -104,6 +113,30 @@ fun HomeScreen(
     val dateFormat = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val guard = remember(context) { BackgroundRunGuard(context.applicationContext) }
+    var resumeTick by remember { mutableIntStateOf(0) }
+    val autoSyncEnabled = settings?.autoSyncEnabled != false
+    val backgroundStatus = remember(resumeTick, autoSyncEnabled) {
+        guard.evaluate(autoSyncEnabled)
+    }
+    val showRestrictionBanner = remember(resumeTick, backgroundStatus, autoSyncEnabled) {
+        autoSyncEnabled &&
+            backgroundStatus.needsAttention &&
+            !guard.isBannerDismissedRecently()
+    }
+    val lastSyncAt = remember(accounts) {
+        accounts.mapNotNull { it.lastSyncAtEpochMs }.maxOrNull()
+    }
+    val lastSyncLabel = lastSyncAt?.let { "最近成功同步 ${dateFormat.format(Date(it))}" }
+        ?: "尚未完成过自动同步"
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) resumeTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
@@ -115,7 +148,9 @@ fun HomeScreen(
             ) {
             item {
                 SyncHero(
-                    autoSyncEnabled = settings?.autoSyncEnabled != false,
+                    autoSyncEnabled = autoSyncEnabled,
+                    backgroundRestricted = backgroundStatus.needsAttention,
+                    lastSyncLabel = lastSyncLabel,
                     waitingCount = waitingJobs.size,
                     syncState = syncState,
                     onSync = {
@@ -125,6 +160,29 @@ fun HomeScreen(
                         }
                     },
                 )
+            }
+            if (showRestrictionBanner) {
+                item {
+                    BackgroundRestrictionBanner(
+                        summary = BackgroundRunGuard.oemSummary(backgroundStatus.brand),
+                        notificationsMissing = !backgroundStatus.notificationsGranted,
+                        onOpenSettings = {
+                            if (!backgroundStatus.notificationsGranted &&
+                                backgroundStatus.batteryOptimizationIgnored &&
+                                !backgroundStatus.isBackgroundRestricted
+                            ) {
+                                guard.openNotificationSettings()
+                            } else {
+                                guard.openBackgroundSettings(preferBatteryRequest = true)
+                            }
+                            resumeTick++
+                        },
+                        onDismiss = {
+                            guard.dismissBanner()
+                            resumeTick++
+                        },
+                    )
+                }
             }
             item {
                 StatsPanel(
@@ -310,8 +368,64 @@ private fun StatCell(
 }
 
 @Composable
+private fun BackgroundRestrictionBanner(
+    summary: String,
+    notificationsMissing: Boolean,
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)),
+        elevation = CardDefaults.cardElevation(0.dp),
+    ) {
+        Column(
+            Modifier
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium)
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    Icons.Default.WarningAmber,
+                    contentDescription = null,
+                    tint = FitOrange,
+                )
+                Column(Modifier.weight(1f)) {
+                    Text("后台同步可能被系统限制", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (notificationsMissing) {
+                        Text(
+                            "通知权限未开启时，同步进度与操作提醒可能无法显示。",
+                            modifier = Modifier.padding(top = 4.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Button(onClick = onOpenSettings) { Text("去设置") }
+                TextButton(onClick = onDismiss) { Text("暂不") }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SyncHero(
     autoSyncEnabled: Boolean,
+    backgroundRestricted: Boolean,
+    lastSyncLabel: String,
     waitingCount: Int,
     syncState: ManualSyncUiState,
     onSync: () -> Unit,
@@ -332,11 +446,21 @@ private fun SyncHero(
                     contentAlignment = Alignment.Center,
                 ) { Icon(Icons.Default.Sync, contentDescription = null, tint = FitOrangeSoft, modifier = Modifier.size(17.dp)) }
                 Text(
-                    if (autoSyncEnabled) "自动同步已开启" else "当前为手动同步",
+                    when {
+                        !autoSyncEnabled -> "当前为手动同步"
+                        backgroundRestricted -> "自动同步可能无法按时运行"
+                        else -> "自动同步已开启"
+                    },
                     color = Color.White.copy(alpha = 0.86f),
                     style = MaterialTheme.typography.labelLarge,
                 )
             }
+            Text(
+                lastSyncLabel,
+                modifier = Modifier.padding(top = 6.dp),
+                color = Color.White.copy(alpha = 0.55f),
+                style = MaterialTheme.typography.bodySmall,
+            )
             Text(
                 "让每一次骑行\n自由流动",
                 modifier = Modifier.padding(top = 20.dp),

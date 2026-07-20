@@ -47,6 +47,31 @@ class PlatformCapabilityRegistryTest {
     }
 
     @Test
+    fun strava_supportsExperimentalBackgroundReadAndWrite() {
+        val capabilities = PlatformCapabilityRegistry.capabilities(Platform.STRAVA)
+
+        assertThat(capabilities.listActivitiesMode).isEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.downloadFitMode).isEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.uploadFitMode).isEqualTo(ConnectorExecution.BACKGROUND)
+        assertThat(capabilities.supportsIdempotencyKey).isTrue()
+        assertThat(capabilities.experimental).isTrue()
+    }
+
+    @Test
+    fun capabilitySnapshot_roundTripsModesAndRejectsInvalidInput() {
+        val original = ConnectorCapabilities(
+            listActivitiesMode = ConnectorExecution.BACKGROUND,
+            downloadFitMode = ConnectorExecution.MANUAL,
+            uploadFitMode = ConnectorExecution.BACKGROUND,
+            experimental = true,
+        )
+
+        assertThat(ConnectorCapabilities.deserialize(original.serialize())).isEqualTo(original)
+        assertThat(ConnectorCapabilities.deserialize("BROKEN|MANUAL|BACKGROUND|true")).isNull()
+        assertThat(ConnectorCapabilities.deserialize("BACKGROUND|MANUAL|BACKGROUND|yes")).isNull()
+    }
+
+    @Test
     fun localImport_isSourceOnly() {
         val capabilities = PlatformCapabilityRegistry.capabilities(Platform.LOCAL_IMPORT)
         assertThat(capabilities.shareImportSupported).isTrue()

@@ -191,7 +191,8 @@ class FitEngine {
         var elapsed: Int? = null
         var moving: Int? = null
         var distance: Double? = null
-        var elev: Double? = null
+        var sessionAscentSum = 0.0
+        var hasSessionAscent = false
         var hasSession = false
         var hasLaps = false
         var hasHr = false
@@ -206,8 +207,7 @@ class FitEngine {
         var recordDistance: Double? = null
         var lapAscent = 0.0
         var hasLapAscent = false
-        var recordAscent = 0.0
-        var previousAltitude: Double? = null
+        val ascentAccumulator = AscentAccumulator()
         var heartRateSum = 0L
         var heartRateCount = 0
 
@@ -313,7 +313,11 @@ class FitEngine {
                         values[16]?.let { avgHr = it.toInt() }
                         values[18]?.let { avgCad = it.toInt() }
                         values[20]?.let { avgPwr = it.toInt() }
-                        values[22]?.let { elev = it.toDouble() } // total_ascent, metres
+                        // total_ascent：uint16，单位 m（多 session 累加）
+                        values[22]?.let {
+                            sessionAscentSum += it.toDouble()
+                            hasSessionAscent = true
+                        }
                         messageTimestamp?.let { readTimestamp(it) }?.let { endMs = it }
                     }
                     19 -> { // Lap
@@ -345,15 +349,9 @@ class FitEngine {
                             val currentDistance = it / 100.0
                             recordDistance = maxOf(recordDistance ?: currentDistance, currentDistance)
                         }
-                        val altitude = values[78]?.let { it / 5.0 - 500.0 }
-                            ?: values[2]?.let { it / 5.0 - 500.0 }
-                        altitude?.let { current ->
-                            previousAltitude?.let { previous ->
-                                val gain = current - previous
-                                if (gain > 0.5) recordAscent += gain
-                            }
-                            previousAltitude = current
-                        }
+                        val altitude = values[78]?.let { decodeAltitudeMeters(it) }
+                            ?: values[2]?.let { decodeAltitudeMeters(it) }
+                        altitude?.let { ascentAccumulator.add(it) }
                         messageTimestamp?.let { ts ->
                             val t = readTimestamp(ts)
                             if (t != null) {
@@ -386,9 +384,13 @@ class FitEngine {
         } else {
             null
         }
-        val elevationGain = elev
-            ?: lapAscent.takeIf { hasLapAscent }
-            ?: recordAscent.takeIf { it > 0.0 }
+        val elevationGain = resolveElevationGain(
+            hasSessionAscent = hasSessionAscent,
+            sessionAscentSum = sessionAscentSum,
+            hasLapAscent = hasLapAscent,
+            lapAscentSum = lapAscent,
+            recordAscent = ascentAccumulator.total,
+        )
 
         return Decoded(
             fileType = fileType,
@@ -485,5 +487,83 @@ class FitEngine {
             result += points[idx]
         }
         return result
+    }
+
+    companion object {
+        /** Record 累计爬升：小于此阈值的抬升视为噪声 */
+        internal const val ASCENT_THRESHOLD_M = 3.0
+        /** 单步高差超过此值视为毛刺，不计入并重置参考海拔 */
+        internal const val ASCENT_MAX_STEP_M = 50.0
+        internal const val ALTITUDE_MIN_M = -200.0
+        internal const val ALTITUDE_MAX_M = 9000.0
+
+        /**
+         * FIT altitude / enhanced_altitude：scale 5、offset 500 → metres = raw/5 - 500
+         */
+        internal fun decodeAltitudeMeters(raw: Long): Double = raw / 5.0 - 500.0
+
+        /**
+         * Session 汇总优先；否则有效 Lap 合计；否则 Record 平滑累计。
+         * Session 字段存在时（含 0）不再回退，避免 GPS 噪声把平路抬成假爬升。
+         * Lap 全为 0 时允许回退到 Record。
+         */
+        internal fun resolveElevationGain(
+            hasSessionAscent: Boolean,
+            sessionAscentSum: Double,
+            hasLapAscent: Boolean,
+            lapAscentSum: Double,
+            recordAscent: Double,
+        ): Double? = when {
+            hasSessionAscent -> sessionAscentSum
+            hasLapAscent && lapAscentSum > 0.0 -> lapAscentSum
+            recordAscent > 0.0 -> recordAscent
+            hasLapAscent -> 0.0
+            else -> null
+        }
+    }
+
+    /**
+     * 从 Record 海拔序列累计爬升：3 点中值平滑 + 滞后门槛 + 尖峰过滤。
+     * 避免 0.5 m 阈值把 GPS 噪声逐点加总。
+     */
+    internal class AscentAccumulator {
+        private val window = ArrayDeque<Double>(3)
+        private var reference: Double? = null
+        var total: Double = 0.0
+            private set
+
+        fun add(altitudeMeters: Double) {
+            if (altitudeMeters < ALTITUDE_MIN_M || altitudeMeters > ALTITUDE_MAX_M) return
+            if (window.size == 3) window.removeFirst()
+            window.addLast(altitudeMeters)
+            val smoothed = medianOf(window)
+            val ref = reference
+            if (ref == null) {
+                reference = smoothed
+                return
+            }
+            val delta = smoothed - ref
+            if (abs(delta) > ASCENT_MAX_STEP_M) {
+                // 毛刺：不计入，把参考点跳到当前平滑值
+                reference = smoothed
+                return
+            }
+            if (delta >= ASCENT_THRESHOLD_M) {
+                total += delta
+                reference = smoothed
+            } else if (delta <= -ASCENT_THRESHOLD_M) {
+                reference = smoothed
+            }
+        }
+
+        private fun medianOf(values: ArrayDeque<Double>): Double {
+            val sorted = values.sorted()
+            return when (sorted.size) {
+                0 -> 0.0
+                1 -> sorted[0]
+                2 -> (sorted[0] + sorted[1]) / 2.0
+                else -> sorted[sorted.size / 2]
+            }
+        }
     }
 }

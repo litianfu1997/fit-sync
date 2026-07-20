@@ -46,6 +46,7 @@ data class RemoteCopy(
 sealed interface ConnectorResult<out T> {
     data class Success<T>(val value: T) : ConnectorResult<T>
     data class Duplicate<T>(val value: T? = null) : ConnectorResult<T>
+    data class Processing(val remoteUploadId: String, val pollAfterMs: Long) : ConnectorResult<Nothing>
     data class RequiresLogin(val url: String, val message: String = "登录状态已失效") : ConnectorResult<Nothing>
     data class RequiresUserAction(val url: String, val message: String) : ConnectorResult<Nothing>
     data class RetryableFailure(val code: String?, val message: String) : ConnectorResult<Nothing>
@@ -59,6 +60,8 @@ interface PlatformConnector {
     suspend fun listActivities(sinceEpochMs: Long, cursor: SyncCursor?): ConnectorResult<ActivityPage>
     suspend fun downloadFit(activity: RemoteActivitySummary): ConnectorResult<FitFile>
     suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy>
+    suspend fun checkUpload(remoteUploadId: String): ConnectorResult<RemoteCopy> =
+        ConnectorResult.PermanentFailure("UNSUPPORTED", "该平台不支持查询远端上传状态")
 }
 
 /**

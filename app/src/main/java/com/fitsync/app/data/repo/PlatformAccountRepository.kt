@@ -1,6 +1,7 @@
 package com.fitsync.app.data.repo
 
 import com.fitsync.app.connectors.ConnectorRegistry
+import com.fitsync.app.connectors.ConnectorCapabilities
 import com.fitsync.app.connectors.CredentialsLoginConnector
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.PlatformAccountEntity
@@ -9,11 +10,13 @@ import com.fitsync.app.domain.model.ConnectorExecution
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SessionState
 import com.fitsync.app.web.WebSessionManager
+import com.fitsync.app.strava.StravaOAuthService
 
 class PlatformAccountRepository(
     private val db: FitSyncDatabase,
     private val connectors: ConnectorRegistry,
     private val sessions: WebSessionManager,
+    private val stravaOAuthService: StravaOAuthService,
 ) {
     /**
      * @param detectedOverride WebView 内同源校验等路径已得到的状态；非空时跳过 connector 网络探测。
@@ -43,19 +46,32 @@ class PlatformAccountRepository(
             SessionState.NEEDS_USER_ACTION -> AccountStatus.NEEDS_USER_ACTION
             SessionState.NOT_CONNECTED -> AccountStatus.DISABLED
         }
-        val capabilities = connector.detectCapabilities()
+        val capabilities = if (platform == Platform.STRAVA && state != SessionState.AUTHENTICATED) {
+            ConnectorCapabilities(shareImportSupported = true, experimental = true)
+        } else {
+            connector.detectCapabilities()
+        }
+        val needsUserAction = if (platform == Platform.STRAVA && state == SessionState.AUTHENTICATED) {
+            capabilities.downloadFitMode != ConnectorExecution.BACKGROUND
+        } else {
+            state != SessionState.AUTHENTICATED
+        }
         db.platformAccountDao().upsert(
             PlatformAccountEntity(
                 id = existing?.id ?: 0,
                 platform = platform,
                 externalUserId = sessions.externalUserId(platform) ?: existing?.externalUserId,
-                displayName = existing?.displayName,
+                displayName = if (platform == Platform.STRAVA) {
+                    sessions.stravaDisplayName() ?: existing?.displayName
+                } else {
+                    existing?.displayName
+                },
                 syncCursor = existing?.syncCursor,
                 status = status,
                 capabilitySnapshot = capabilities.serialize(),
                 lastValidatedAtEpochMs = now,
                 lastSyncAtEpochMs = existing?.lastSyncAtEpochMs,
-                needsUserAction = state != SessionState.AUTHENTICATED,
+                needsUserAction = needsUserAction,
                 createdAtEpochMs = existing?.createdAtEpochMs ?: now,
                 updatedAtEpochMs = now,
             ),
@@ -91,8 +107,12 @@ class PlatformAccountRepository(
 
     suspend fun disconnect(platform: Platform) {
         val account = db.platformAccountDao().getByPlatform(platform)
+        if (platform == Platform.STRAVA && !stravaOAuthService.revoke()) {
+            error("Strava 远端撤销失败，本机凭据已保留，请稍后重试")
+        }
         sessions.clear(platform)
         if (account != null) {
+            db.remoteActivitySkipDao().deleteByAccount(account.id)
             db.syncRuleDao().deleteByDestination(account.id)
             db.deliveryJobDao().disableForAccount(account.id)
             db.platformAccountDao().update(

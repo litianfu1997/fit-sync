@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.automirrored.filled.DirectionsBike
@@ -63,6 +64,12 @@ private enum class ActivityFilter(val label: String) {
     ALL("全部"), CYCLING("骑行"), RUNNING("跑步"), REVIEW("待复核")
 }
 
+/** 活动列表按活动开始时间排序。默认倒序（最新在前）。 */
+private enum class ActivityTimeSort(val label: String) {
+    NEWEST_FIRST("时间倒序"),
+    OLDEST_FIRST("时间正序"),
+}
+
 @Composable
 fun ActivitiesScreen(
     onOpenActivity: (Long) -> Unit = {},
@@ -72,9 +79,10 @@ fun ActivitiesScreen(
         .collectAsState(initial = emptyList())
     var query by rememberSaveable { mutableStateOf("") }
     var filter by rememberSaveable { mutableStateOf(ActivityFilter.ALL) }
+    var timeSort by rememberSaveable { mutableStateOf(ActivityTimeSort.NEWEST_FIRST) }
     val dateFormat = remember { SimpleDateFormat("MM月dd日 · HH:mm", Locale.getDefault()) }
-    val filtered = remember(activities, query, filter) {
-        activities.filter { activity ->
+    val filtered = remember(activities, query, filter, timeSort) {
+        val matched = activities.filter { activity ->
             val queryMatch = query.isBlank() ||
                 activity.title.orEmpty().contains(query, ignoreCase = true) ||
                 sportLabel(activity.sportType).contains(query, ignoreCase = true)
@@ -90,6 +98,12 @@ fun ActivitiesScreen(
                 ActivityFilter.REVIEW -> activity.dedupStatus == DedupStatus.NEEDS_REVIEW
             }
             queryMatch && filterMatch
+        }
+        when (timeSort) {
+            ActivityTimeSort.NEWEST_FIRST ->
+                matched.sortedWith(compareByDescending<CanonicalActivityEntity> { it.startTimeEpochMs }.thenByDescending { it.id })
+            ActivityTimeSort.OLDEST_FIRST ->
+                matched.sortedWith(compareBy<CanonicalActivityEntity> { it.startTimeEpochMs }.thenBy { it.id })
         }
     }
 
@@ -121,11 +135,40 @@ fun ActivitiesScreen(
                 )
             }
             item {
-                Text(
-                    "${filtered.size} 条结果",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "${filtered.size} 条结果",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FilterChip(
+                        modifier = Modifier.height(36.dp),
+                        selected = true,
+                        onClick = {
+                            timeSort = when (timeSort) {
+                                ActivityTimeSort.NEWEST_FIRST -> ActivityTimeSort.OLDEST_FIRST
+                                ActivityTimeSort.OLDEST_FIRST -> ActivityTimeSort.NEWEST_FIRST
+                            }
+                        },
+                        label = { Text(timeSort.label) },
+                        leadingIcon = {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Sort,
+                                contentDescription = "切换时间排序",
+                                modifier = Modifier.size(18.dp),
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                            selectedLeadingIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        ),
+                    )
+                }
             }
             item {
                 Row(

@@ -18,11 +18,24 @@ class SecureSessionStore(context: Context) {
             remove(key)
             return
         }
+        preferences.edit().putString(key, encrypt(value)).apply()
+    }
+
+    @Synchronized
+    fun putAll(values: Map<String, String?>) {
+        val editor = preferences.edit()
+        values.forEach { (key, value) ->
+            if (value.isNullOrBlank()) editor.remove(key) else editor.putString(key, encrypt(value))
+        }
+        editor.apply()
+    }
+
+    private fun encrypt(value: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
         val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
         val payload = cipher.iv + encrypted
-        preferences.edit().putString(key, Base64.encodeToString(payload, Base64.NO_WRAP)).apply()
+        return Base64.encodeToString(payload, Base64.NO_WRAP)
     }
 
     fun get(key: String): String? {

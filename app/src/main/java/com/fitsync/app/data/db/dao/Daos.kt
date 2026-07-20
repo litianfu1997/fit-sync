@@ -12,6 +12,7 @@ import com.fitsync.app.data.db.entity.DeliveryJobEntity
 import com.fitsync.app.data.db.entity.ImportJobEntity
 import com.fitsync.app.data.db.entity.PlatformAccountEntity
 import com.fitsync.app.data.db.entity.PlatformCopyEntity
+import com.fitsync.app.data.db.entity.RemoteActivitySkipEntity
 import com.fitsync.app.data.db.entity.SyncRuleEntity
 import com.fitsync.app.domain.model.DedupStatus
 import com.fitsync.app.domain.model.DeliveryJobStatus
@@ -47,35 +48,7 @@ interface PlatformAccountDao {
 
 @Dao
 interface CanonicalActivityDao {
-    @Query(
-        """
-        SELECT activity.id,
-               activity.sportType,
-               activity.startTimeEpochMs,
-               activity.endTimeEpochMs,
-               activity.elapsedSeconds,
-               activity.movingSeconds,
-               activity.distanceMeters,
-               activity.elevationGain,
-               activity.avgHeartRate,
-               activity.title,
-               activity.activityFingerprint,
-               activity.dedupStatus,
-               activity.primaryVariantId,
-               activity.reviewCandidateCanonicalId,
-               activity.createdAtEpochMs
-        FROM canonical_activity AS activity
-        ORDER BY COALESCE(
-                     (
-                         SELECT MAX(imported_at.createdAtEpochMs)
-                         FROM import_job AS imported_at
-                         WHERE imported_at.canonicalActivityId = activity.id
-                     ),
-                     activity.createdAtEpochMs
-                 ) DESC,
-                 activity.id DESC
-        """,
-    )
+    @Query("SELECT * FROM canonical_activity ORDER BY startTimeEpochMs DESC, id DESC")
     fun observeAll(): Flow<List<CanonicalActivityEntity>>
 
     @Query("SELECT * FROM canonical_activity ORDER BY startTimeEpochMs DESC")
@@ -202,6 +175,21 @@ interface PlatformCopyDao {
 }
 
 @Dao
+interface RemoteActivitySkipDao {
+    @Query(
+        "SELECT * FROM remote_activity_skip WHERE platformAccountId = :accountId " +
+            "AND remoteActivityId = :remoteId LIMIT 1",
+    )
+    suspend fun findByRemote(accountId: Long, remoteId: String): RemoteActivitySkipEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: RemoteActivitySkipEntity): Long
+
+    @Query("DELETE FROM remote_activity_skip WHERE platformAccountId = :accountId")
+    suspend fun deleteByAccount(accountId: Long)
+}
+
+@Dao
 interface DeliveryJobDao {
     @Query("SELECT * FROM delivery_job ORDER BY createdAtEpochMs DESC")
     fun observeAll(): Flow<List<DeliveryJobEntity>>
@@ -260,6 +248,7 @@ interface DeliveryJobDao {
         SELECT * FROM delivery_job
         WHERE status = 'PENDING'
            OR (status = 'RETRY_WAIT' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
+           OR (status = 'WAITING_REMOTE_PROCESS' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
         ORDER BY createdAtEpochMs ASC
         LIMIT :limit
         """,
@@ -271,9 +260,16 @@ interface DeliveryJobDao {
         SELECT COUNT(*) FROM delivery_job
         WHERE status = 'PENDING'
            OR (status = 'RETRY_WAIT' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
+           OR (status = 'WAITING_REMOTE_PROCESS' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
         """,
     )
     suspend fun countRunnable(now: Long): Int
+
+    @Query(
+        "SELECT MIN(nextRetryAtEpochMs) FROM delivery_job " +
+            "WHERE status = 'WAITING_REMOTE_PROCESS' OR status = 'RETRY_WAIT'",
+    )
+    suspend fun findNextScheduledAt(): Long?
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(entity: DeliveryJobEntity): Long

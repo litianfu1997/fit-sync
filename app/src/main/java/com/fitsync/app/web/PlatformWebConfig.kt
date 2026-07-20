@@ -58,6 +58,13 @@ object PlatformWebConfigs {
                 "https://login.passport.igpsport.cn",
             ),
         )
+        Platform.STRAVA -> PlatformWebConfig(
+            platform,
+            loginUrl = "https://www.strava.com/login",
+            uploadUrl = "https://www.strava.com/dashboard",
+            allowedDomainSuffixes = setOf("strava.com"),
+            origins = setOf("https://www.strava.com"),
+        )
         Platform.LOCAL_IMPORT, Platform.UNKNOWN -> error("$platform 没有网页账号")
     }
 

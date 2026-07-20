@@ -16,6 +16,7 @@ import com.fitsync.app.MainActivity
 import com.fitsync.app.R
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.web.PlatformWebActivity
+import com.fitsync.app.strava.StravaAuthActivity
 
 class SyncNotificationManager(private val context: Context) {
     private val manager = context.getSystemService(NotificationManager::class.java)
@@ -86,7 +87,11 @@ class SyncNotificationManager(private val context: Context) {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
-        val intent = PlatformWebActivity.createIntent(context, platform, jobId, url)
+        val intent = if (platform == Platform.STRAVA && url.contains("/oauth/")) {
+            StravaAuthActivity.createIntent(context)
+        } else {
+            PlatformWebActivity.createIntent(context, platform, jobId, url)
+        }
         val pending = PendingIntent.getActivity(
             context,
             notificationId,

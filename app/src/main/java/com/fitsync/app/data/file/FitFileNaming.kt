@@ -66,6 +66,7 @@ object FitFileNaming {
         Platform.GARMIN -> "Garmin"
         Platform.IGPSPORT -> "iGPSPORT"
         Platform.COROS -> "COROS"
+        Platform.STRAVA -> "Strava"
         Platform.UNKNOWN -> "未知平台"
     }
 

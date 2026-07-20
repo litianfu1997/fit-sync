@@ -7,5 +7,6 @@ enum class Platform(val displayName: String) {
     GARMIN("Garmin Connect 中国站"),
     IGPSPORT("iGPSPORT"),
     COROS("COROS 高驰"),
+    STRAVA("Strava"),
     UNKNOWN("未知来源"),
 }
