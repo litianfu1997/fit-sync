@@ -1,0 +1,12 @@
+Lcom/fitsync/app/FitSyncApp;
+HSPLcom/fitsync/app/FitSyncApp;->**(**)**
+Lcom/fitsync/app/MainActivity;
+HSPLcom/fitsync/app/MainActivity;->**(**)**
+Lcom/fitsync/app/ui/FitSyncAppRootKt;
+HSPLcom/fitsync/app/ui/FitSyncAppRootKt;->**(**)**
+HPLcom/fitsync/app/ui/screens/HomeScreenKt;->**(**)**
+HPLcom/fitsync/app/ui/screens/ActivitiesScreenKt;->**(**)**
+HPLcom/fitsync/app/ui/screens/ActivityDetailScreenKt;->**(**)**
+HPLcom/fitsync/app/ui/screens/SyncJobsScreenKt;->**(**)**
+HPLcom/fitsync/app/data/db/FitSyncDatabase;->**(**)**
+HPLcom/fitsync/app/fit/FitEngine;->**(**)**

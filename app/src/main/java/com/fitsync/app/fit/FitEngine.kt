@@ -3,10 +3,9 @@ package com.fitsync.app.fit
 import com.fitsync.app.domain.model.SportType
 import com.fitsync.app.domain.model.ValidationStatus
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.zip.ZipFile
 import kotlin.math.abs
+import kotlin.random.Random
 
 /**
  * Lightweight FIT Activity parser for on-device validation and metadata extraction.
@@ -178,8 +177,30 @@ class FitEngine {
         val littleEndian: Boolean,
     )
 
+    /** 复用 256 个 FIT 字段槽，避免每条 Record 创建 HashMap/装箱 Long。 */
+    private class FieldValues {
+        private val values = LongArray(256)
+        private val present = BooleanArray(256)
+        private val touched = IntArray(256)
+        private var touchedCount = 0
+
+        fun clear() {
+            for (i in 0 until touchedCount) present[touched[i]] = false
+            touchedCount = 0
+        }
+
+        fun put(fieldNum: Int, value: Long) {
+            if (!present[fieldNum]) touched[touchedCount++] = fieldNum
+            present[fieldNum] = true
+            values[fieldNum] = value
+        }
+
+        operator fun get(fieldNum: Int): Long? = if (present[fieldNum]) values[fieldNum] else null
+    }
+
     private fun decodeMessages(bytes: ByteArray, start: Int, end: Int): Decoded {
-        val defs = HashMap<Int, MesgDef>()
+        val defs = arrayOfNulls<MesgDef>(16)
+        val values = FieldValues()
         var offset = start
         var fileType: Int? = null
         var manufacturer: Int? = null
@@ -199,7 +220,7 @@ class FitEngine {
         var hasCad = false
         var hasPwr = false
         var recordCount = 0
-        val track = ArrayList<LatLng>()
+        val track = TrackPointSampler()
         var avgHr: Int? = null
         var avgPwr: Int? = null
         var avgCad: Int? = null
@@ -272,9 +293,8 @@ class FitEngine {
                 val nativeSize = def.fields.sumOf { it.size }
                 val mesgSize = nativeSize + def.developerFields.sumOf { it.size }
                 if (offset + mesgSize > end) break
-                val mesgBytes = bytes.copyOfRange(offset, offset + nativeSize)
+                readFields(bytes, offset, nativeSize, def, values)
                 offset += mesgSize
-                val values = readFields(mesgBytes, def)
                 val explicitTimestamp = values[253]
                 val messageTimestamp = when {
                     explicitTimestamp != null -> explicitTimestamp
@@ -335,7 +355,7 @@ class FitEngine {
                             val la = semicirclesToDegrees(lat.toInt())
                             val lo = semicirclesToDegrees(lon.toInt())
                             if (abs(la) <= 90 && abs(lo) <= 180 && (la != 0.0 || lo != 0.0)) {
-                                if (track.size < 64) track += LatLng(la, lo)
+                                track.add(LatLng(la, lo))
                             }
                         }
                         if (values[3] != null) hasHr = true
@@ -411,64 +431,88 @@ class FitEngine {
             hasCadence = hasCad || avgCad != null,
             hasPower = hasPwr || avgPwr != null,
             recordCount = recordCount,
-            trackSample = sampleTrack(track),
+            trackSample = sampleTrack(track.points()),
             avgHeartRate = averageHeartRate,
             avgPower = avgPwr,
             avgCadence = avgCad,
         )
     }
 
-    private fun readFields(mesgBytes: ByteArray, def: MesgDef): Map<Int, Long> {
-        val map = HashMap<Int, Long>()
+    private fun readFields(
+        bytes: ByteArray,
+        messageOffset: Int,
+        messageSize: Int,
+        def: MesgDef,
+        output: FieldValues,
+    ) {
+        output.clear()
         var pos = 0
-        val order = if (def.littleEndian) ByteOrder.LITTLE_ENDIAN else ByteOrder.BIG_ENDIAN
         for (field in def.fields) {
-            if (pos + field.size > mesgBytes.size) break
-            val slice = mesgBytes.copyOfRange(pos, pos + field.size)
+            if (pos + field.size > messageSize) break
+            val value = readScalar(
+                bytes = bytes,
+                offset = messageOffset + pos,
+                size = field.size,
+                base = field.baseType and 0x1F,
+                littleEndian = def.littleEndian,
+            )
             pos += field.size
-            val base = field.baseType and 0x1F
-            val value = readScalar(slice, base, order)
-            if (value != null) map[field.fieldNum] = value
+            if (value != null) output.put(field.fieldNum, value)
         }
-        return map
     }
 
-    private fun readScalar(slice: ByteArray, base: Int, order: ByteOrder): Long? = when (base) {
-        0, 2, 13 -> if (slice.size == 1) {
-            (slice[0].toInt() and 0xFF).toLong().takeUnless { it == 0xFFL }
+    private fun readScalar(
+        bytes: ByteArray,
+        offset: Int,
+        size: Int,
+        base: Int,
+        littleEndian: Boolean,
+    ): Long? = when (base) {
+        0, 2, 13 -> if (size == 1) {
+            (bytes[offset].toInt() and 0xFF).toLong().takeUnless { it == 0xFFL }
         } else null
-        1 -> if (slice.size == 1) slice[0].toLong().takeUnless { it == 0x7FL } else null
-        3 -> if (slice.size == 2) {
-            ByteBuffer.wrap(slice).order(order).short.toLong().takeUnless { it == 0x7FFFL }
+        1 -> if (size == 1) bytes[offset].toLong().takeUnless { it == 0x7FL } else null
+        3 -> if (size == 2) {
+            readBits(bytes, offset, size, littleEndian).toShort().toLong().takeUnless { it == 0x7FFFL }
         } else null
-        4 -> if (slice.size == 2) {
-            (ByteBuffer.wrap(slice).order(order).short.toInt() and 0xFFFF).toLong()
-                .takeUnless { it == 0xFFFFL }
+        4 -> if (size == 2) {
+            readBits(bytes, offset, size, littleEndian).takeUnless { it == 0xFFFFL }
         } else null
-        5 -> if (slice.size == 4) {
-            ByteBuffer.wrap(slice).order(order).int.toLong().takeUnless { it == 0x7FFFFFFFL }
+        5 -> if (size == 4) {
+            readBits(bytes, offset, size, littleEndian).toInt().toLong().takeUnless { it == 0x7FFFFFFFL }
         } else null
-        6 -> if (slice.size == 4) {
-            (ByteBuffer.wrap(slice).order(order).int.toLong() and 0xFFFFFFFFL)
-                .takeUnless { it == 0xFFFFFFFFL }
+        6 -> if (size == 4) {
+            readBits(bytes, offset, size, littleEndian).takeUnless { it == 0xFFFFFFFFL }
         } else null
-        10 -> if (slice.size == 1) (slice[0].toInt() and 0xFF).toLong().takeUnless { it == 0L } else null
-        11 -> if (slice.size == 2) {
-            (ByteBuffer.wrap(slice).order(order).short.toInt() and 0xFFFF).toLong().takeUnless { it == 0L }
+        10 -> if (size == 1) (bytes[offset].toInt() and 0xFF).toLong().takeUnless { it == 0L } else null
+        11 -> if (size == 2) {
+            readBits(bytes, offset, size, littleEndian).takeUnless { it == 0L }
         } else null
-        12 -> if (slice.size == 4) {
-            (ByteBuffer.wrap(slice).order(order).int.toLong() and 0xFFFFFFFFL).takeUnless { it == 0L }
+        12 -> if (size == 4) {
+            readBits(bytes, offset, size, littleEndian).takeUnless { it == 0L }
         } else null
-        14 -> if (slice.size == 8) {
-            ByteBuffer.wrap(slice).order(order).long.takeUnless { it == Long.MAX_VALUE }
+        14 -> if (size == 8) {
+            readBits(bytes, offset, size, littleEndian).takeUnless { it == Long.MAX_VALUE }
         } else null
-        15 -> if (slice.size == 8) {
-            ByteBuffer.wrap(slice).order(order).long.takeUnless { it == -1L }
+        15 -> if (size == 8) {
+            readBits(bytes, offset, size, littleEndian).takeUnless { it == -1L }
         } else null
-        16 -> if (slice.size == 8) {
-            ByteBuffer.wrap(slice).order(order).long.takeUnless { it == 0L }
+        16 -> if (size == 8) {
+            readBits(bytes, offset, size, littleEndian).takeUnless { it == 0L }
         } else null
         else -> null
+    }
+
+    private fun readBits(bytes: ByteArray, offset: Int, size: Int, littleEndian: Boolean): Long {
+        var result = 0L
+        if (littleEndian) {
+            for (i in 0 until size) {
+                result = result or ((bytes[offset + i].toLong() and 0xFFL) shl (i * 8))
+            }
+        } else {
+            for (i in 0 until size) result = (result shl 8) or (bytes[offset + i].toLong() and 0xFFL)
+        }
+        return result
     }
 
     private fun semicirclesToDegrees(semi: Int): Double = semi * (180.0 / 2147483648.0)
@@ -557,13 +601,66 @@ class FitEngine {
         }
 
         private fun medianOf(values: ArrayDeque<Double>): Double {
-            val sorted = values.sorted()
-            return when (sorted.size) {
+            return when (values.size) {
                 0 -> 0.0
-                1 -> sorted[0]
-                2 -> (sorted[0] + sorted[1]) / 2.0
-                else -> sorted[sorted.size / 2]
+                1 -> values[0]
+                2 -> (values[0] + values[1]) / 2.0
+                else -> {
+                    val a = values[0]
+                    val b = values[1]
+                    val c = values[2]
+                    a + b + c - minOf(a, b, c) - maxOf(a, b, c)
+                }
             }
         }
+    }
+}
+
+/**
+ * 有界的流式蓄水池采样。始终保留首尾点，中间点覆盖整段轨迹，避免长活动只记录开头 64 个点。
+ */
+internal class TrackPointSampler(
+    private val capacity: Int = 64,
+    seed: Int = 0,
+) {
+    private data class IndexedPoint(val index: Long, val point: LatLng)
+
+    private val random = Random(seed)
+    private val middle = ArrayList<IndexedPoint>((capacity - 2).coerceAtLeast(0))
+    private var first: IndexedPoint? = null
+    private var last: IndexedPoint? = null
+    private var nextIndex = 0L
+    private var middleSeen = 0L
+
+    init {
+        require(capacity >= 2) { "轨迹采样容量至少为 2" }
+    }
+
+    fun add(point: LatLng) {
+        val current = IndexedPoint(nextIndex++, point)
+        val previousLast = last
+        if (first == null) first = current
+        last = current
+        if (previousLast == null || previousLast.index == first?.index) return
+
+        middleSeen++
+        val middleCapacity = capacity - 2
+        if (middle.size < middleCapacity) {
+            middle += previousLast
+        } else if (middleCapacity > 0) {
+            val slot = random.nextLong(middleSeen)
+            if (slot < middleCapacity) middle[slot.toInt()] = previousLast
+        }
+    }
+
+    fun points(): List<LatLng> {
+        val start = first ?: return emptyList()
+        val end = last ?: return emptyList()
+        if (start.index == end.index) return listOf(start.point)
+        return buildList {
+            add(start)
+            addAll(middle.sortedBy { it.index })
+            add(end)
+        }.distinctBy { it.index }.sortedBy { it.index }.map { it.point }
     }
 }

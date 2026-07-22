@@ -10,6 +10,18 @@ import java.nio.ByteOrder
 class FitEngineTest {
 
     @Test
+    fun trackSampler_keepsTailAndSamplesAcrossWholeActivity() {
+        val sampler = TrackPointSampler(capacity = 8)
+        repeat(200) { index -> sampler.add(LatLng(index.toDouble(), -index.toDouble())) }
+
+        val points = sampler.points()
+        assertThat(points).hasSize(8)
+        assertThat(points.first()).isEqualTo(LatLng(0.0, -0.0))
+        assertThat(points.last()).isEqualTo(LatLng(199.0, -199.0))
+        assertThat(points.map { it.lat }).isInOrder()
+    }
+
+    @Test
     fun rejectsNonFitBytes() {
         // Long enough to pass size gate, but wrong signature
         val result = FitEngine().parseBytes("hello world!!!!".toByteArray())

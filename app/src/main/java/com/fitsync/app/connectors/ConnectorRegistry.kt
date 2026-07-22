@@ -2,6 +2,7 @@ package com.fitsync.app.connectors
 
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
+import com.fitsync.app.data.db.entity.ActivityVariantEntity
 import com.fitsync.app.data.file.FitFileStore
 import com.fitsync.app.domain.model.ConnectorExecution
 import com.fitsync.app.domain.model.Platform
@@ -90,13 +91,9 @@ private abstract class HttpPlatformConnector(
         else -> ConnectorResult.PermanentFailure(response.code.toString(), "平台请求失败（HTTP ${response.code}）")
     }
 
-    protected suspend fun primaryFile(activity: CanonicalActivityEntity): Pair<File, com.fitsync.app.data.db.entity.ActivityVariantEntity>? {
-        val variants = db.activityVariantDao().findByCanonical(activity.id)
-        val variant = activity.primaryVariantId?.let { id -> variants.firstOrNull { it.id == id } }
-            ?: variants.maxByOrNull { it.qualityScore ?: 0 }
-            ?: return null
+    protected fun fileForVariant(variant: ActivityVariantEntity): File? {
         val file = File(variant.localFilePath)
-        return if (file.isFile) file to variant else null
+        return file.takeIf { it.isFile }
     }
 
     protected suspend fun storeFit(response: Response, displayName: String, maxBytes: Long = 50L * 1024 * 1024): FitFile {
@@ -156,6 +153,7 @@ private class OnelapConnector(
                 if (!response.isSuccessful) return@use failure(response, PlatformWebConfigs.get(platform).loginUrl)
                 val root = JSONObject(response.body?.string().orEmpty())
                 val items = JsonPlatformParser.activities(root)
+                    ?: return@use ConnectorResult.RetryableFailure("ONELAP_INVALID_RESPONSE", "迈金活动列表响应格式异常")
                 val nextCursor = nextOnelapCursor(page, items.size)
                 ConnectorResult.Success(
                     ActivityPage(items, nextCursor, nextCursor != null),
@@ -218,10 +216,12 @@ private class OnelapConnector(
         }
     }.getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "迈金 FIT 下载失败") }
 
-    override suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy> {
-        val pair = primaryFile(activity)
+    override suspend fun uploadFit(
+        activity: CanonicalActivityEntity,
+        sourceVariant: ActivityVariantEntity,
+    ): ConnectorResult<RemoteCopy> {
+        val file = fileForVariant(sourceVariant)
             ?: return ConnectorResult.PermanentFailure("FILE_MISSING", "本地 FIT 文件不存在")
-        val file = pair.first
         val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("jilu", file.name, file.asRequestBody(FIT))
             .build()
@@ -320,6 +320,7 @@ private class XingzheConnector(
                 val text = response.body?.string().orEmpty()
                 val root: Any = if (text.trimStart().startsWith("[")) JSONArray(text) else JSONObject(text)
                 val all = JsonPlatformParser.activities(root)
+                    ?: return@use ConnectorResult.RetryableFailure("XINGZHE_INVALID_RESPONSE", "行者活动列表响应格式异常")
                 val items = all.filter { it.startTimeEpochMs == null || it.startTimeEpochMs >= sinceEpochMs }
                 val hasMore = all.size >= PAGE_SIZE
                 ConnectorResult.Success(
@@ -339,16 +340,18 @@ private class XingzheConnector(
         }.getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "行者 FIT 下载失败") }
     }
 
-    override suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy> {
+    override suspend fun uploadFit(
+        activity: CanonicalActivityEntity,
+        sourceVariant: ActivityVariantEntity,
+    ): ConnectorResult<RemoteCopy> {
         val config = PlatformWebConfigs.get(platform)
-        val pair = primaryFile(activity)
+        val file = fileForVariant(sourceVariant)
             ?: return ConnectorResult.PermanentFailure("FILE_MISSING", "本地 FIT 文件不存在")
-        val (file, variant) = pair
         if (file.length() > 30L * 1024 * 1024) {
             return ConnectorResult.PermanentFailure("FILE_TOO_LARGE", "行者限制 FIT 文件不超过 30 MB")
         }
         val sport = xingzheSport(activity.sportType)
-        val source = listOfNotNull(variant.recordingManufacturer, variant.recordingProduct)
+        val source = listOfNotNull(sourceVariant.recordingManufacturer, sourceVariant.recordingProduct)
             .joinToString("-")
             .ifBlank { "-" }
         val title = activity.title?.takeIf { it.isNotBlank() }
@@ -408,8 +411,8 @@ private class XingzheConnector(
 }
 
 internal object JsonPlatformParser {
-    fun activities(root: Any): List<RemoteActivitySummary> {
-        val array = findArray(root) ?: return emptyList()
+    fun activities(root: Any): List<RemoteActivitySummary>? {
+        val array = findArray(root) ?: return null
         return buildList {
             for (i in 0 until array.length()) {
                 val item = array.optJSONObject(i) ?: continue

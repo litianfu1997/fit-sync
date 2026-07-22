@@ -42,7 +42,8 @@ class FitFileStore(private val context: Context) {
         maxBytes: Long = DEFAULT_MAX_BYTES,
     ): StoredFitFile =
         withContext(Dispatchers.IO) {
-            val tempFile = File(tempDir, "tmp_${System.currentTimeMillis()}_${safeName(displayName)}")
+            val tempFile = File.createTempFile("tmp_", "_${safeName(displayName)}", tempDir)
+            val digest = MessageDigest.getInstance("SHA-256")
             try {
                 tempFile.outputStream().use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -53,6 +54,7 @@ class FitFileStore(private val context: Context) {
                         total += read
                         require(total <= maxBytes) { "FIT 文件超过大小限制" }
                         output.write(buffer, 0, read)
+                        digest.update(buffer, 0, read)
                     }
                 }
                 require(isFitFile(tempFile)) { "内容不是有效的 FIT 文件" }
@@ -60,7 +62,7 @@ class FitFileStore(private val context: Context) {
                 tempFile.delete()
                 throw t
             }
-            finalizeStoredFile(tempFile, displayName)
+            finalizeStoredFile(tempFile, displayName, digest.digest().toHex())
         }
 
     suspend fun copyFromFile(file: File, displayName: String = file.name): StoredFitFile =
@@ -116,8 +118,7 @@ class FitFileStore(private val context: Context) {
         }
     }
 
-    private fun finalizeStoredFile(tempFile: File, displayName: String): StoredFitFile {
-        val sha256 = sha256Of(tempFile)
+    private fun finalizeStoredFile(tempFile: File, displayName: String, sha256: String): StoredFitFile {
         val target = File(fitsDir, "${sha256.take(16)}_${safeName(displayName)}")
         if (!target.exists()) {
             tempFile.copyTo(target, overwrite = false)
@@ -159,8 +160,10 @@ class FitFileStore(private val context: Context) {
                     digest.update(buffer, 0, read)
                 }
             }
-            return digest.digest().joinToString("") { "%02x".format(it) }
+            return digest.digest().toHex()
         }
+
+        private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
     }
 }
 

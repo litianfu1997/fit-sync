@@ -1,5 +1,8 @@
 package com.fitsync.app.ui
 
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
@@ -17,6 +20,9 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -29,6 +35,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.fitsync.app.ui.screens.ActivitiesScreen
+import com.fitsync.app.ui.screens.ActivityFilter
 import com.fitsync.app.ui.screens.ActivityDetailScreen
 import com.fitsync.app.ui.screens.BackgroundSettingsScreen
 import com.fitsync.app.ui.screens.HomeScreen
@@ -58,6 +65,7 @@ fun FitSyncAppRoot() {
     val backStack by navController.currentBackStackEntryAsState()
     val current = backStack?.destination?.route
     val showBottomBar = destinations.any { it.route == current }
+    var activityFilter by rememberSaveable { mutableStateOf(ActivityFilter.ALL) }
 
     fun navigateToMainDestination(route: String) {
         if (route == current) return
@@ -108,6 +116,11 @@ fun FitSyncAppRoot() {
             navController = navController,
             startDestination = "home",
             modifier = Modifier.padding(padding),
+            // 使用零时长 alpha 切换，视觉上没有动画，同时确保旧页面图层立即清除，避免拖影。
+            enterTransition = { fadeIn(animationSpec = snap()) },
+            exitTransition = { fadeOut(animationSpec = snap()) },
+            popEnterTransition = { fadeIn(animationSpec = snap()) },
+            popExitTransition = { fadeOut(animationSpec = snap()) },
         ) {
             composable("home") {
                 HomeScreen(
@@ -118,6 +131,8 @@ fun FitSyncAppRoot() {
             }
             composable("activities") {
                 ActivitiesScreen(
+                    filter = activityFilter,
+                    onFilterChange = { activityFilter = it },
                     onOpenActivity = { id -> navController.navigate("activity/$id") },
                     onOpenPlatforms = { navController.navigate("settings/platforms") },
                 )

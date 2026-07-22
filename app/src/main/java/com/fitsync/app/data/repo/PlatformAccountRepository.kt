@@ -1,5 +1,6 @@
 package com.fitsync.app.data.repo
 
+import androidx.room.withTransaction
 import com.fitsync.app.connectors.ConnectorRegistry
 import com.fitsync.app.connectors.ConnectorCapabilities
 import com.fitsync.app.connectors.CredentialsLoginConnector
@@ -9,6 +10,7 @@ import com.fitsync.app.domain.model.AccountStatus
 import com.fitsync.app.domain.model.ConnectorExecution
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SessionState
+import com.fitsync.app.notification.SyncNotificationManager
 import com.fitsync.app.web.WebSessionManager
 import com.fitsync.app.strava.StravaOAuthService
 
@@ -17,6 +19,7 @@ class PlatformAccountRepository(
     private val connectors: ConnectorRegistry,
     private val sessions: WebSessionManager,
     private val stravaOAuthService: StravaOAuthService,
+    private val notifications: SyncNotificationManager,
 ) {
     /**
      * @param detectedOverride WebView 内同源校验等路径已得到的状态；非空时跳过 connector 网络探测。
@@ -29,6 +32,11 @@ class PlatformAccountRepository(
         val detectedState = detectedOverride ?: connector.validateSession()
         val now = System.currentTimeMillis()
         val existing = db.platformAccountDao().getByPlatform(platform)
+        val detectedExternalUserId = sessions.externalUserId(platform)
+        val identityChanged = hasPlatformIdentityChanged(existing?.externalUserId, detectedExternalUserId)
+        if (existing != null && identityChanged) {
+            clearAccountScopedState(existing.id, platform)
+        }
         val firstBind = existing == null || existing.status == AccountStatus.DISABLED
         val state = when {
             // WebView 同源校验结果直接落库，不再二次改写
@@ -60,17 +68,17 @@ class PlatformAccountRepository(
             PlatformAccountEntity(
                 id = existing?.id ?: 0,
                 platform = platform,
-                externalUserId = sessions.externalUserId(platform) ?: existing?.externalUserId,
+                externalUserId = detectedExternalUserId ?: existing?.externalUserId,
                 displayName = if (platform == Platform.STRAVA) {
-                    sessions.stravaDisplayName() ?: existing?.displayName
+                    sessions.stravaDisplayName() ?: existing?.displayName?.takeUnless { identityChanged }
                 } else {
-                    existing?.displayName
+                    existing?.displayName?.takeUnless { identityChanged }
                 },
-                syncCursor = existing?.syncCursor,
+                syncCursor = existing?.syncCursor?.takeUnless { identityChanged },
                 status = status,
                 capabilitySnapshot = capabilities.serialize(),
                 lastValidatedAtEpochMs = now,
-                lastSyncAtEpochMs = existing?.lastSyncAtEpochMs,
+                lastSyncAtEpochMs = existing?.lastSyncAtEpochMs?.takeUnless { identityChanged },
                 needsUserAction = needsUserAction,
                 createdAtEpochMs = existing?.createdAtEpochMs ?: now,
                 updatedAtEpochMs = now,
@@ -112,9 +120,8 @@ class PlatformAccountRepository(
         }
         sessions.clear(platform)
         if (account != null) {
-            db.remoteActivitySkipDao().deleteByAccount(account.id)
-            db.syncRuleDao().deleteByDestination(account.id)
-            db.deliveryJobDao().disableForAccount(account.id)
+            clearAccountScopedState(account.id, platform)
+            val now = System.currentTimeMillis()
             db.platformAccountDao().update(
                 account.copy(
                     externalUserId = null,
@@ -122,11 +129,35 @@ class PlatformAccountRepository(
                     syncCursor = null,
                     status = AccountStatus.DISABLED,
                     capabilitySnapshot = null,
-                    lastValidatedAtEpochMs = System.currentTimeMillis(),
+                    lastValidatedAtEpochMs = now,
+                    lastSyncAtEpochMs = null,
                     needsUserAction = false,
-                    updatedAtEpochMs = System.currentTimeMillis(),
+                    updatedAtEpochMs = now,
                 ),
             )
         }
     }
+
+    private suspend fun clearAccountScopedState(accountId: Long, platform: Platform) {
+        val sourceRules = db.syncRuleDao().getAll().filter { it.sourcePlatform == platform }
+        val jobs = (
+            db.deliveryJobDao().findByDestinationAccount(accountId) +
+                sourceRules.flatMap { db.deliveryJobDao().findByRequestedRule(it.id) }
+            ).distinctBy { it.id }
+        db.withTransaction {
+            db.remoteActivitySkipDao().deleteByAccount(accountId)
+            db.syncRuleDao().deleteByDestination(accountId)
+            sourceRules.forEach { db.deliveryJobDao().deleteByRequestedRule(it.id) }
+            db.syncRuleDao().deleteBySource(platform)
+            db.platformCopyDao().deleteByAccount(accountId)
+            db.deliveryJobDao().deleteByDestinationAccount(accountId)
+        }
+        jobs.forEach { notifications.cancel(it.id) }
+        notifications.cancelAccount(accountId)
+    }
 }
+
+internal fun hasPlatformIdentityChanged(existingExternalUserId: String?, detectedExternalUserId: String?): Boolean =
+    !existingExternalUserId.isNullOrBlank() &&
+        !detectedExternalUserId.isNullOrBlank() &&
+        existingExternalUserId != detectedExternalUserId

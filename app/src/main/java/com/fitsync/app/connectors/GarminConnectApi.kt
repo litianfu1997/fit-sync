@@ -132,8 +132,8 @@ internal fun garminStatusApiUrl(rawUrl: String, domain: String = "garmin.com"): 
  * 解析活动列表 JSON（`gc-api/activitylist-service/activities/search/activities` 返回的数组）为
  * [RemoteActivitySummary]。不做时间过滤——由调用方按增量窗口过滤。
  */
-internal fun parseGarminActivities(jsonText: String): List<RemoteActivitySummary> {
-    val arr = runCatching { JSONArray(jsonText) }.getOrNull() ?: return emptyList()
+internal fun parseGarminActivities(jsonText: String): List<RemoteActivitySummary>? {
+    val arr = runCatching { JSONArray(jsonText) }.getOrNull() ?: return null
     return buildList {
         for (i in 0 until arr.length()) {
             val item = arr.optJSONObject(i) ?: continue

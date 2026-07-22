@@ -1,5 +1,7 @@
 package com.fitsync.app.sync
 
+import android.os.Trace
+import androidx.room.withTransaction
 import com.fitsync.app.connectors.ConnectorRegistry
 import com.fitsync.app.connectors.ConnectorCapabilities
 import com.fitsync.app.connectors.ConnectorResult
@@ -10,12 +12,15 @@ import com.fitsync.app.connectors.RemoteActivitySummary
 import com.fitsync.app.connectors.SyncCursor
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
+import com.fitsync.app.data.db.entity.ActivityVariantEntity
 import com.fitsync.app.data.db.entity.DeliveryJobEntity
 import com.fitsync.app.data.db.entity.PlatformCopyEntity
+import com.fitsync.app.data.db.entity.PlatformAccountEntity
 import com.fitsync.app.data.db.entity.RemoteActivitySkipEntity
 import com.fitsync.app.data.repo.ActivityMutationGate
 import com.fitsync.app.data.repo.FitStorageJanitor
 import com.fitsync.app.data.repo.ImportOutcome
+import com.fitsync.app.data.repo.ImportPreparedFile
 import com.fitsync.app.data.repo.ImportService
 import com.fitsync.app.data.repo.PlatformCopyUpsertPlan
 import com.fitsync.app.data.repo.planPlatformCopyUpsert
@@ -27,7 +32,12 @@ import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.notification.SyncNotificationManager
 import com.fitsync.app.web.PlatformWebConfigs
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlin.math.min
 import kotlin.math.pow
 
@@ -41,6 +51,7 @@ class SyncCoordinator(
     private val storageJanitor: FitStorageJanitor? = null,
 ) {
     private val syncMutex = Mutex()
+    private val globalNetworkSemaphore = Semaphore(MAX_GLOBAL_NETWORK_TRANSFERS)
 
     suspend fun runSync(
         force: Boolean = false,
@@ -76,59 +87,25 @@ class SyncCoordinator(
             }
         }
         val enabledRuleCount = if (manualSelection == null) db.syncRuleDao().getEnabled().size else 1
-        accounts.forEach { account ->
-            val connector = connectors.get(account.platform)
-            if (connector == null) {
-                failedAccounts++
-                return@forEach
-            }
-            val capabilities = connector.detectCapabilities()
-            if (account.capabilitySnapshot != capabilities.serialize()) {
-                db.platformAccountDao().update(
-                    account.copy(
-                        capabilitySnapshot = capabilities.serialize(),
-                        updatedAtEpochMs = System.currentTimeMillis(),
-                    ),
-                )
-            }
-            val listMode = capabilities.listActivitiesMode
-            if (listMode != ConnectorExecution.BACKGROUND) {
-                if (force && listMode != ConnectorExecution.UNSUPPORTED) {
-                    val url = PlatformWebConfigs.get(account.platform).loginUrl
-                    markAccountNeedsAction(account.id, false)
-                    if (settings?.notificationsEnabled != false) {
-                        notifications.notifyAccountAction(
-                            account.id,
-                            account.platform,
-                            url,
-                            "请在网页中导出 FIT 后分享到本应用",
+        val accountResults = coroutineScope {
+            val accountSemaphore = Semaphore(MAX_CONCURRENT_ACCOUNTS)
+            accounts.map { account ->
+                async {
+                    accountSemaphore.withPermit {
+                        syncAccount(
+                            account = account,
+                            historyDays = historyDays,
+                            force = force,
+                            planWithRules = manualSelection == null,
+                            notificationsEnabled = settings?.notificationsEnabled != false,
                         )
                     }
                 }
-                return@forEach
-            }
-            if (capabilities.downloadFitMode != ConnectorExecution.BACKGROUND) {
-                markAccountNeedsAction(account.id, false)
-                if (force && settings?.notificationsEnabled != false) {
-                    notifications.notifyAccountAction(
-                        account.id,
-                        account.platform,
-                        PlatformWebConfigs.get(account.platform).loginUrl,
-                        "请登录 ${account.platform.displayName} 网页以启用原文件拉取",
-                    )
-                }
-                return@forEach
-            }
-            val result = pullAccount(
-                account.id,
-                historyDays,
-                forceFullHistory = force,
-                planWithRules = manualSelection == null,
-            )
-            pulled += result.pulled
-            queued += result.queued
-            if (!result.completedNormally) failedAccounts++
+            }.awaitAll()
         }
+        pulled += accountResults.sumOf { it.pulled }
+        queued += accountResults.sumOf { it.queued }
+        failedAccounts += accountResults.count { !it.completedNormally }
         if (manualSelection != null) {
             val fromEpochMs = calculatePullSince(
                 nowEpochMs = System.currentTimeMillis(),
@@ -220,21 +197,25 @@ class SyncCoordinator(
         // WAITING_USER 不在这里盲目重置：AUTH_EXPIRED/USER_ACTION 的任务只在登录成功后由
         // PlatformAccountRepository 恢复；RETRY_WAIT 由 findRunnable 按 nextRetryAt 退避拾取。
         db.deliveryJobDao().resetStaleUploading(now)
-        db.deliveryJobDao().findRunnable(now).forEach { candidateJob ->
-            val prepared = mutationGate.withLock {
-                val currentJob = db.deliveryJobDao().getById(candidateJob.id) ?: return@withLock null
+        val preparedJobs = mutationGate.withLock {
+            db.withTransaction {
+                db.deliveryJobDao().findRunnable(now).mapNotNull { candidateJob ->
+                val currentJob = db.deliveryJobDao().getById(candidateJob.id) ?: return@mapNotNull null
                 val account = db.platformAccountDao().getById(currentJob.destinationAccountId)
                 val activity = db.canonicalActivityDao().getById(currentJob.canonicalActivityId)
+                val sourceVariant = db.activityVariantDao().getById(currentJob.sourceVariantId)
                 val connector = account?.let { connectors.get(it.platform) }
-                if (account == null || activity == null || connector == null) {
+                if (account == null || activity == null || connector == null ||
+                    sourceVariant == null || sourceVariant.canonicalActivityId != currentJob.canonicalActivityId
+                ) {
                     db.deliveryJobDao().update(
                         currentJob.copy(
                             status = DeliveryJobStatus.DISABLED,
-                            errorMessage = "目标账号或本地活动已不存在",
+                            errorMessage = "目标账号、本地活动或任务指定的 FIT 副本已不存在",
                             updatedAtEpochMs = now,
                         ),
                     )
-                    return@withLock null
+                    return@mapNotNull null
                 }
                 val currentMode = connector.detectCapabilities().uploadFitMode
                 if (currentMode != ConnectorExecution.BACKGROUND) {
@@ -251,7 +232,7 @@ class SyncCoordinator(
                         "${account.platform.displayName} 不支持后台上传，请在网页中完成 FIT 导入",
                         "FOREGROUND_UPLOAD_REQUIRED",
                     )
-                    return@withLock null
+                    return@mapNotNull null
                 }
                 db.deliveryJobDao().update(
                     currentJob.copy(
@@ -264,20 +245,46 @@ class SyncCoordinator(
                     job = currentJob.copy(executionMode = currentMode),
                     accountId = account.id,
                     activity = activity,
+                    sourceVariant = sourceVariant,
                     connector = connector,
                     polling = !currentJob.remoteUploadId.isNullOrBlank(),
                 )
-            } ?: return@forEach
+                }
+            }
+        }
 
+        val uploadSemaphores = preparedJobs.map { it.accountId }.distinct()
+            .associateWith { Semaphore(MAX_UPLOADS_PER_ACCOUNT) }
+        val uploadResults = coroutineScope {
+            preparedJobs.map { prepared ->
+                async {
+                    requireNotNull(uploadSemaphores[prepared.accountId]).withPermit {
+                        globalNetworkSemaphore.withPermit {
             // 任何 connector 异常（DB/IO/解析）都转可重试失败，避免 job 永久卡在 UPLOADING。
+                            Trace.beginSection("FitSync:upload")
             val result = runCatching {
                 if (prepared.polling) {
                     prepared.connector.checkUpload(requireNotNull(prepared.job.remoteUploadId))
                 } else {
-                    prepared.connector.uploadFit(prepared.activity)
+                    prepared.connector.uploadFit(prepared.activity, prepared.sourceVariant)
                 }
             }
                 .getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "上传过程发生异常") }
+                .let { uploadResult ->
+                    if (uploadResult is ConnectorResult.Success && uploadResult.value.remoteActivityId.isBlank()) {
+                        ConnectorResult.RetryableFailure("REMOTE_ID_MISSING", "平台未返回活动 ID，稍后会自动重试")
+                    } else {
+                        uploadResult
+                    }
+                }
+                            Trace.endSection()
+                            prepared to result
+                        }
+                    }
+                }
+            }.awaitAll()
+        }
+        uploadResults.forEach { (prepared, result) ->
             mutationGate.withLock {
                 val currentJob = db.deliveryJobDao().getById(prepared.job.id)
                 val currentActivity = db.canonicalActivityDao().getById(prepared.job.canonicalActivityId)
@@ -462,6 +469,7 @@ class SyncCoordinator(
         val job: DeliveryJobEntity,
         val accountId: Long,
         val activity: CanonicalActivityEntity,
+        val sourceVariant: ActivityVariantEntity,
         val connector: PlatformConnector,
         val polling: Boolean,
     )
@@ -471,6 +479,57 @@ class SyncCoordinator(
         if (db.deliveryJobDao().countRunnable(now) > 0) return DeliverySchedule(true, 0)
         val next = db.deliveryJobDao().findNextScheduledAt() ?: return DeliverySchedule(false, null)
         return DeliverySchedule(true, (next - now).coerceAtLeast(0))
+    }
+
+    private suspend fun syncAccount(
+        account: PlatformAccountEntity,
+        historyDays: Int,
+        force: Boolean,
+        planWithRules: Boolean,
+        notificationsEnabled: Boolean,
+    ): PullAccountResult {
+        val connector = connectors.get(account.platform) ?: return PullAccountResult(completedNormally = false)
+        val capabilities = connector.detectCapabilities()
+        if (account.capabilitySnapshot != capabilities.serialize()) {
+            db.platformAccountDao().update(
+                account.copy(
+                    capabilitySnapshot = capabilities.serialize(),
+                    updatedAtEpochMs = System.currentTimeMillis(),
+                ),
+            )
+        }
+        if (capabilities.listActivitiesMode != ConnectorExecution.BACKGROUND) {
+            if (force && capabilities.listActivitiesMode != ConnectorExecution.UNSUPPORTED) {
+                markAccountNeedsAction(account.id, false)
+                if (notificationsEnabled) {
+                    notifications.notifyAccountAction(
+                        account.id,
+                        account.platform,
+                        PlatformWebConfigs.get(account.platform).loginUrl,
+                        "请在网页中导出 FIT 后分享到本应用",
+                    )
+                }
+            }
+            return PullAccountResult(completedNormally = true)
+        }
+        if (capabilities.downloadFitMode != ConnectorExecution.BACKGROUND) {
+            markAccountNeedsAction(account.id, false)
+            if (force && notificationsEnabled) {
+                notifications.notifyAccountAction(
+                    account.id,
+                    account.platform,
+                    PlatformWebConfigs.get(account.platform).loginUrl,
+                    "请登录 ${account.platform.displayName} 网页以启用原文件拉取",
+                )
+            }
+            return PullAccountResult(completedNormally = true)
+        }
+        Trace.beginSection("FitSync:pull_${account.platform.name}")
+        return try {
+            pullAccount(account.id, historyDays, force, planWithRules)
+        } finally {
+            Trace.endSection()
+        }
     }
 
     private suspend fun pullAccount(
@@ -491,43 +550,54 @@ class SyncCoordinator(
         var queued = 0
         var pages = 0
         var completedNormally = true
+        val accountDownloadSemaphore = Semaphore(MAX_DOWNLOADS_PER_ACCOUNT)
         while (pages++ < 100) {
-            when (val pageResult = connector.listActivities(since, cursor)) {
+            when (val pageResult = globalNetworkSemaphore.withPermit { connector.listActivities(since, cursor) }) {
                 is ConnectorResult.Success -> {
                     var abortAccount = false
-                    for (remote in pageResult.value.items) {
-                        if (db.platformCopyDao().findByRemote(account.id, remote.remoteActivityId) != null) continue
-                        if (db.remoteActivitySkipDao().findByRemote(account.id, remote.remoteActivityId) != null) continue
-                        when (val imported = downloadAndImport(account.id, account.platform, connector, remote)) {
+                    val remoteIds = pageResult.value.items.map { it.remoteActivityId }
+                    val existingRemoteIds = if (remoteIds.isEmpty()) emptySet() else {
+                        (
+                            db.platformCopyDao().findExistingRemoteIds(account.id, remoteIds) +
+                                db.remoteActivitySkipDao().findExistingRemoteIds(account.id, remoteIds)
+                            ).toSet()
+                    }
+                    val pending = pageResult.value.items.filter { it.remoteActivityId !in existingRemoteIds }
+                    val importedResults = coroutineScope {
+                        pending.map { remote ->
+                            async {
+                                accountDownloadSemaphore.withPermit {
+                                    globalNetworkSemaphore.withPermit {
+                                        Trace.beginSection("FitSync:download_import")
+                                        try {
+                                            remote to downloadAndImport(account.id, account.platform, connector, remote)
+                                        } finally {
+                                            Trace.endSection()
+                                        }
+                                    }
+                                }
+                            }
+                        }.awaitAll()
+                    }
+                    val successfulCanonicalIds = mutableListOf<Long>()
+                    var actionRequest: Triple<Boolean, String, String>? = null
+                    for ((remote, imported) in importedResults) {
+                        when (imported) {
                             is ConnectorResult.Success -> {
                                 pulled++
-                                queued += mutationGate.withLock {
-                                    if (db.canonicalActivityDao().getById(imported.value) == null) 0
-                                    else if (planWithRules) planner.planForActivity(imported.value, account.platform)
-                                    else 0
-                                }
+                                successfulCanonicalIds += imported.value
                             }
                             is ConnectorResult.RequiresLogin -> {
                                 markAccountNeedsAction(account.id, true)
-                                notifyAccountActionIfEnabled(
-                                    account.id,
-                                    account.platform,
-                                    imported.url,
-                                    imported.message,
-                                )
                                 completedNormally = false
                                 abortAccount = true
+                                if (actionRequest == null) actionRequest = Triple(true, imported.url, imported.message)
                             }
                             is ConnectorResult.RequiresUserAction -> {
                                 markAccountNeedsAction(account.id, false)
-                                notifyAccountActionIfEnabled(
-                                    account.id,
-                                    account.platform,
-                                    imported.url,
-                                    imported.message,
-                                )
                                 completedNormally = false
                                 abortAccount = true
+                                if (actionRequest == null) actionRequest = Triple(false, imported.url, imported.message)
                             }
                             is ConnectorResult.PermanentFailure -> {
                                 if (imported.code in PERMANENT_REMOTE_SKIP_CODES) {
@@ -544,14 +614,25 @@ class SyncCoordinator(
                                     )
                                 } else {
                                     completedNormally = false
+                                    abortAccount = true
                                 }
                             }
                             else -> {
-                                // 单条永久/可重试失败：跳过本条继续拉同页，不中断整页；下次同步再试
+                                // 未持久化为 skip 的失败必须停在当前页；已成功导入的条目下次会由 PlatformCopy 跳过。
+                                // 若继续推进 cursor，这条远端活动会被永久漏掉。
                                 completedNormally = false
+                                abortAccount = true
                             }
                         }
-                        if (abortAccount) break
+                        if (shouldAbortPullAfterItemResult(imported)) abortAccount = true
+                    }
+                    if (successfulCanonicalIds.isNotEmpty() && planWithRules) {
+                        queued += mutationGate.withLock {
+                            planner.planForActivities(successfulCanonicalIds.distinct(), account.platform)
+                        }
+                    }
+                    actionRequest?.let { (_, url, message) ->
+                        notifyAccountActionIfEnabled(account.id, account.platform, url, message)
                     }
                     if (abortAccount) break
                     cursor = pageResult.value.nextCursor
@@ -638,9 +719,12 @@ class SyncCoordinator(
         preferredTitle: String?,
         remoteUrl: String? = null,
     ): ConnectorResult<Long> {
-        val outcome = importService.importFromFile(
-            fitFile.file,
-            fitFile.displayName,
+        val outcome = importService.importStoredFile(
+            prepared = ImportPreparedFile(
+                file = fitFile.file,
+                sha256 = fitFile.sha256,
+                displayName = fitFile.displayName,
+            ),
             sourcePlatform = platform,
             collectorType = CollectorType.CLOUD,
             remoteActivityId = remoteActivityId,
@@ -678,6 +762,7 @@ class SyncCoordinator(
         sourceVariantId: Long,
         copy: com.fitsync.app.connectors.RemoteCopy,
     ) {
+        if (copy.remoteActivityId.isBlank()) return
         val sha = db.activityVariantDao().getById(sourceVariantId)?.fileSha256
         upsertPlatformCopy(
             canonicalId = canonicalId,
@@ -704,6 +789,7 @@ class SyncCoordinator(
         sourceVariantId: Long? = null,
         createdBySync: Boolean = false,
     ) {
+        require(remoteActivityId.isNotBlank()) { "remoteActivityId 不能为空" }
         val dao = db.platformCopyDao()
         val plan = planPlatformCopyUpsert(
             byRemote = dao.findByRemote(accountId, remoteActivityId),
@@ -797,6 +883,10 @@ internal fun calculatePullSince(
 
 private const val HOUR_MS = 60L * 60 * 1000
 private const val DAY_MS = 24L * HOUR_MS
+internal const val MAX_CONCURRENT_ACCOUNTS = 2
+internal const val MAX_DOWNLOADS_PER_ACCOUNT = 2
+internal const val MAX_UPLOADS_PER_ACCOUNT = 2
+internal const val MAX_GLOBAL_NETWORK_TRANSFERS = 3
 
 data class SyncRunSummary(
     val pulledActivities: Int = 0,
@@ -818,7 +908,13 @@ private data class PullAccountResult(
     val completedNormally: Boolean = false,
 )
 
-private val PERMANENT_REMOTE_SKIP_CODES = setOf(
+internal val PERMANENT_REMOTE_SKIP_CODES = setOf(
     "NO_ORIGINAL_FILE",
     "UNSUPPORTED_ORIGINAL_FORMAT",
 )
+
+internal fun shouldAbortPullAfterItemResult(result: ConnectorResult<*>): Boolean = when (result) {
+    is ConnectorResult.Success -> false
+    is ConnectorResult.PermanentFailure -> result.code !in PERMANENT_REMOTE_SKIP_CODES
+    else -> true
+}

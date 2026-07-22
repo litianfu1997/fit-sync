@@ -13,12 +13,11 @@ class FitStorageJanitorLogicTest {
     @Test
     fun keepForever_neverEligible() {
         assertThat(
-            eligible(
+            isFitStorageDeletionEligible(
                 FitStoragePolicy.KEEP_FOREVER,
-                activeJobs = 0,
-                terminalJobUpdatedAt = 0L,
-                variantCreatedAt = 0L,
-                now = Long.MAX_VALUE,
+                hasActiveJobs = false,
+                latestSuccessfulDeliveryAtEpochMs = 0L,
+                nowEpochMs = Long.MAX_VALUE,
             ),
         ).isFalse()
     }
@@ -26,65 +25,59 @@ class FitStorageJanitorLogicTest {
     @Test
     fun deleteAfterSync_requiresTerminalSuccessAndNoActive() {
         assertThat(
-            eligible(
+            isFitStorageDeletionEligible(
                 FitStoragePolicy.DELETE_AFTER_SYNC,
-                activeJobs = 1,
-                terminalJobUpdatedAt = 1L,
-                variantCreatedAt = 1L,
-                now = 100L,
+                hasActiveJobs = true,
+                latestSuccessfulDeliveryAtEpochMs = 1L,
+                nowEpochMs = 100L,
             ),
         ).isFalse()
         assertThat(
-            eligible(
+            isFitStorageDeletionEligible(
                 FitStoragePolicy.DELETE_AFTER_SYNC,
-                activeJobs = 0,
-                terminalJobUpdatedAt = null,
-                variantCreatedAt = 1L,
-                now = 100L,
+                hasActiveJobs = false,
+                latestSuccessfulDeliveryAtEpochMs = null,
+                nowEpochMs = 100L,
             ),
         ).isFalse()
         assertThat(
-            eligible(
+            isFitStorageDeletionEligible(
                 FitStoragePolicy.DELETE_AFTER_SYNC,
-                activeJobs = 0,
-                terminalJobUpdatedAt = 1L,
-                variantCreatedAt = 1L,
-                now = 100L,
+                hasActiveJobs = false,
+                latestSuccessfulDeliveryAtEpochMs = 1L,
+                nowEpochMs = 100L,
             ),
         ).isTrue()
     }
 
     @Test
-    fun deleteAfter7Days_usesTerminalOrCreatedAnchor() {
+    fun deleteAfter7Days_requiresSuccessfulDeliveryAndUsesItsTimestamp() {
         val day = 24L * 60 * 60 * 1000
         val now = 10 * day
         assertThat(
-            eligible(
+            isFitStorageDeletionEligible(
                 FitStoragePolicy.DELETE_AFTER_7_DAYS,
-                activeJobs = 0,
-                terminalJobUpdatedAt = now - 6 * day,
-                variantCreatedAt = 0L,
-                now = now,
+                hasActiveJobs = false,
+                latestSuccessfulDeliveryAtEpochMs = now - 6 * day,
+                nowEpochMs = now,
             ),
         ).isFalse()
         assertThat(
-            eligible(
+            isFitStorageDeletionEligible(
                 FitStoragePolicy.DELETE_AFTER_7_DAYS,
-                activeJobs = 0,
-                terminalJobUpdatedAt = now - 8 * day,
-                variantCreatedAt = 0L,
-                now = now,
+                hasActiveJobs = false,
+                latestSuccessfulDeliveryAtEpochMs = now - 8 * day,
+                nowEpochMs = now,
             ),
         ).isTrue()
         assertThat(
-            eligible(
+            isFitStorageDeletionEligible(
                 FitStoragePolicy.DELETE_AFTER_7_DAYS,
-                activeJobs = 0,
-                terminalJobUpdatedAt = null,
-                variantCreatedAt = now - 8 * day,
-                now = now,
+                hasActiveJobs = false,
+                latestSuccessfulDeliveryAtEpochMs = null,
+                nowEpochMs = now,
             ),
-        ).isTrue()
+        ).isFalse()
     }
 
     @Test
@@ -105,21 +98,4 @@ class FitStorageJanitorLogicTest {
         assertThat(active.intersect(terminal)).isEmpty()
     }
 
-    private fun eligible(
-        policy: FitStoragePolicy,
-        activeJobs: Int,
-        terminalJobUpdatedAt: Long?,
-        variantCreatedAt: Long,
-        now: Long,
-    ): Boolean {
-        if (activeJobs > 0) return false
-        return when (policy) {
-            FitStoragePolicy.KEEP_FOREVER -> false
-            FitStoragePolicy.DELETE_AFTER_SYNC -> terminalJobUpdatedAt != null
-            FitStoragePolicy.DELETE_AFTER_7_DAYS -> {
-                val anchor = terminalJobUpdatedAt ?: variantCreatedAt
-                now - anchor >= 7L * 24 * 60 * 60 * 1000
-            }
-        }
-    }
 }

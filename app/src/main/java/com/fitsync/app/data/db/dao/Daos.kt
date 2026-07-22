@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
+import androidx.paging.PagingSource
 import com.fitsync.app.data.db.entity.ActivityVariantEntity
 import com.fitsync.app.data.db.entity.AppSettingsEntity
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
@@ -63,6 +64,69 @@ interface CanonicalActivityDao {
     )
     suspend fun getPage(limit: Int, offset: Int): List<CanonicalActivityEntity>
 
+    @Query(
+        """
+        SELECT * FROM canonical_activity
+        WHERE startTimeEpochMs < :beforeTime
+           OR (startTimeEpochMs = :beforeTime AND id < :beforeId)
+        ORDER BY startTimeEpochMs DESC, id DESC
+        LIMIT :limit
+        """,
+    )
+    suspend fun getPageAfter(
+        beforeTime: Long = Long.MAX_VALUE,
+        beforeId: Long = Long.MAX_VALUE,
+        limit: Int = 100,
+    ): List<CanonicalActivityEntity>
+
+    @Query(
+        """
+        SELECT id, title, sportType, startTimeEpochMs, elapsedSeconds, distanceMeters, dedupStatus
+        FROM canonical_activity
+        WHERE (
+            :query = ''
+            OR title LIKE '%' || :query || '%' COLLATE NOCASE
+            OR (:query LIKE '%骑%' AND sportType IN ('CYCLING', 'INDOOR_CYCLING', 'MTB', 'GRAVEL'))
+            OR (:query LIKE '%跑%' AND sportType = 'RUNNING')
+          )
+          AND (
+            :filter = 'ALL'
+            OR (:filter = 'CYCLING' AND sportType IN ('CYCLING', 'INDOOR_CYCLING', 'MTB', 'GRAVEL'))
+            OR (:filter = 'RUNNING' AND sportType = 'RUNNING')
+            OR (:filter = 'REVIEW' AND dedupStatus = 'NEEDS_REVIEW')
+          )
+        ORDER BY
+          CASE WHEN :oldestFirst = 1 THEN startTimeEpochMs END ASC,
+          CASE WHEN :oldestFirst = 1 THEN id END ASC,
+          CASE WHEN :oldestFirst = 0 THEN startTimeEpochMs END DESC,
+          CASE WHEN :oldestFirst = 0 THEN id END DESC
+        """,
+    )
+    fun pagingSource(
+        query: String,
+        filter: String,
+        oldestFirst: Boolean,
+    ): PagingSource<Int, ActivityListItem>
+
+    @Query(
+        """
+        SELECT
+          (SELECT COUNT(*) FROM canonical_activity) AS discovered,
+          (SELECT COUNT(*) FROM delivery_job
+             WHERE status IN ('SUCCEEDED', 'DUPLICATE_REMOTE')) AS synced,
+          (SELECT COUNT(*) FROM delivery_job
+             WHERE status IN ('PENDING', 'UPLOADING', 'WAITING_REMOTE_PROCESS')) AS pending,
+          (SELECT COUNT(*) FROM canonical_activity
+             WHERE dedupStatus = 'NEEDS_REVIEW') AS review,
+          (SELECT COUNT(*) FROM delivery_job
+             WHERE status IN ('FAILED', 'RETRY_WAIT', 'WAITING_USER')) AS failed
+        """,
+    )
+    fun observeHomeSnapshot(): Flow<HomeSnapshot>
+
+    @Query("SELECT * FROM canonical_activity WHERE id IN (:ids)")
+    suspend fun getByIds(ids: List<Long>): List<CanonicalActivityEntity>
+
     @Query("SELECT COUNT(*) FROM canonical_activity")
     fun observeCount(): Flow<Int>
 
@@ -105,6 +169,9 @@ interface ActivityVariantDao {
     @Query("SELECT * FROM activity_variant WHERE canonicalActivityId = :canonicalId")
     suspend fun findByCanonical(canonicalId: Long): List<ActivityVariantEntity>
 
+    @Query("SELECT * FROM activity_variant WHERE canonicalActivityId IN (:canonicalIds)")
+    suspend fun findByCanonicalIds(canonicalIds: List<Long>): List<ActivityVariantEntity>
+
     @Query("SELECT * FROM activity_variant WHERE canonicalActivityId = :canonicalId")
     fun observeByCanonical(canonicalId: Long): Flow<List<ActivityVariantEntity>>
 
@@ -116,6 +183,38 @@ interface ActivityVariantDao {
     )
     suspend fun findWithLocalFiles(): List<ActivityVariantEntity>
 
+    @Query(
+        """
+        SELECT * FROM activity_variant
+        WHERE parserVersion < :parserVersion
+          AND localFilePath != ''
+        ORDER BY id
+        LIMIT :limit
+        """,
+    )
+    suspend fun findNeedingParserVersion(
+        parserVersion: Int,
+        limit: Int = 25,
+    ): List<ActivityVariantEntity>
+
+    @Query(
+        """
+        SELECT
+          variant.id AS variantId,
+          variant.localFilePath AS localFilePath,
+          SUM(CASE WHEN job.status IN
+            ('PENDING', 'UPLOADING', 'WAITING_USER', 'WAITING_REMOTE_PROCESS', 'RETRY_WAIT')
+            THEN 1 ELSE 0 END) AS activeJobCount,
+          MAX(CASE WHEN job.status IN ('SUCCEEDED', 'DUPLICATE_REMOTE')
+            THEN job.updatedAtEpochMs ELSE NULL END) AS latestSuccessfulDeliveryAtEpochMs
+        FROM activity_variant variant
+        LEFT JOIN delivery_job job ON job.sourceVariantId = variant.id
+        WHERE variant.localFilePath != ''
+        GROUP BY variant.id, variant.localFilePath
+        """,
+    )
+    suspend fun findCleanupCandidates(): List<VariantCleanupCandidate>
+
     @Query("SELECT * FROM activity_variant WHERE id = :id")
     suspend fun getById(id: Long): ActivityVariantEntity?
 
@@ -124,6 +223,9 @@ interface ActivityVariantDao {
 
     @Update
     suspend fun update(entity: ActivityVariantEntity)
+
+    @Query("UPDATE activity_variant SET localFilePath = '' WHERE id IN (:ids)")
+    suspend fun clearLocalFilePaths(ids: List<Long>)
 
     @Query("DELETE FROM activity_variant WHERE canonicalActivityId = :canonicalId")
     suspend fun deleteByCanonical(canonicalId: Long)
@@ -140,8 +242,17 @@ interface PlatformCopyDao {
     )
     suspend fun findByRemote(accountId: Long, remoteId: String): PlatformCopyEntity?
 
+    @Query(
+        "SELECT remoteActivityId FROM platform_copy " +
+            "WHERE platformAccountId = :accountId AND remoteActivityId IN (:remoteIds)",
+    )
+    suspend fun findExistingRemoteIds(accountId: Long, remoteIds: List<String>): List<String>
+
     @Query("SELECT * FROM platform_copy WHERE canonicalActivityId = :canonicalId")
     suspend fun findByCanonical(canonicalId: Long): List<PlatformCopyEntity>
+
+    @Query("SELECT * FROM platform_copy WHERE canonicalActivityId IN (:canonicalIds)")
+    suspend fun findByCanonicalIds(canonicalIds: List<Long>): List<PlatformCopyEntity>
 
     @Query("SELECT * FROM platform_copy WHERE canonicalActivityId = :canonicalId")
     fun observeByCanonical(canonicalId: Long): Flow<List<PlatformCopyEntity>>
@@ -172,6 +283,9 @@ interface PlatformCopyDao {
 
     @Query("DELETE FROM platform_copy WHERE canonicalActivityId = :canonicalId")
     suspend fun deleteByCanonical(canonicalId: Long)
+
+    @Query("DELETE FROM platform_copy WHERE platformAccountId = :accountId")
+    suspend fun deleteByAccount(accountId: Long)
 }
 
 @Dao
@@ -181,6 +295,12 @@ interface RemoteActivitySkipDao {
             "AND remoteActivityId = :remoteId LIMIT 1",
     )
     suspend fun findByRemote(accountId: Long, remoteId: String): RemoteActivitySkipEntity?
+
+    @Query(
+        "SELECT remoteActivityId FROM remote_activity_skip " +
+            "WHERE platformAccountId = :accountId AND remoteActivityId IN (:remoteIds)",
+    )
+    suspend fun findExistingRemoteIds(accountId: Long, remoteIds: List<String>): List<String>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(entity: RemoteActivitySkipEntity): Long
@@ -193,6 +313,32 @@ interface RemoteActivitySkipDao {
 interface DeliveryJobDao {
     @Query("SELECT * FROM delivery_job ORDER BY createdAtEpochMs DESC")
     fun observeAll(): Flow<List<DeliveryJobEntity>>
+
+    @Query(
+        """
+        SELECT
+          job.id AS id,
+          job.canonicalActivityId AS canonicalActivityId,
+          job.destinationAccountId AS destinationAccountId,
+          job.status AS status,
+          job.attemptCount AS attemptCount,
+          job.errorCode AS errorCode,
+          job.errorMessage AS errorMessage,
+          job.updatedAtEpochMs AS updatedAtEpochMs,
+          activity.title AS activityTitle,
+          activity.sportType AS activitySportType,
+          account.platform AS destinationPlatform
+        FROM delivery_job job
+        LEFT JOIN canonical_activity activity ON activity.id = job.canonicalActivityId
+        LEFT JOIN platform_account account ON account.id = job.destinationAccountId
+        WHERE
+          (:filter = 'waiting' AND job.status IN ('PENDING', 'UPLOADING', 'WAITING_REMOTE_PROCESS'))
+          OR (:filter = 'completed' AND job.status IN ('SUCCEEDED', 'DUPLICATE_REMOTE'))
+          OR (:filter = 'failed' AND job.status IN ('FAILED', 'WAITING_USER', 'RETRY_WAIT'))
+        ORDER BY job.createdAtEpochMs DESC, job.id DESC
+        """,
+    )
+    fun pagingSource(filter: String): PagingSource<Int, SyncJobListItem>
 
     @Query(
         """
@@ -219,8 +365,8 @@ interface DeliveryJobDao {
     )
     fun observeCompletedCount(): Flow<Int>
 
-    @Query("SELECT * FROM delivery_job WHERE status = 'WAITING_USER' ORDER BY createdAtEpochMs DESC")
-    fun observeWaitingForUser(): Flow<List<DeliveryJobEntity>>
+    @Query("SELECT * FROM delivery_job WHERE status = 'WAITING_USER' ORDER BY createdAtEpochMs DESC LIMIT :limit")
+    fun observeWaitingForUser(limit: Int = 4): Flow<List<DeliveryJobEntity>>
 
     @Query("SELECT * FROM delivery_job ORDER BY createdAtEpochMs DESC LIMIT :limit")
     fun observeRecent(limit: Int = 20): Flow<List<DeliveryJobEntity>>
@@ -233,6 +379,12 @@ interface DeliveryJobDao {
 
     @Query("SELECT * FROM delivery_job WHERE sourceVariantId = :variantId")
     suspend fun findBySourceVariant(variantId: Long): List<DeliveryJobEntity>
+
+    @Query("SELECT * FROM delivery_job WHERE destinationAccountId = :accountId")
+    suspend fun findByDestinationAccount(accountId: Long): List<DeliveryJobEntity>
+
+    @Query("SELECT * FROM delivery_job WHERE requestedByRuleId = :ruleId")
+    suspend fun findByRequestedRule(ruleId: Long): List<DeliveryJobEntity>
 
     @Query("SELECT COUNT(*) FROM delivery_job WHERE status = :status")
     fun observeCountByStatus(status: DeliveryJobStatus): Flow<Int>
@@ -274,6 +426,9 @@ interface DeliveryJobDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(entity: DeliveryJobEntity): Long
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(entities: List<DeliveryJobEntity>): List<Long>
+
     @Update
     suspend fun update(entity: DeliveryJobEntity)
 
@@ -311,6 +466,12 @@ interface DeliveryJobDao {
 
     @Query("DELETE FROM delivery_job WHERE canonicalActivityId = :canonicalId")
     suspend fun deleteByCanonical(canonicalId: Long)
+
+    @Query("DELETE FROM delivery_job WHERE destinationAccountId = :accountId")
+    suspend fun deleteByDestinationAccount(accountId: Long)
+
+    @Query("DELETE FROM delivery_job WHERE requestedByRuleId = :ruleId")
+    suspend fun deleteByRequestedRule(ruleId: Long)
 }
 
 @Dao
@@ -340,12 +501,15 @@ interface SyncRuleDao {
 
     @Query("DELETE FROM sync_rule WHERE destinationAccountId = :destinationId")
     suspend fun deleteByDestination(destinationId: Long)
+
+    @Query("DELETE FROM sync_rule WHERE sourcePlatform = :source")
+    suspend fun deleteBySource(source: Platform)
 }
 
 @Dao
 interface ImportJobDao {
-    @Query("SELECT * FROM import_job ORDER BY createdAtEpochMs DESC LIMIT 50")
-    fun observeRecent(): Flow<List<ImportJobEntity>>
+    @Query("SELECT * FROM import_job ORDER BY createdAtEpochMs DESC LIMIT :limit")
+    fun observeRecent(limit: Int = 5): Flow<List<ImportJobEntity>>
 
     @Insert
     suspend fun insert(entity: ImportJobEntity): Long

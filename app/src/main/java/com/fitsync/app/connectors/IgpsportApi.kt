@@ -77,10 +77,11 @@ private fun extractMemberIdFromJwt(jwt: String): String? = runCatching {
  * dataStatus；行内可能直接带 fitUrl/fitOssPath（省去 detail 一步，[IgpsportApiConnector.downloadFit] 优先用）。
  * sportType 刻意留空——交由 FitEngine 从 FIT 文件本身解析运动类型，避免 exerciseType 数值映射错误。
  */
-internal fun parseIgpsportActivities(jsonText: String): List<RemoteActivitySummary> {
-    val root = runCatching { JSONObject(jsonText) }.getOrNull() ?: return emptyList()
-    val data = root.optJSONObject("data") ?: return emptyList()
-    val rows = data.optJSONArray("rows") ?: return emptyList()
+internal fun parseIgpsportActivities(jsonText: String): List<RemoteActivitySummary>? {
+    val root = runCatching { JSONObject(jsonText) }.getOrNull() ?: return null
+    if (root.has("code") && root.optInt("code", -1) != 0) return null
+    val data = root.optJSONObject("data") ?: return null
+    val rows = data.optJSONArray("rows") ?: return null
     return buildList {
         for (i in 0 until rows.length()) {
             val item = rows.optJSONObject(i) ?: continue

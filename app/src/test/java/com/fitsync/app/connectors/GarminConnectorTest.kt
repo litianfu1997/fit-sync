@@ -5,6 +5,13 @@ import org.junit.Test
 
 class GarminConnectorTest {
     @Test
+    fun remoteCopy_rejectsBlankActivityId() {
+        assertThat(garminRemoteCopyOrNull(null, duplicate = true)).isNull()
+        assertThat(garminRemoteCopyOrNull("   ", duplicate = false)).isNull()
+        assertThat(garminRemoteCopyOrNull("123", duplicate = false)?.remoteActivityId).isEqualTo("123")
+    }
+
+    @Test
     fun gcApiRequest_usesChinaProxyHeaders() {
         val request = buildGarminGcApiRequest(
             url = "https://connect.garmin.cn/gc-api/activitylist-service/activities/search/activities?start=0&limit=1",
@@ -140,9 +147,9 @@ class GarminConnectorTest {
 
     @Test
     fun parseActivities_extractsIdNameSportDistanceAndStart() {
-        val activities = parseGarminActivities(
+        val activities = requireNotNull(parseGarminActivities(
             """[{"activityId":535949177,"activityName":"Paris 虚拟骑行","startTimeGMT":"2025-11-04 10:58:33","activityType":{"typeKey":"virtual_ride"},"distance":90760.74},{"activityId":123,"activityName":"晨跑","startTimeGMT":"2025-01-01 00:00:00","activityType":{"typeKey":"running"},"distance":5000}]""",
-        )
+        ))
 
         assertThat(activities).hasSize(2)
         val first = activities[0]
@@ -152,6 +159,12 @@ class GarminConnectorTest {
         assertThat(first.distanceMeters).isEqualTo(90760.74)
         assertThat(first.startTimeEpochMs).isNotNull()
         assertThat(first.startTimeEpochMs).isGreaterThan(1_700_000_000_000L) // 2023 年之后
+    }
+
+    @Test
+    fun parseActivities_distinguishesValidEmptyFromMalformedResponse() {
+        assertThat(parseGarminActivities("[]")).isEmpty()
+        assertThat(parseGarminActivities("{\"error\":\"login required\"}")).isNull()
     }
 
     @Test

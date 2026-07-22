@@ -2,6 +2,7 @@ package com.fitsync.app.connectors
 
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
+import com.fitsync.app.data.db.entity.ActivityVariantEntity
 import com.fitsync.app.data.file.FitFileStore
 import com.fitsync.app.domain.model.ConnectorExecution
 import com.fitsync.app.domain.model.Platform
@@ -205,12 +206,11 @@ class StravaConnector(
         return ConnectorResult.RetryableFailure("REDIRECT", "Strava 原文件下载未完成")
     }
 
-    override suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy> {
-        val variants = db.activityVariantDao().findByCanonical(activity.id)
-        val variant = activity.primaryVariantId?.let { id -> variants.firstOrNull { it.id == id } }
-            ?: variants.maxByOrNull { it.qualityScore ?: 0 }
-            ?: return ConnectorResult.PermanentFailure("NO_FILE", "没有可上传的 FIT 副本")
-        val file = java.io.File(variant.localFilePath)
+    override suspend fun uploadFit(
+        activity: CanonicalActivityEntity,
+        sourceVariant: ActivityVariantEntity,
+    ): ConnectorResult<RemoteCopy> {
+        val file = java.io.File(sourceVariant.localFilePath)
         if (!file.isFile) return ConnectorResult.PermanentFailure("NO_FILE", "原始 FIT 已被清理，无法上传")
         val sha256 = FitFileStore.sha256Of(file)
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)

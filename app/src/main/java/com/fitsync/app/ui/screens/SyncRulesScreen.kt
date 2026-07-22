@@ -38,7 +38,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -50,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.connectors.PlatformCapabilityRegistry
 import com.fitsync.app.connectors.ConnectorCapabilities
@@ -81,8 +81,10 @@ fun SyncRulesScreen(
     onOpenPlatforms: () -> Unit = {},
 ) {
     val app = FitSyncApp.instance
-    val accounts by app.database.platformAccountDao().observeAll().collectAsState(initial = emptyList())
-    val rules by app.database.syncRuleDao().observeAll().collectAsState(initial = emptyList())
+    val accounts by app.database.platformAccountDao().observeAll()
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val rules by app.database.syncRuleDao().observeAll()
+        .collectAsStateWithLifecycle(initialValue = emptyList())
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }

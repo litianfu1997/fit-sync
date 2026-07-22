@@ -106,6 +106,10 @@ internal class IgpsportApiConnector(
                     !resp.isSuccessful -> failureStatus(resp)
                     else -> {
                         val all = parseIgpsportActivities(resp.body?.string().orEmpty())
+                            ?: return@use ConnectorResult.RetryableFailure(
+                                "IGPSPORT_INVALID_RESPONSE",
+                                "iGPSPORT 活动列表响应格式异常",
+                            )
                         // 默认按时间倒序：仅保留窗口内活动；整页都被剔除说明已越过下界，停止翻页。
                         val items = all.filter { it.startTimeEpochMs == null || it.startTimeEpochMs >= sinceEpochMs }
                         val hasMore = all.size >= PAGE_SIZE && items.isNotEmpty()
@@ -159,10 +163,12 @@ internal class IgpsportApiConnector(
         }.getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "iGPSPORT FIT 下载失败") }
     }
 
-    override suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy> {
-        val pair = primaryFile(activity)
+    override suspend fun uploadFit(
+        activity: CanonicalActivityEntity,
+        sourceVariant: ActivityVariantEntity,
+    ): ConnectorResult<RemoteCopy> {
+        val file = File(sourceVariant.localFilePath).takeIf { it.isFile }
             ?: return ConnectorResult.PermanentFailure("FILE_MISSING", "本地 FIT 文件不存在")
-        val (file, _) = pair
         if (file.length() <= 0) return ConnectorResult.PermanentFailure("FILE_EMPTY", "本地 FIT 文件为空")
         if (file.length() > IGP_MAX_FIT_BYTES) {
             return ConnectorResult.PermanentFailure("FILE_TOO_LARGE", "iGPSPORT 限制 FIT 不超过 25 MB")
@@ -280,15 +286,6 @@ internal class IgpsportApiConnector(
         }.getOrElse {
             ConnectorResult.PermanentFailure("IGPSPORT_DOWNLOAD_INVALID", it.message ?: "下载的内容不是有效 FIT")
         }
-    }
-
-    private suspend fun primaryFile(activity: CanonicalActivityEntity): Pair<File, ActivityVariantEntity>? {
-        val variants = db.activityVariantDao().findByCanonical(activity.id)
-        val variant = activity.primaryVariantId?.let { id -> variants.firstOrNull { it.id == id } }
-            ?: variants.maxByOrNull { it.qualityScore ?: 0 }
-            ?: return null
-        val file = File(variant.localFilePath)
-        return if (file.isFile) file to variant else null
     }
 
     private fun isTrustedIgpHost(url: String): Boolean = runCatching {

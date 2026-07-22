@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -49,9 +50,9 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -67,15 +68,25 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.asFlow
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.connectors.ConnectorCapabilities
 import com.fitsync.app.connectors.PlatformCapabilityRegistry
+import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.PlatformAccountEntity
+import com.fitsync.app.data.db.entity.AppSettingsEntity
+import com.fitsync.app.data.db.entity.DeliveryJobEntity
+import com.fitsync.app.data.db.entity.ImportJobEntity
+import com.fitsync.app.data.db.entity.SyncRuleEntity
 import com.fitsync.app.domain.model.AccountStatus
 import com.fitsync.app.domain.model.ConnectorExecution
-import com.fitsync.app.domain.model.DedupStatus
 import com.fitsync.app.domain.model.ImportJobStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SportType
@@ -101,6 +112,9 @@ import com.fitsync.app.ui.theme.FitRed
 import com.fitsync.app.ui.theme.FitTeal
 import com.fitsync.app.web.PlatformWebActivity
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -114,22 +128,24 @@ fun HomeScreen(
 ) {
     val db = FitSyncApp.instance.database
     val context = LocalContext.current
-    val stats by remember {
-        combine(
-            db.canonicalActivityDao().observeCount(),
-            db.canonicalActivityDao().observeCountByDedup(DedupStatus.NEEDS_REVIEW),
-            db.deliveryJobDao().observeCompletedCount(),
-            db.deliveryJobDao().observePendingCount(),
-            db.deliveryJobDao().observeProblemCount(),
-        ) { discovered, review, synced, pending, failed -> HomeStats(discovered, synced, pending, review, failed) }
-    }.collectAsState(initial = HomeStats())
-    val recentImports by db.importJobDao().observeRecent().collectAsState(initial = emptyList())
-    val waitingJobs by db.deliveryJobDao().observeWaitingForUser().collectAsState(initial = emptyList())
-    val accounts by db.platformAccountDao().observeAll().collectAsState(initial = emptyList())
-    val settings by db.appSettingsDao().observe().collectAsState(initial = null)
-    val workManager = remember(context) { WorkManager.getInstance(context.applicationContext) }
-    val manualWorks by workManager.getWorkInfosForUniqueWorkLiveData(SyncScheduler.MANUAL_NAME)
-        .observeAsState(initial = emptyList())
+    val homeViewModel: HomeViewModel = viewModel(
+        factory = remember(db) { HomeViewModel.factory(db) },
+    )
+    val homeState by homeViewModel.state.collectAsStateWithLifecycle()
+    val stats = homeState.stats
+    val recentImports = homeState.recentImports
+    val waitingJobs = homeState.waitingJobs
+    val accounts = homeState.accounts
+    val rules = homeState.rules
+    val settings = homeState.settings
+    val manualWorks by produceState(initialValue = emptyList<WorkInfo>(), context) {
+        // 至少让出一个渲染帧，WorkManager 的 SQLite/调度器初始化不进入首屏关键路径。
+        withFrameNanos { }
+        WorkManager.getInstance(context.applicationContext)
+            .getWorkInfosForUniqueWorkLiveData(SyncScheduler.MANUAL_NAME)
+            .asFlow()
+            .collect { value = it }
+    }
     val syncState = remember(manualWorks) { manualSyncUiState(manualWorks.lastOrNull()) }
     val dateFormat = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
     val snackbarHostState = remember { SnackbarHostState() }
@@ -137,6 +153,18 @@ fun HomeScreen(
     val guard = remember(context) { BackgroundRunGuard(context.applicationContext) }
     var resumeTick by remember { mutableIntStateOf(0) }
     var showManualSyncSheet by remember { mutableStateOf(false) }
+    val enabledRuleCount = rules.count { it.enabled }
+    val activeImportCount = recentImports.count {
+        it.status in setOf(
+            ImportJobStatus.RECEIVED,
+            ImportJobStatus.COPYING,
+            ImportJobStatus.VALIDATING,
+            ImportJobStatus.PARSING,
+            ImportJobStatus.DEDUPLICATING,
+        )
+    }
+    val duplicateImportCount = recentImports.count { it.status == ImportJobStatus.DUPLICATE_FILE }
+    val visibleRecentImports = recentImports.filterNot { it.status == ImportJobStatus.DUPLICATE_FILE }.take(6)
     val autoSyncEnabled = settings?.autoSyncEnabled != false
     val backgroundStatus = remember(resumeTick, autoSyncEnabled) {
         guard.evaluate(autoSyncEnabled)
@@ -174,6 +202,7 @@ fun HomeScreen(
                     backgroundRestricted = backgroundStatus.needsAttention,
                     lastSyncLabel = lastSyncLabel,
                     waitingCount = waitingJobs.size,
+                    enabledRuleCount = enabledRuleCount,
                     syncState = syncState,
                     onSync = { showManualSyncSheet = true },
                 )
@@ -262,7 +291,47 @@ fun HomeScreen(
                     )
                 }
             } else {
-                items(recentImports.take(6), key = { "import-${it.id}" }) { job ->
+                if (activeImportCount > 0) {
+                    item(key = "active-import-summary") {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.32f)),
+                            elevation = CardDefaults.cardElevation(0.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                Text("正在处理 $activeImportCount 个 FIT 文件", style = MaterialTheme.typography.bodyMedium)
+                            }
+                        }
+                    }
+                }
+                if (duplicateImportCount > 0) {
+                    item(key = "duplicate-import-summary") {
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(0.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth()
+                                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, MaterialTheme.shapes.medium)
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    "最近记录中有 $duplicateImportCount 个文件已存在，已合并显示",
+                                    modifier = Modifier.weight(1f),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                StatusPill("重复", StatusTone.NEUTRAL, compact = true)
+                            }
+                        }
+                    }
+                }
+                items(visibleRecentImports, key = { "import-${it.id}" }) { job ->
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                         elevation = CardDefaults.cardElevation(0.dp),
@@ -281,15 +350,21 @@ fun HomeScreen(
                                 Icon(Icons.Default.FileDownload, contentDescription = null, tint = importTone(job.status).first)
                             }
                             Column(Modifier.weight(1f)) {
-                                Text(job.displayName ?: "未命名 FIT", style = MaterialTheme.typography.titleSmall, maxLines = 1)
-                                Text(
-                                    dateFormat.format(Date(job.createdAtEpochMs)),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                                Text(job.displayName ?: "未命名 FIT", style = MaterialTheme.typography.titleSmall)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        dateFormat.format(Date(job.createdAtEpochMs)),
+                                        modifier = Modifier.weight(1f),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    StatusPill(importStatusText(job.status), importTone(job.status).second, compact = true)
+                                }
                                 job.errorMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
                             }
-                            StatusPill(importStatusText(job.status), importTone(job.status).second)
                         }
                     }
                 }
@@ -347,6 +422,7 @@ private fun ManualSyncSheet(
     }
     var selectedSource by remember(sourcePlatforms) { mutableStateOf(sourcePlatforms.first()) }
     var selectedDestinationId by remember { mutableStateOf<Long?>(null) }
+    var pendingSelection by remember { mutableStateOf<ManualSyncSelection?>(null) }
     var selectedCategories by remember {
         mutableStateOf(ManualSyncActivityCategory.entries.toSet())
     }
@@ -359,7 +435,7 @@ private fun ManualSyncSheet(
     }
     val selectedDestination = destinationOptions.firstOrNull {
         it.id == selectedDestinationId && it.isReadyForManualSync()
-    } ?: destinationOptions.firstOrNull { it.isReadyForManualSync() }
+    }
     val selectedSportTypes = selectedCategories.flatMapTo(mutableSetOf()) { it.sportTypes }
     val canStart = selectedDestination != null && selectedSportTypes.isNotEmpty()
 
@@ -489,13 +565,12 @@ private fun ManualSyncSheet(
             Button(
                 onClick = {
                     val destination = selectedDestination ?: return@Button
-                    onStart(
+                    pendingSelection =
                         ManualSyncSelection(
                             sourcePlatform = selectedSource,
                             destinationAccountId = destination.id,
                             sportTypes = selectedSportTypes,
-                        ),
-                    )
+                        )
                 },
                 enabled = canStart,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp).height(50.dp),
@@ -504,6 +579,27 @@ private fun ManualSyncSheet(
                 Text("开始同步", modifier = Modifier.padding(start = 8.dp))
             }
         }
+    }
+
+    pendingSelection?.let { selection ->
+        val destination = accounts.firstOrNull { it.id == selection.destinationAccountId }
+        AlertDialog(
+            onDismissRequest = { pendingSelection = null },
+            title = { Text("确认开始同步？") },
+            text = {
+                Text(
+                    "${selection.sourcePlatform.displayName} → ${destination?.platform?.displayName ?: "目标平台"}\n" +
+                        "${manualSyncTypeLabel(selection.sportTypes)} · 最近 $historyDays 天\n\n" +
+                        "系统会检查范围内的活动，只为目标平台尚不存在的活动创建任务。",
+                )
+            },
+            confirmButton = {
+                Button(onClick = { onStart(selection) }) { Text("确认同步") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingSelection = null }) { Text("返回修改") }
+            },
+        )
     }
 }
 
@@ -669,7 +765,7 @@ private fun StatsPanel(
                 )
                 Box(Modifier.width(1.dp).height(78.dp).background(MaterialTheme.colorScheme.outlineVariant))
                 StatCell(
-                    label = "同步完成",
+                    label = "成功投递",
                     value = stats.synced.toString(),
                     icon = Icons.Default.CheckCircle,
                     accent = FitTeal,
@@ -786,6 +882,7 @@ private fun SyncHero(
     backgroundRestricted: Boolean,
     lastSyncLabel: String,
     waitingCount: Int,
+    enabledRuleCount: Int,
     syncState: ManualSyncUiState,
     onSync: () -> Unit,
 ) {
@@ -808,7 +905,8 @@ private fun SyncHero(
                         when {
                             !autoSyncEnabled -> "手动同步"
                             backgroundRestricted -> "自动同步需要检查"
-                            else -> "自动同步正常"
+                            enabledRuleCount > 0 -> "自动同步正常"
+                            else -> "自动同步已开启"
                         },
                         color = Color.White,
                         style = MaterialTheme.typography.titleMedium,
@@ -825,10 +923,10 @@ private fun SyncHero(
             }
             Text(
                 when (syncState) {
-                    ManualSyncUiState.Idle -> if (waitingCount > 0) {
-                        "有任务等待登录或网页确认，完成后会继续同步。"
-                    } else {
-                        "选择活动来源、目标平台和类型后开始同步。"
+                    ManualSyncUiState.Idle -> when {
+                        waitingCount > 0 -> "有任务等待处理，完成后会继续同步。"
+                        autoSyncEnabled && enabledRuleCount == 0 -> "会自动拉取活动；尚未配置自动投递路径。"
+                        else -> "选择来源、目标和活动类型后开始同步。"
                     }
                     is ManualSyncUiState.Queued -> syncState.message
                     ManualSyncUiState.Running -> "正在后台检查平台，切换应用不会中断"
@@ -896,6 +994,57 @@ private fun importTone(status: ImportJobStatus): Pair<Color, StatusTone> = when 
     ImportJobStatus.NEEDS_REVIEW -> FitOrange to StatusTone.WARNING
     else -> FitBlue to StatusTone.INFO
 }
+
+private class HomeViewModel(db: FitSyncDatabase) : ViewModel() {
+    private val content = combine(
+        db.canonicalActivityDao().observeHomeSnapshot(),
+        db.importJobDao().observeRecent(5),
+        db.deliveryJobDao().observeWaitingForUser(4),
+        db.platformAccountDao().observeAll(),
+        db.syncRuleDao().observeAll(),
+    ) { snapshot, imports, waiting, accounts, rules ->
+        HomeUiState(
+            stats = HomeStats(
+                discovered = snapshot.discovered,
+                synced = snapshot.synced,
+                pending = snapshot.pending,
+                review = snapshot.review,
+                failed = snapshot.failed,
+            ),
+            recentImports = imports,
+            waitingJobs = waiting,
+            accounts = accounts,
+            rules = rules,
+        )
+    }
+
+    val state: StateFlow<HomeUiState> = combine(
+        content,
+        db.appSettingsDao().observe(),
+    ) { contentState, settings ->
+        contentState.copy(settings = settings)
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = HomeUiState(),
+    )
+
+    companion object {
+        fun factory(db: FitSyncDatabase): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T = HomeViewModel(db) as T
+        }
+    }
+}
+
+private data class HomeUiState(
+    val stats: HomeStats = HomeStats(),
+    val recentImports: List<ImportJobEntity> = emptyList(),
+    val waitingJobs: List<DeliveryJobEntity> = emptyList(),
+    val accounts: List<PlatformAccountEntity> = emptyList(),
+    val rules: List<SyncRuleEntity> = emptyList(),
+    val settings: AppSettingsEntity? = null,
+)
 
 private data class HomeStats(
     val discovered: Int = 0,

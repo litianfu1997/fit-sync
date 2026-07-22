@@ -36,7 +36,7 @@ class IgpsportApiTest {
             """{"rideId":123456,"title":"晨骑","startTime":"2026-07-18 06:30:00",""" +
             """"rideDistance":42500.0,"exerciseType":1,"dataStatus":1,""" +
             """"fitUrl":"https://igp-zh.oss-cn-hangzhou.aliyuncs.com/abc.fit"}]}}"""
-        val items = parseIgpsportActivities(json)
+        val items = requireNotNull(parseIgpsportActivities(json))
         assertThat(items).hasSize(1)
         val a = items.first()
         assertThat(a.remoteActivityId).isEqualTo("123456")
@@ -50,16 +50,18 @@ class IgpsportApiTest {
     }
 
     @Test
-    fun parseActivities_dataNull_returnsEmpty() {
+    fun parseActivities_distinguishesValidEmptyFromMalformedResponse() {
         val json = """{"code":0,"message":"success","data":null}"""
-        assertThat(parseIgpsportActivities(json)).isEmpty()
+        assertThat(parseIgpsportActivities(json)).isNull()
+        assertThat(parseIgpsportActivities("""{"code":0,"data":{"rows":[]}}""")).isEmpty()
+        assertThat(parseIgpsportActivities("""{"code":1003,"data":{"rows":[]}}""")).isNull()
     }
 
     @Test
     fun parseActivities_fitOssPathAlsoAccepted() {
         val json = """{"code":0,"data":{"rows":[""" +
             """{"rideId":7,"fitOssPath":"https://igp-zh.oss-cn-hangzhou.aliyuncs.com/x.fit"}]}}"""
-        val items = parseIgpsportActivities(json)
+        val items = requireNotNull(parseIgpsportActivities(json))
         assertThat(items).hasSize(1)
         assertThat(items.first().downloadUrl).isEqualTo("https://igp-zh.oss-cn-hangzhou.aliyuncs.com/x.fit")
     }

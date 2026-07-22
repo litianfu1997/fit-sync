@@ -1,6 +1,8 @@
 package com.fitsync.app.data.repo
 
 import android.net.Uri
+import android.os.Trace
+import androidx.room.withTransaction
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.ActivityVariantEntity
 import com.fitsync.app.data.db.entity.AppSettingsEntity
@@ -8,6 +10,7 @@ import com.fitsync.app.data.db.entity.CanonicalActivityEntity
 import com.fitsync.app.data.db.entity.ImportJobEntity
 import com.fitsync.app.data.file.FitFileNaming
 import com.fitsync.app.data.file.FitFileStore
+import com.fitsync.app.data.file.StoredFitFile
 import com.fitsync.app.domain.dedup.ActivityFingerprint
 import com.fitsync.app.domain.dedup.DedupDecision
 import com.fitsync.app.domain.dedup.DedupEngine
@@ -23,6 +26,8 @@ import com.fitsync.app.fit.LatLng
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class ImportService(
     private val db: FitSyncDatabase,
@@ -39,12 +44,35 @@ class ImportService(
         collectorType: CollectorType = CollectorType.SHARE,
         remoteActivityId: String? = null,
         preferredTitle: String? = null,
-    ): ImportOutcome = mutationGate.withLock {
-        importFromUriLocked(uri, displayName, sourcePlatform, collectorType, remoteActivityId, preferredTitle)
-    }
+    ): ImportOutcome = importPreparedFile(
+        uri = uri,
+        prepared = null,
+        displayName = displayName,
+        sourcePlatform = sourcePlatform,
+        collectorType = collectorType,
+        remoteActivityId = remoteActivityId,
+        preferredTitle = preferredTitle,
+    )
 
-    private suspend fun importFromUriLocked(
-        uri: Uri,
+    suspend fun importStoredFile(
+        prepared: ImportPreparedFile,
+        sourcePlatform: Platform,
+        collectorType: CollectorType = CollectorType.CLOUD,
+        remoteActivityId: String? = null,
+        preferredTitle: String? = null,
+    ): ImportOutcome = importPreparedFile(
+        uri = null,
+        prepared = prepared,
+        displayName = prepared.displayName,
+        sourcePlatform = sourcePlatform,
+        collectorType = collectorType,
+        remoteActivityId = remoteActivityId,
+        preferredTitle = preferredTitle,
+    )
+
+    private suspend fun importPreparedFile(
+        uri: Uri?,
+        prepared: ImportPreparedFile?,
         displayName: String? = null,
         sourcePlatform: Platform? = null,
         collectorType: CollectorType = CollectorType.SHARE,
@@ -60,7 +88,17 @@ class ImportService(
         )
 
         return try {
-            var stored = fileStore.copyFromUri(uri, displayName)
+            var stored = if (prepared != null) {
+                require(prepared.file.isFile) { "下载的 FIT 文件不存在" }
+                StoredFitFile(
+                    file = prepared.file,
+                    sha256 = prepared.sha256,
+                    size = prepared.file.length(),
+                    displayName = prepared.displayName,
+                )
+            } else {
+                fileStore.copyFromUri(requireNotNull(uri), displayName)
+            }
             importDao.update(
                 importDao.getById(jobId)!!.copy(
                     status = ImportJobStatus.VALIDATING,
@@ -81,10 +119,20 @@ class ImportService(
                         updatedAtEpochMs = System.currentTimeMillis(),
                     ),
                 )
+                if (stored.file.absolutePath != existingVariant.localFilePath) {
+                    fileStore.deleteStoredFiles(listOf(stored.file.absolutePath))
+                }
                 return ImportOutcome.DuplicateFile(jobId, existingVariant.canonicalActivityId, existingVariant.id)
             }
 
-            val parsed = fitEngine.parseFile(stored.file)
+            val parsed = withContext(PARSER_DISPATCHER) {
+                Trace.beginSection("FitSync:fit_parse")
+                try {
+                    fitEngine.parseFile(stored.file)
+                } finally {
+                    Trace.endSection()
+                }
+            }
             if (parsed.validationStatus in setOf(
                     ValidationStatus.UNSUPPORTED,
                     ValidationStatus.NOT_ACTIVITY,
@@ -124,6 +172,29 @@ class ImportService(
                 ) ?: return ImportOutcome.Failed(jobId, "导入任务丢失"),
             )
 
+            Trace.beginSection("FitSync:import_commit")
+            val outcome = try {
+                mutationGate.withLock {
+                    db.withTransaction {
+            // 并发准备相同 SHA 时，进入事务后必须再次检查唯一性。
+            val concurrentDuplicate = db.activityVariantDao().findBySha256(stored.sha256)
+            if (concurrentDuplicate != null) {
+                importDao.update(
+                    requireNotNull(importDao.getById(jobId)).copy(
+                        status = ImportJobStatus.DUPLICATE_FILE,
+                        validationStatus = ValidationStatus.VALID,
+                        canonicalActivityId = concurrentDuplicate.canonicalActivityId,
+                        variantId = concurrentDuplicate.id,
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                    ),
+                )
+                return@withTransaction ImportOutcome.DuplicateFile(
+                    jobId,
+                    concurrentDuplicate.canonicalActivityId,
+                    concurrentDuplicate.id,
+                )
+            }
+
             // 与 DedupEngine 时间窗一致，避免全表扫描
             val windowMs = DEDUP_TIME_WINDOW_MS
             val nearby = db.canonicalActivityDao().findByStartTimeRange(start - windowMs, start + windowMs)
@@ -133,9 +204,15 @@ class ImportService(
                 distanceMeters = parsed.distanceMeters,
                 sportType = parsed.sportType,
             )
+            val variantsByCanonical = if (candidates.isEmpty()) emptyMap() else {
+                db.activityVariantDao().findByCanonicalIds(candidates.map { it.id })
+                    .groupBy { it.canonicalActivityId }
+            }
             val candidatePairs = candidates.map { c ->
-                val variants = db.activityVariantDao().findByCanonical(c.id)
-                val track = variants.firstNotNullOfOrNull { parseTrack(it.trackSummaryJson) } ?: emptyList()
+                val track = variantsByCanonical[c.id]
+                    .orEmpty()
+                    .firstNotNullOfOrNull { parseTrack(it.trackSummaryJson) }
+                    .orEmpty()
                 c to track
             }
             val decision = dedupEngine.decide(parsed, candidatePairs)
@@ -215,6 +292,7 @@ class ImportService(
                     hasPower = parsed.hasPower,
                     recordCount = parsed.recordCount,
                     trackSummaryJson = encodeTrack(parsed.trackSample),
+                    parserVersion = CURRENT_PARSER_VERSION,
                 ),
             )
 
@@ -235,7 +313,7 @@ class ImportService(
                     canonicalActivityId = canonicalId,
                     variantId = variantId,
                     updatedAtEpochMs = System.currentTimeMillis(),
-                ) ?: return ImportOutcome.Failed(jobId, "导入任务丢失"),
+                ) ?: return@withTransaction ImportOutcome.Failed(jobId, "导入任务丢失"),
             )
 
             ImportOutcome.Success(
@@ -246,6 +324,18 @@ class ImportService(
                 qualityScore = parsed.qualityScore,
                 validationStatus = parsed.validationStatus,
             )
+                    }
+                }
+            } finally {
+                Trace.endSection()
+            }
+            if (outcome is ImportOutcome.DuplicateFile) {
+                val existingPath = db.activityVariantDao().getById(outcome.variantId)?.localFilePath
+                if (stored.file.absolutePath != existingPath) {
+                    fileStore.deleteStoredFiles(listOf(stored.file.absolutePath))
+                }
+            }
+            outcome
         } catch (t: Throwable) {
             importDao.getById(jobId)?.let { job ->
                 importDao.update(
@@ -284,73 +374,113 @@ class ImportService(
         preferredTitle = preferredTitle,
     )
 
-    suspend fun reparseStoredActivitiesIfNeeded() = mutationGate.withLock {
-        reparseStoredActivitiesIfNeededLocked()
+    suspend fun reparseStoredActivitiesIfNeeded() {
+        while (reparseStoredActivitiesBatch()) {
+            // 兼容显式维护入口；Worker 会在每批后续跑，从而让出执行权。
+        }
     }
 
-    private suspend fun reparseStoredActivitiesIfNeededLocked() {
+    /**
+     * 重解析至多 [limit] 个历史 variant。读取与 FIT 解析不持有全局变更锁，只有最终提交进入短临界区。
+     * 返回 true 表示仍有数据，MaintenanceWorker 会追加下一批任务。
+     */
+    suspend fun reparseStoredActivitiesBatch(limit: Int = 25): Boolean {
         val settingsDao = db.appSettingsDao()
-        val settings = settingsDao.get() ?: AppSettingsEntity()
-        if (settings.fitParserVersion >= CURRENT_PARSER_VERSION) return
+        var settings = settingsDao.get() ?: AppSettingsEntity()
 
         // 标题一次性回填：仅针对 v2 及更早的历史数据（fitParserVersion < TITLE_BACKFILL_GATE）。
         // 与解析器版本升级解耦——未来 FitEngine 改动递增 CURRENT_PARSER_VERSION 时不会重复触发，
         // 避免把此后导入活动已捕获的平台原名(preferredTitle)再次抹成中性 displayTitle 而造成不可逆丢失。
         // 用 canonical 持久的 startTime/sport 回填，不依赖 FIT 文件是否存在，保证所有历史活动都被覆盖。
         if (settings.fitParserVersion < TITLE_BACKFILL_GATE) {
-            backfillDisplayTitlesLocked()
+            mutationGate.withLock {
+                db.withTransaction { backfillDisplayTitlesLocked() }
+            }
+            settings = settings.copy(fitParserVersion = TITLE_BACKFILL_GATE)
+            settingsDao.upsert(settings)
         }
 
-        db.canonicalActivityDao().getAll().forEach { canonical ->
-            val reparsed = db.activityVariantDao().findByCanonical(canonical.id).mapNotNull { variant ->
+        val variants = db.activityVariantDao().findNeedingParserVersion(CURRENT_PARSER_VERSION, limit)
+        if (variants.isEmpty()) {
+            if (settings.fitParserVersion < CURRENT_PARSER_VERSION) {
+                settingsDao.upsert(settings.copy(fitParserVersion = CURRENT_PARSER_VERSION))
+            }
+            return false
+        }
+        val prepared = withContext(PARSER_DISPATCHER) {
+            variants.map { variant ->
                 val file = File(variant.localFilePath)
-                if (!file.isFile) return@mapNotNull null
-                val parsed = runCatching { fitEngine.parseFile(file) }.getOrNull() ?: return@mapNotNull null
-                if (!parsed.isActivityFile) return@mapNotNull null
+                val parsed = if (file.isFile) {
+                    runCatching { fitEngine.parseFile(file) }.getOrNull()?.takeIf { it.isActivityFile }
+                } else {
+                    null
+                }
+                PreparedReparse(variant.id, variant.canonicalActivityId, parsed)
+            }
+        }
 
+        mutationGate.withLock {
+            db.withTransaction {
+            prepared.forEach { item ->
+                val variant = db.activityVariantDao().getById(item.variantId) ?: return@forEach
+                if (variant.parserVersion >= CURRENT_PARSER_VERSION) return@forEach
+                val parsed = item.result
                 db.activityVariantDao().update(
-                    variant.copy(
-                        recordingManufacturer = parsed.manufacturer,
-                        recordingProduct = parsed.product,
-                        deviceSerial = parsed.deviceSerial,
-                        qualityScore = parsed.qualityScore,
-                        validationStatus = parsed.validationStatus,
-                        hasGps = parsed.hasGps,
-                        hasHeartRate = parsed.hasHeartRate,
-                        hasCadence = parsed.hasCadence,
-                        hasPower = parsed.hasPower,
-                        recordCount = parsed.recordCount,
-                        trackSummaryJson = encodeTrack(parsed.trackSample),
+                    if (parsed == null) {
+                        variant.copy(parserVersion = CURRENT_PARSER_VERSION)
+                    } else {
+                        variant.copy(
+                            recordingManufacturer = parsed.manufacturer,
+                            recordingProduct = parsed.product,
+                            deviceSerial = parsed.deviceSerial,
+                            qualityScore = parsed.qualityScore,
+                            validationStatus = parsed.validationStatus,
+                            hasGps = parsed.hasGps,
+                            hasHeartRate = parsed.hasHeartRate,
+                            hasCadence = parsed.hasCadence,
+                            hasPower = parsed.hasPower,
+                            recordCount = parsed.recordCount,
+                            trackSummaryJson = encodeTrack(parsed.trackSample),
+                            parserVersion = CURRENT_PARSER_VERSION,
+                        )
+                    },
+                )
+            }
+
+            prepared.filter { it.result != null }.groupBy { it.canonicalActivityId }.forEach { (canonicalId, group) ->
+                val canonical = db.canonicalActivityDao().getById(canonicalId) ?: return@forEach
+                val preferred = group.maxByOrNull { it.result!!.qualityScore } ?: return@forEach
+                val parsed = preferred.result ?: return@forEach
+                val finalSportType = parsed.sportType.takeUnless { it == SportType.UNKNOWN } ?: canonical.sportType
+                val finalStartTime = parsed.startTimeEpochMs ?: canonical.startTimeEpochMs
+                db.canonicalActivityDao().update(
+                    canonical.copy(
+                        sportType = finalSportType,
+                        startTimeEpochMs = finalStartTime,
+                        endTimeEpochMs = parsed.endTimeEpochMs ?: canonical.endTimeEpochMs,
+                        elapsedSeconds = parsed.elapsedSeconds ?: canonical.elapsedSeconds,
+                        movingSeconds = parsed.movingSeconds ?: canonical.movingSeconds,
+                        distanceMeters = parsed.distanceMeters ?: canonical.distanceMeters,
+                        // parser 版本升级时强制覆盖爬升（允许 null 清掉旧错误值）
+                        elevationGain = parsed.elevationGain,
+                        avgHeartRate = parsed.avgHeartRate ?: canonical.avgHeartRate,
+                        activityFingerprint = if (parsed.startTimeEpochMs != null) {
+                            ActivityFingerprint.compute(parsed)
+                        } else {
+                            canonical.activityFingerprint
+                        },
+                        primaryVariantId = preferred.variantId,
                     ),
                 )
-                ReparsedVariant(variant.id, parsed)
             }
-            val preferred = reparsed.maxByOrNull { it.result.qualityScore } ?: return@forEach
-            val parsed = preferred.result
-            val finalSportType = parsed.sportType.takeUnless { it == SportType.UNKNOWN } ?: canonical.sportType
-            val finalStartTime = parsed.startTimeEpochMs ?: canonical.startTimeEpochMs
-            db.canonicalActivityDao().update(
-                canonical.copy(
-                    sportType = finalSportType,
-                    startTimeEpochMs = finalStartTime,
-                    endTimeEpochMs = parsed.endTimeEpochMs ?: canonical.endTimeEpochMs,
-                    elapsedSeconds = parsed.elapsedSeconds ?: canonical.elapsedSeconds,
-                    movingSeconds = parsed.movingSeconds ?: canonical.movingSeconds,
-                    distanceMeters = parsed.distanceMeters ?: canonical.distanceMeters,
-                    // parser 版本升级时强制覆盖爬升（允许 null 清掉旧错误值）
-                    elevationGain = parsed.elevationGain,
-                    avgHeartRate = parsed.avgHeartRate ?: canonical.avgHeartRate,
-                    activityFingerprint = if (parsed.startTimeEpochMs != null) {
-                        ActivityFingerprint.compute(parsed)
-                    } else {
-                        canonical.activityFingerprint
-                    },
-                    primaryVariantId = preferred.variantId,
-                ),
-            )
+            }
         }
 
-        settingsDao.upsert(settings.copy(fitParserVersion = CURRENT_PARSER_VERSION))
+        val hasMore = db.activityVariantDao()
+            .findNeedingParserVersion(CURRENT_PARSER_VERSION, 1)
+            .isNotEmpty()
+        if (!hasMore) settingsDao.upsert(settings.copy(fitParserVersion = CURRENT_PARSER_VERSION))
+        return hasMore
     }
 
     /**
@@ -400,10 +530,15 @@ class ImportService(
         avgHeartRate = avgHeartRate ?: parsed.avgHeartRate,
     )
 
-    private data class ReparsedVariant(val variantId: Long, val result: FitParseResult)
+    private data class PreparedReparse(
+        val variantId: Long,
+        val canonicalActivityId: Long,
+        val result: FitParseResult?,
+    )
 
     private companion object {
-        const val CURRENT_PARSER_VERSION = 4
+        const val CURRENT_PARSER_VERSION = 5
+        val PARSER_DISPATCHER = Dispatchers.Default.limitedParallelism(2)
 
         // 标题回填闸门：仅对 fitParserVersion < 此值的历史数据回填 displayTitle。
         // 固定为本次命名重构引入时的 CURRENT_PARSER_VERSION(=3)，实现「v2→v3 一次性回填」语义；
@@ -415,6 +550,12 @@ class ImportService(
         const val DEDUP_TIME_WINDOW_MS = 10L * 60 * 1000
     }
 }
+
+data class ImportPreparedFile(
+    val file: File,
+    val sha256: String,
+    val displayName: String,
+)
 
 sealed class ImportOutcome {
     data class Success(

@@ -69,11 +69,11 @@ internal fun parseCorosLogin(jsonText: String): CorosLoginResult? {
  * distance（米）。sportType 写入 metadata["sport_type"]（download 端点必需）；RemoteActivitySummary.sportType
  * 刻意留 null——交由 FitEngine 从 FIT 文件本身解析运动类型（与 iGPSPORT 一致）。
  */
-internal fun parseCorosActivities(jsonText: String): List<RemoteActivitySummary> {
-    val root = runCatching { JSONObject(jsonText) }.getOrNull() ?: return emptyList()
-    if (root.optString("result") != "0000") return emptyList()
-    val data = root.optJSONObject("data") ?: return emptyList()
-    val list = data.optJSONArray("dataList") ?: return emptyList()
+internal fun parseCorosActivities(jsonText: String): List<RemoteActivitySummary>? {
+    val root = runCatching { JSONObject(jsonText) }.getOrNull() ?: return null
+    if (root.optString("result") != "0000") return null
+    val data = root.optJSONObject("data") ?: return null
+    val list = data.optJSONArray("dataList") ?: return null
     return buildList {
         for (i in 0 until list.length()) {
             val item = list.optJSONObject(i) ?: continue

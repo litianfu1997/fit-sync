@@ -1,5 +1,10 @@
 package com.fitsync.app.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -49,7 +54,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -64,8 +68,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.data.db.entity.AppSettingsEntity
 import com.fitsync.app.domain.model.AccountStatus
@@ -89,13 +95,19 @@ fun SettingsScreen(
     onOpenPrivacy: () -> Unit = {},
 ) {
     val app = FitSyncApp.instance
-    val settings by app.database.appSettingsDao().observe().collectAsState(initial = null)
-    val accounts by app.database.platformAccountDao().observeAll().collectAsState(initial = emptyList())
-    val rules by app.database.syncRuleDao().observeAll().collectAsState(initial = emptyList())
+    val settings by app.database.appSettingsDao().observe()
+        .collectAsStateWithLifecycle(initialValue = null)
+    val accounts by app.database.platformAccountDao().observeAll()
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val rules by app.database.syncRuleDao().observeAll()
+        .collectAsStateWithLifecycle(initialValue = emptyList())
     val current = settings ?: AppSettingsEntity()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
     val guard = remember(context) { BackgroundRunGuard(context.applicationContext) }
     var resumeTick by remember { mutableIntStateOf(0) }
     var showBackgroundPrompt by remember { mutableStateOf(false) }
@@ -239,7 +251,18 @@ fun SettingsScreen(
                             title = "操作提醒",
                             subtitle = "登录失效、验证码或网页操作时通知",
                             checked = current.notificationsEnabled,
-                            onCheckedChange = { save(current.copy(notificationsEnabled = it)) },
+                            onCheckedChange = { enabled ->
+                                if (
+                                    enabled && Build.VERSION.SDK_INT >= 33 &&
+                                    ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.POST_NOTIFICATIONS,
+                                    ) != PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                                save(current.copy(notificationsEnabled = enabled))
+                            },
                             icon = Icons.Default.NotificationsActive,
                         )
                     }
@@ -272,7 +295,8 @@ fun SettingsScreen(
 
 @Composable
 fun BackgroundSettingsScreen(onBack: () -> Unit) {
-    val settings by FitSyncApp.instance.database.appSettingsDao().observe().collectAsState(initial = null)
+    val settings by FitSyncApp.instance.database.appSettingsDao().observe()
+        .collectAsStateWithLifecycle(initialValue = null)
     val context = LocalContext.current
     val guard = remember(context) { BackgroundRunGuard(context.applicationContext) }
     var resumeTick by remember { mutableIntStateOf(0) }
@@ -327,7 +351,8 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
 @Composable
 fun StorageSettingsScreen(onBack: () -> Unit) {
     val app = FitSyncApp.instance
-    val settings by app.database.appSettingsDao().observe().collectAsState(initial = null)
+    val settings by app.database.appSettingsDao().observe()
+        .collectAsStateWithLifecycle(initialValue = null)
     val current = settings ?: AppSettingsEntity()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current

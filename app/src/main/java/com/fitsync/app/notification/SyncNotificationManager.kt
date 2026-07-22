@@ -113,6 +113,8 @@ class SyncNotificationManager(private val context: Context) {
 
     fun cancel(jobId: Long) = manager.cancel(jobId.toInt())
 
+    fun cancelAccount(accountId: Long) = manager.cancel((-10_000L - accountId).toInt())
+
     companion object {
         const val CHANNEL_ID = "sync_user_action"
         const val PROGRESS_CHANNEL_ID = "sync_progress"

@@ -1,10 +1,31 @@
 package com.fitsync.app.sync
 
+import com.fitsync.app.data.db.entity.SyncRuleEntity
 import com.fitsync.app.domain.model.Platform
+import com.fitsync.app.domain.model.DedupStatus
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
 
 class DeliveryPlannerTest {
+    @Test
+    fun needsReviewActivity_isNotEligibleForAutomaticOrManualDelivery() {
+        assertThat(isDeliveryPlanningAllowed(DedupStatus.NEEDS_REVIEW)).isFalse()
+        assertThat(isDeliveryPlanningAllowed(DedupStatus.MANUALLY_KEPT_SEPARATE)).isTrue()
+    }
+
+    @Test
+    fun ruleWithoutHistory_usesActivityStartTimeInsteadOfImportTime() {
+        val rule = SyncRuleEntity(
+            sourcePlatform = Platform.LOCAL_IMPORT,
+            destinationAccountId = 7,
+            includeHistory = false,
+            createdAtEpochMs = 1_000,
+        )
+
+        assertThat(isActivityEligibleForRule(999, rule)).isFalse()
+        assertThat(isActivityEligibleForRule(1_000, rule)).isTrue()
+    }
+
     @Test
     fun idempotencyKey_isStableForSameFileAndDestination() {
         val first = DeliveryPlanner.idempotencyKey("abc123", 7)

@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
@@ -23,17 +22,19 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.paging.LoadState
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.compose.itemKey
 import com.fitsync.app.FitSyncApp
-import com.fitsync.app.data.db.entity.CanonicalActivityEntity
+import com.fitsync.app.data.db.dao.SyncJobListItem
 import com.fitsync.app.data.db.entity.DeliveryJobEntity
-import com.fitsync.app.data.db.entity.PlatformAccountEntity
 import com.fitsync.app.domain.model.DeliveryJobStatus
 import com.fitsync.app.ui.components.AppTopBar
 import com.fitsync.app.ui.components.EmptyState
@@ -103,18 +104,24 @@ fun SyncJobsScreen(
     onOpenActivity: (Long) -> Unit,
 ) {
     val db = FitSyncApp.instance.database
-    val allJobs by db.deliveryJobDao().observeAll().collectAsState(initial = emptyList())
-    val activities by db.canonicalActivityDao().observeAll().collectAsState(initial = emptyList())
-    val accounts by db.platformAccountDao().observeAll().collectAsState(initial = emptyList())
-    val jobs = remember(allJobs, filter) { allJobs.filter { filter.includes(it.status) } }
-    val activityById = remember(activities) { activities.associateBy { it.id } }
-    val accountById = remember(accounts) { accounts.associateBy { it.id } }
+    val pager = remember(filter) {
+        Pager(
+            config = PagingConfig(
+                pageSize = 30,
+                prefetchDistance = 10,
+                enablePlaceholders = false,
+                maxSize = 150,
+            ),
+            pagingSourceFactory = { db.deliveryJobDao().pagingSource(filter.routeValue) },
+        )
+    }
+    val jobs = pager.flow.collectAsLazyPagingItems()
     val dateFormat = remember { SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.getDefault()) }
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
             title = filter.title,
-            subtitle = "${jobs.size} 条投递记录",
+            subtitle = "${jobs.itemCount} 条已加载",
             navigationIcon = {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -126,7 +133,7 @@ fun SyncJobsScreen(
             contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (jobs.isEmpty()) {
+            if (jobs.loadState.refresh is LoadState.NotLoading && jobs.itemCount == 0) {
                 item {
                     EmptyState(
                         title = filter.emptyTitle,
@@ -135,14 +142,18 @@ fun SyncJobsScreen(
                     )
                 }
             } else {
-                items(jobs, key = { it.id }) { job ->
-                    SyncJobCard(
-                        job = job,
-                        activity = activityById[job.canonicalActivityId],
-                        account = accountById[job.destinationAccountId],
-                        dateFormat = dateFormat,
-                        onOpenActivity = onOpenActivity,
-                    )
+                items(
+                    count = jobs.itemCount,
+                    key = jobs.itemKey { it.id },
+                    contentType = { "sync-job" },
+                ) { index ->
+                    jobs[index]?.let { job ->
+                        SyncJobCard(
+                            job = job,
+                            dateFormat = dateFormat,
+                            onOpenActivity = onOpenActivity,
+                        )
+                    }
                 }
             }
         }
@@ -151,9 +162,7 @@ fun SyncJobsScreen(
 
 @Composable
 private fun SyncJobCard(
-    job: DeliveryJobEntity,
-    activity: CanonicalActivityEntity?,
-    account: PlatformAccountEntity?,
+    job: SyncJobListItem,
     dateFormat: SimpleDateFormat,
     onOpenActivity: (Long) -> Unit,
 ) {
@@ -169,15 +178,15 @@ private fun SyncJobCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            account?.let { PlatformAvatar(it.platform, 44.dp) }
+            job.destinationPlatform?.let { PlatformAvatar(it, 44.dp) }
             Column(Modifier.weight(1f)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
-                        activity?.title?.takeIf { it.isNotBlank() }
-                            ?: activity?.sportType?.let(::sportLabel)
+                        job.activityTitle?.takeIf { it.isNotBlank() }
+                            ?: job.activitySportType?.let(::sportLabel)
                             ?: "本地活动 #${job.canonicalActivityId}",
                         modifier = Modifier.weight(1f, fill = false),
                         style = MaterialTheme.typography.titleSmall,
@@ -186,13 +195,13 @@ private fun SyncJobCard(
                     StatusPill(deliveryStatusText(job.status), deliveryStatusTone(job.status))
                 }
                 Text(
-                    "目标 · ${account?.platform?.displayName ?: "未知平台"}  ·  ${dateFormat.format(Date(job.updatedAtEpochMs))}",
+                    "目标 · ${job.destinationPlatform?.displayName ?: "未知平台"}  ·  ${dateFormat.format(Date(job.updatedAtEpochMs))}",
                     modifier = Modifier.padding(top = 4.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    deliveryJobDetail(job),
+                    deliveryJobDetail(job.errorCode, job.errorMessage, job.attemptCount),
                     modifier = Modifier.padding(top = 4.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (job.status in problemDeliveryStatuses) {
@@ -219,11 +228,15 @@ private val problemDeliveryStatuses = setOf(
 )
 
 internal fun deliveryJobDetail(job: DeliveryJobEntity): String {
+    return deliveryJobDetail(job.errorCode, job.errorMessage, job.attemptCount)
+}
+
+private fun deliveryJobDetail(errorCode: String?, errorMessage: String?, attemptCount: Int): String {
     val reason = listOfNotNull(
-        job.errorCode?.takeIf { it.isNotBlank() }?.let { "错误码 $it" },
-        job.errorMessage?.takeIf { it.isNotBlank() },
+        errorCode?.takeIf { it.isNotBlank() }?.let { "错误码 $it" },
+        errorMessage?.takeIf { it.isNotBlank() },
     ).joinToString(" · ")
     return reason.ifBlank {
-        if (job.attemptCount > 0) "已尝试 ${job.attemptCount} 次" else "等待系统自动处理"
+        if (attemptCount > 0) "已尝试 $attemptCount 次" else "等待系统自动处理"
     }
 }

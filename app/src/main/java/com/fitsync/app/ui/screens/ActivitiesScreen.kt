@@ -1,5 +1,6 @@
 package com.fitsync.app.ui.screens
 
+import android.os.Trace
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,7 +15,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Sort
@@ -36,19 +36,27 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.paging.LoadState
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.compose.collectAsLazyPagingItems
+import androidx.paging.compose.itemKey
+import androidx.paging.map
 import com.fitsync.app.FitSyncApp
-import com.fitsync.app.data.db.entity.CanonicalActivityEntity
+import com.fitsync.app.data.db.dao.ActivityListItem
+import com.fitsync.app.data.db.dao.ActivityListQuery
 import com.fitsync.app.domain.model.DedupStatus
 import com.fitsync.app.domain.model.SportType
 import com.fitsync.app.ui.components.AppTopBar
@@ -59,8 +67,10 @@ import com.fitsync.app.ui.theme.FitBlue
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.map
 
-private enum class ActivityFilter(val label: String) {
+enum class ActivityFilter(val label: String) {
     ALL("全部"), CYCLING("骑行"), RUNNING("跑步"), REVIEW("待复核")
 }
 
@@ -72,40 +82,58 @@ private enum class ActivityTimeSort(val label: String) {
 
 @Composable
 fun ActivitiesScreen(
+    filter: ActivityFilter = ActivityFilter.ALL,
+    onFilterChange: (ActivityFilter) -> Unit = {},
     onOpenActivity: (Long) -> Unit = {},
     onOpenPlatforms: () -> Unit = {},
 ) {
-    val activities by FitSyncApp.instance.database.canonicalActivityDao().observeAll()
-        .collectAsState(initial = emptyList())
     var query by rememberSaveable { mutableStateOf("") }
-    var filter by rememberSaveable { mutableStateOf(ActivityFilter.ALL) }
+    var debouncedQuery by rememberSaveable { mutableStateOf("") }
     var timeSort by rememberSaveable { mutableStateOf(ActivityTimeSort.NEWEST_FIRST) }
     val dateFormat = remember { SimpleDateFormat("MM月dd日 · HH:mm", Locale.getDefault()) }
-    val filtered = remember(activities, query, filter, timeSort) {
-        val matched = activities.filter { activity ->
-            val queryMatch = query.isBlank() ||
-                activity.title.orEmpty().contains(query, ignoreCase = true) ||
-                sportLabel(activity.sportType).contains(query, ignoreCase = true)
-            val filterMatch = when (filter) {
-                ActivityFilter.ALL -> true
-                ActivityFilter.CYCLING -> activity.sportType in setOf(
-                    SportType.CYCLING,
-                    SportType.INDOOR_CYCLING,
-                    SportType.MTB,
-                    SportType.GRAVEL,
-                )
-                ActivityFilter.RUNNING -> activity.sportType == SportType.RUNNING
-                ActivityFilter.REVIEW -> activity.dedupStatus == DedupStatus.NEEDS_REVIEW
-            }
-            queryMatch && filterMatch
-        }
-        when (timeSort) {
-            ActivityTimeSort.NEWEST_FIRST ->
-                matched.sortedWith(compareByDescending<CanonicalActivityEntity> { it.startTimeEpochMs }.thenByDescending { it.id })
-            ActivityTimeSort.OLDEST_FIRST ->
-                matched.sortedWith(compareBy<CanonicalActivityEntity> { it.startTimeEpochMs }.thenBy { it.id })
+
+    LaunchedEffect(query) {
+        delay(250)
+        debouncedQuery = query.trim()
+    }
+    LaunchedEffect(Unit) {
+        Trace.beginSection("FitSync:activity_list_first_frame")
+        try {
+            withFrameNanos { }
+        } finally {
+            Trace.endSection()
         }
     }
+    val listQuery = remember(debouncedQuery, filter, timeSort) {
+        ActivityListQuery(
+            searchText = debouncedQuery,
+            filter = filter.name,
+            oldestFirst = timeSort == ActivityTimeSort.OLDEST_FIRST,
+        )
+    }
+    val pager = remember(listQuery) {
+        Pager(
+            config = PagingConfig(
+                pageSize = 50,
+                prefetchDistance = 15,
+                enablePlaceholders = false,
+                maxSize = 200,
+            ),
+            pagingSourceFactory = {
+                FitSyncApp.instance.database.canonicalActivityDao().pagingSource(
+                    query = listQuery.searchText,
+                    filter = listQuery.filter,
+                    oldestFirst = listQuery.oldestFirst,
+                )
+            },
+        )
+    }
+    val formattedActivities = remember(pager, dateFormat) {
+        pager.flow.map { pagingData ->
+            pagingData.map { it.toUiModel(dateFormat) }
+        }
+    }
+    val activities = formattedActivities.collectAsLazyPagingItems()
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar(title = "运动记录", subtitle = "所有来源已合并去重")
@@ -141,7 +169,7 @@ fun ActivitiesScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        "${filtered.size} 条结果",
+                        "${activities.itemCount} 条已加载",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -179,7 +207,7 @@ fun ActivitiesScreen(
                         FilterChip(
                             modifier = Modifier.height(44.dp),
                             selected = filter == option,
-                            onClick = { filter = option },
+                            onClick = { onFilterChange(option) },
                             label = { Text(option.label) },
                             colors = FilterChipDefaults.filterChipColors(
                                 selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -189,19 +217,29 @@ fun ActivitiesScreen(
                     }
                 }
             }
-            if (filtered.isEmpty()) {
+            if (activities.loadState.refresh is LoadState.NotLoading && activities.itemCount == 0) {
                 item {
                     EmptyState(
-                        title = if (activities.isEmpty()) "还没有活动" else "没有匹配结果",
-                        body = if (activities.isEmpty()) "从平台拉取，或把 FIT 文件分享到 FitSync。" else "试试其他关键词或筛选条件。",
+                        title = if (debouncedQuery.isBlank() && filter == ActivityFilter.ALL) "还没有活动" else "没有匹配结果",
+                        body = if (debouncedQuery.isBlank() && filter == ActivityFilter.ALL) {
+                            "从平台拉取，或把 FIT 文件分享到 FitSync。"
+                        } else {
+                            "试试其他关键词或筛选条件。"
+                        },
                         icon = Icons.Default.Route,
-                        actionLabel = if (activities.isEmpty()) "连接平台" else null,
-                        onAction = if (activities.isEmpty()) onOpenPlatforms else null,
+                        actionLabel = if (debouncedQuery.isBlank() && filter == ActivityFilter.ALL) "连接平台" else null,
+                        onAction = if (debouncedQuery.isBlank() && filter == ActivityFilter.ALL) onOpenPlatforms else null,
                     )
                 }
             } else {
-                items(filtered, key = { it.id }) { activity ->
-                    ActivityCard(activity, dateFormat, onOpenActivity)
+                items(
+                    count = activities.itemCount,
+                    key = activities.itemKey { it.id },
+                    contentType = { "activity" },
+                ) { index ->
+                    activities[index]?.let { activity ->
+                        ActivityCard(activity, onOpenActivity)
+                    }
                 }
             }
         }
@@ -210,8 +248,7 @@ fun ActivitiesScreen(
 
 @Composable
 private fun ActivityCard(
-    activity: CanonicalActivityEntity,
-    dateFormat: SimpleDateFormat,
+    activity: ActivityListUiModel,
     onOpenActivity: (Long) -> Unit,
 ) {
     Card(
@@ -236,7 +273,7 @@ private fun ActivityCard(
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        activity.title?.takeIf { it.isNotBlank() } ?: sportLabel(activity.sportType),
+                        activity.title,
                         modifier = Modifier.weight(1f, fill = false),
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
@@ -246,7 +283,7 @@ private fun ActivityCard(
                     }
                 }
                 Text(
-                    dateFormat.format(Date(activity.startTimeEpochMs)),
+                    activity.dateText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -254,15 +291,37 @@ private fun ActivityCard(
                     modifier = Modifier.padding(top = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    ActivityStat(activity.distanceMeters?.let { "%.1f km".format(it / 1000) } ?: "--", "距离")
-                    ActivityStat(activity.elapsedSeconds?.let(::formatDuration) ?: "--", "时长")
-                    ActivityStat(sportLabel(activity.sportType), "运动")
+                    ActivityStat(activity.distanceText, "距离")
+                    ActivityStat(activity.durationText, "时长")
+                    ActivityStat(activity.sportText, "运动")
                 }
             }
             Icon(Icons.Default.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
+
+private data class ActivityListUiModel(
+    val id: Long,
+    val title: String,
+    val sportType: SportType,
+    val dedupStatus: DedupStatus,
+    val dateText: String,
+    val distanceText: String,
+    val durationText: String,
+    val sportText: String,
+)
+
+private fun ActivityListItem.toUiModel(dateFormat: SimpleDateFormat): ActivityListUiModel = ActivityListUiModel(
+    id = id,
+    title = title?.takeIf { it.isNotBlank() } ?: sportLabel(sportType),
+    sportType = sportType,
+    dedupStatus = dedupStatus,
+    dateText = dateFormat.format(Date(startTimeEpochMs)),
+    distanceText = distanceMeters?.let { "%.1f km".format(it / 1000) } ?: "--",
+    durationText = elapsedSeconds?.let(::formatDuration) ?: "--",
+    sportText = sportLabel(sportType),
+)
 
 @Composable
 private fun ActivityStat(value: String, label: String) {

@@ -31,7 +31,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -41,9 +40,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.connectors.PlatformCapabilityRegistry
 import com.fitsync.app.connectors.ConnectorCapabilities
+import com.fitsync.app.data.db.entity.PlatformAccountEntity
 import com.fitsync.app.domain.model.AccountStatus
 import com.fitsync.app.domain.model.ConnectorExecution
 import com.fitsync.app.domain.model.Platform
@@ -67,7 +68,9 @@ import java.util.Locale
 @Composable
 fun PlatformsScreen(onBack: () -> Unit = {}) {
     val app = FitSyncApp.instance
-    val accounts by app.database.platformAccountDao().observeAll().collectAsState(initial = emptyList())
+    val accountsState by app.database.platformAccountDao().observeAll()
+        .collectAsStateWithLifecycle(initialValue = null)
+    val accounts = accountsState.orEmpty()
     val bound = accounts.filter { it.status != AccountStatus.DISABLED }.associateBy { it.platform }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -77,8 +80,11 @@ fun PlatformsScreen(onBack: () -> Unit = {}) {
     var configureStrava by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
     val dateFormat = remember { SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()) }
-    val knownPlatforms = PlatformCapabilityRegistry.allKnownPlatforms()
-        .sortedBy { if (bound.containsKey(it)) 0 else 1 }
+    val knownPlatforms = if (accountsState == null) {
+        emptyList()
+    } else {
+        PlatformCapabilityRegistry.allKnownPlatforms().sortedBy { if (bound.containsKey(it)) 0 else 1 }
+    }
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
@@ -96,6 +102,21 @@ fun PlatformsScreen(onBack: () -> Unit = {}) {
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+            if (accountsState == null) {
+                item(key = "accounts-loading") {
+                    Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                    }
+                }
+            } else {
+                item(key = "accounts-summary") {
+                    Text(
+                        "已连接 ${bound.size} 个 · 可添加 ${knownPlatforms.size - bound.size} 个",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             items(knownPlatforms, key = { it.name }) { platform ->
                 val account = bound[platform]
                 val caps = ConnectorCapabilities.deserialize(account?.capabilitySnapshot)
@@ -133,13 +154,9 @@ fun PlatformsScreen(onBack: () -> Unit = {}) {
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        if (caps.experimental) {
+                        if (caps.experimental && account != null) {
                             Text(
-                                if (platform == Platform.STRAVA) {
-                                    "活动列表和上传使用官方 API；原文件读取依赖实验性网页接口，变化时只暂停拉取。"
-                                } else {
-                                    "该连接使用平台网页接口，页面变化时会自动暂停并要求确认。"
-                                },
+                                experimentalConnectorDescription(platform),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.tertiary,
                             )
@@ -357,4 +374,13 @@ fun PlatformsScreen(onBack: () -> Unit = {}) {
             },
         )
     }
+}
+
+private fun experimentalConnectorDescription(platform: Platform): String = when (platform) {
+    Platform.STRAVA -> "活动列表和上传使用官方 API；原文件读取依赖实验性网页接口，变化时只暂停拉取。"
+    Platform.COROS, Platform.IGPSPORT ->
+        "使用实验性后台 API；平台协议变化时会暂停同步并提示重新验证。"
+    Platform.XINGZHE, Platform.GARMIN ->
+        "该连接使用平台网页接口，页面变化时会自动暂停并要求确认。"
+    else -> "该连接仍在实验阶段，平台能力变化时会暂停同步并提示处理。"
 }

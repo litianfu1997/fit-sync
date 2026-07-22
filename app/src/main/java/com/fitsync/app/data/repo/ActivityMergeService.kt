@@ -6,7 +6,9 @@ import com.fitsync.app.data.db.entity.CanonicalActivityEntity
 import com.fitsync.app.data.file.FitFileNaming
 import com.fitsync.app.domain.model.DedupStatus
 import com.fitsync.app.domain.model.DeliveryJobStatus
+import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.notification.SyncNotificationManager
+import com.fitsync.app.sync.DeliveryPlanner
 
 /**
  * 人工处理 NEEDS_REVIEW：合并到候选 canonical，或标记为保持分离。
@@ -14,6 +16,7 @@ import com.fitsync.app.notification.SyncNotificationManager
 class ActivityMergeService(
     private val db: FitSyncDatabase,
     private val notifications: SyncNotificationManager,
+    private val planner: DeliveryPlanner,
     private val mutationGate: ActivityMutationGate = ActivityMutationGate(),
 ) {
     suspend fun keepSeparate(sourceCanonicalId: Long): Boolean = mutationGate.withLock {
@@ -25,6 +28,7 @@ class ActivityMergeService(
                 reviewCandidateCanonicalId = null,
             ),
         )
+        planResolvedActivity(sourceCanonicalId)
         true
     }
 
@@ -133,7 +137,19 @@ class ActivityMergeService(
             db.canonicalActivityDao().delete(sourceId)
         }
 
+        planResolvedActivity(targetId)
+
         return MergeResult.Merged(targetId = targetId, movedVariants = sourceVariants.size)
+    }
+
+    private suspend fun planResolvedActivity(canonicalId: Long) {
+        val variantSources = db.activityVariantDao().findByCanonical(canonicalId)
+            .map { it.sourcePlatform ?: Platform.LOCAL_IMPORT }
+        val copySources = db.platformCopyDao().findByCanonical(canonicalId)
+            .mapNotNull { db.platformAccountDao().getById(it.platformAccountId)?.platform }
+        (variantSources + copySources).distinct().forEach { source ->
+            planner.planForActivity(canonicalId, source)
+        }
     }
 }
 

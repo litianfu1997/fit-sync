@@ -101,7 +101,11 @@ fun SectionHeader(title: String, subtitle: String? = null, trailing: @Composable
 }
 
 @Composable
-fun StatusPill(text: String, tone: StatusTone = StatusTone.NEUTRAL) {
+fun StatusPill(
+    text: String,
+    tone: StatusTone = StatusTone.NEUTRAL,
+    compact: Boolean = false,
+) {
     val color = when (tone) {
         StatusTone.INFO -> FitBlue
         StatusTone.SUCCESS -> FitTeal
@@ -112,8 +116,11 @@ fun StatusPill(text: String, tone: StatusTone = StatusTone.NEUTRAL) {
     Surface(color = color.copy(alpha = 0.13f), shape = CircleShape) {
         Text(
             text = text,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.padding(
+                horizontal = if (compact) 7.dp else 10.dp,
+                vertical = if (compact) 2.dp else 4.dp,
+            ),
+            style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
             color = color,
             maxLines = 1,
         )

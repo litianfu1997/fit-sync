@@ -6,6 +6,12 @@ import org.junit.Test
 
 class JsonPlatformParserTest {
     @Test
+    fun activities_distinguishesValidEmptyFromMissingList() {
+        assertThat(JsonPlatformParser.activities(JSONObject("""{"data":{"rows":[]}}"""))).isEmpty()
+        assertThat(JsonPlatformParser.activities(JSONObject("""{"data":{"message":"login required"}}"""))).isNull()
+    }
+
+    @Test
     fun onelapList_readsNestedFitUrlAndCurrentFieldNames() {
         val root = JSONObject(
             """
@@ -26,7 +32,7 @@ class JsonPlatformParserTest {
             """.trimIndent(),
         )
 
-        val activities = JsonPlatformParser.activities(root)
+        val activities = requireNotNull(JsonPlatformParser.activities(root))
 
         assertThat(activities).hasSize(1)
         assertThat(activities.single().remoteActivityId).isEqualTo("42")

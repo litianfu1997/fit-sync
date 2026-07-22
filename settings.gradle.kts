@@ -22,3 +22,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "FitSync"
 include(":app")
+include(":benchmark")

@@ -1,6 +1,7 @@
 package com.fitsync.app.connectors
 
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
+import com.fitsync.app.data.db.entity.ActivityVariantEntity
 import com.fitsync.app.domain.model.SessionState
 import com.fitsync.app.domain.model.Platform
 import java.io.File
@@ -59,7 +60,10 @@ interface PlatformConnector {
     suspend fun detectCapabilities(): ConnectorCapabilities
     suspend fun listActivities(sinceEpochMs: Long, cursor: SyncCursor?): ConnectorResult<ActivityPage>
     suspend fun downloadFit(activity: RemoteActivitySummary): ConnectorResult<FitFile>
-    suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy>
+    suspend fun uploadFit(
+        activity: CanonicalActivityEntity,
+        sourceVariant: ActivityVariantEntity,
+    ): ConnectorResult<RemoteCopy>
     suspend fun checkUpload(remoteUploadId: String): ConnectorResult<RemoteCopy> =
         ConnectorResult.PermanentFailure("UNSUPPORTED", "该平台不支持查询远端上传状态")
 }

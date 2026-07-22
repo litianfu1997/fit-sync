@@ -1,0 +1,4 @@
+SLcom/fitsync/app/FitSyncApp;->**(**)**
+SLcom/fitsync/app/MainActivity;->**(**)**
+SLcom/fitsync/app/ui/FitSyncAppRootKt;->**(**)**
+SLcom/fitsync/app/ui/screens/HomeScreenKt;->**(**)**

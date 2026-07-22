@@ -38,7 +38,12 @@ data class PlatformAccountEntity(
 
 @Entity(
     tableName = "canonical_activity",
-    indices = [Index(value = ["startTimeEpochMs"]), Index(value = ["activityFingerprint"])],
+    indices = [
+        Index(value = ["startTimeEpochMs"]),
+        Index(value = ["activityFingerprint"]),
+        Index(value = ["sportType", "startTimeEpochMs"]),
+        Index(value = ["dedupStatus", "startTimeEpochMs"]),
+    ],
 )
 data class CanonicalActivityEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -64,6 +69,7 @@ data class CanonicalActivityEntity(
     indices = [
         Index(value = ["fileSha256"], unique = true),
         Index(value = ["canonicalActivityId"]),
+        Index(value = ["parserVersion", "id"]),
     ],
 )
 data class ActivityVariantEntity(
@@ -86,6 +92,7 @@ data class ActivityVariantEntity(
     val hasPower: Boolean = false,
     val recordCount: Int? = null,
     val trackSummaryJson: String? = null,
+    @ColumnInfo(defaultValue = "0") val parserVersion: Int = 0,
     val createdAtEpochMs: Long = System.currentTimeMillis(),
 )
 
@@ -94,6 +101,7 @@ data class ActivityVariantEntity(
     indices = [
         Index(value = ["platformAccountId", "remoteActivityId"], unique = true),
         Index(value = ["canonicalActivityId", "platformAccountId"], unique = true),
+        Index(value = ["platformAccountId", "fileSha256"]),
     ],
 )
 data class PlatformCopyEntity(
@@ -127,7 +135,8 @@ data class RemoteActivitySkipEntity(
     indices = [
         Index(value = ["canonicalActivityId", "destinationAccountId"], unique = true),
         Index(value = ["idempotencyKey"], unique = true),
-        Index(value = ["status"]),
+        Index(value = ["status", "nextRetryAtEpochMs", "createdAtEpochMs"]),
+        Index(value = ["sourceVariantId"]),
     ],
 )
 data class DeliveryJobEntity(
@@ -165,7 +174,10 @@ data class SyncRuleEntity(
     val createdAtEpochMs: Long = System.currentTimeMillis(),
 )
 
-@Entity(tableName = "import_job")
+@Entity(
+    tableName = "import_job",
+    indices = [Index(value = ["createdAtEpochMs"])],
+)
 data class ImportJobEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val displayName: String?,

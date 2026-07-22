@@ -37,7 +37,7 @@ class CorosApiTest {
         val json = """{"result":"0000","data":{"count":1,"totalPage":2,"pageNumber":1,"dataList":[""" +
             """{"labelId":"461428804292739075","name":"晨骑","sportType":200,""" +
             """"timestamp":1721280000000,"distance":42500.0}]}}"""
-        val items = parseCorosActivities(json)
+        val items = requireNotNull(parseCorosActivities(json))
         assertThat(items).hasSize(1)
         val a = items.first()
         assertThat(a.remoteActivityId).isEqualTo("461428804292739075")
@@ -54,14 +54,16 @@ class CorosApiTest {
         // 仅给 date=20241130（YYYYMMDD 整数），无 timestamp：仍能解出起始时间
         val json = """{"result":"0000","data":{"dataList":[""" +
             """{"labelId":"abc","sportType":201,"date":20241130}]}}"""
-        val items = parseCorosActivities(json)
+        val items = requireNotNull(parseCorosActivities(json))
         assertThat(items).hasSize(1)
         assertThat(items.first().startTimeEpochMs).isNotNull()
     }
 
     @Test
-    fun parseActivities_dataNull_returnsEmpty() {
-        assertThat(parseCorosActivities("""{"result":"0000","data":null}""")).isEmpty()
+    fun parseActivities_distinguishesValidEmptyFromMalformedResponse() {
+        assertThat(parseCorosActivities("""{"result":"0000","data":null}""")).isNull()
+        assertThat(parseCorosActivities("""{"result":"0000","data":{"dataList":[]}}""")).isEmpty()
+        assertThat(parseCorosActivities("""{"result":"9001","data":{"dataList":[]}}""")).isNull()
     }
 
     @Test

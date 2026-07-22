@@ -120,6 +120,10 @@ internal class CorosApiConnector(
                     else -> {
                         val text = resp.body?.string().orEmpty()
                         val all = parseCorosActivities(text)
+                            ?: return@use ConnectorResult.RetryableFailure(
+                                "COROS_INVALID_RESPONSE",
+                                "COROS 活动列表响应格式异常",
+                            )
                         val totalPage = parseCorosTotalPage(text)
                         // 仅保留窗口内活动；整页都被剔除说明已越过下界，停止翻页。
                         val items = all.filter { it.startTimeEpochMs == null || it.startTimeEpochMs >= sinceEpochMs }
@@ -179,10 +183,12 @@ internal class CorosApiConnector(
         }
     }
 
-    override suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy> {
-        val pair = primaryFile(activity)
+    override suspend fun uploadFit(
+        activity: CanonicalActivityEntity,
+        sourceVariant: ActivityVariantEntity,
+    ): ConnectorResult<RemoteCopy> {
+        val file = File(sourceVariant.localFilePath).takeIf { it.isFile }
             ?: return ConnectorResult.PermanentFailure("FILE_MISSING", "本地 FIT 文件不存在")
-        val (file, _) = pair
         if (file.length() <= 0) return ConnectorResult.PermanentFailure("FILE_EMPTY", "本地 FIT 文件为空")
         if (file.length() > MAX_FIT_BYTES) {
             return ConnectorResult.PermanentFailure("FILE_TOO_LARGE", "COROS 限制 FIT 不超过 ${MAX_FIT_BYTES / (1024 * 1024)} MB")
@@ -296,15 +302,6 @@ internal class CorosApiConnector(
         }.getOrElse {
             ConnectorResult.PermanentFailure("COROS_DOWNLOAD_INVALID", it.message ?: "下载的内容不是有效 FIT")
         }
-    }
-
-    private suspend fun primaryFile(activity: CanonicalActivityEntity): Pair<File, ActivityVariantEntity>? {
-        val variants = db.activityVariantDao().findByCanonical(activity.id)
-        val variant = activity.primaryVariantId?.let { id -> variants.firstOrNull { it.id == id } }
-            ?: variants.maxByOrNull { it.qualityScore ?: 0 }
-            ?: return null
-        val file = File(variant.localFilePath)
-        return if (file.isFile) file to variant else null
     }
 
     private fun isTrustedCorosHost(url: String): Boolean = runCatching {

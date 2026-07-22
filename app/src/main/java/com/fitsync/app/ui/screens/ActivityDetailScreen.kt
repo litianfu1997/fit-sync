@@ -33,7 +33,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,6 +45,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.widget.Toast
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
@@ -77,20 +77,32 @@ import java.util.Locale
 @Composable
 fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
     val app = FitSyncApp.instance
-    val activity by app.database.canonicalActivityDao().observeById(activityId).collectAsState(initial = null)
-    val variants by app.database.activityVariantDao().observeByCanonical(activityId).collectAsState(initial = emptyList())
-    val copies by app.database.platformCopyDao().observeByCanonical(activityId).collectAsState(initial = emptyList())
-    val jobs by app.database.deliveryJobDao().observeByCanonical(activityId).collectAsState(initial = emptyList())
-    val accounts by app.database.platformAccountDao().observeAll().collectAsState(initial = emptyList())
+    val activity by app.database.canonicalActivityDao().observeById(activityId)
+        .collectAsStateWithLifecycle(initialValue = null)
+    val variants by app.database.activityVariantDao().observeByCanonical(activityId)
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val copies by app.database.platformCopyDao().observeByCanonical(activityId)
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val jobs by app.database.deliveryJobDao().observeByCanonical(activityId)
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val accounts by app.database.platformAccountDao().observeAll()
+        .collectAsStateWithLifecycle(initialValue = emptyList())
     var actionMessage by remember { mutableStateOf<String?>(null) }
     var showDeleteConfirmation by remember { mutableStateOf(false) }
     var showMergeConfirmation by remember { mutableStateOf(false) }
     var isDeleting by remember { mutableStateOf(false) }
     var isMerging by remember { mutableStateOf(false) }
+    var backRequested by remember { mutableStateOf(false) }
     var reviewCandidate by remember { mutableStateOf<CanonicalActivityEntity?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val dateFormat = remember { SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.getDefault()) }
+    val navigateBackOnce = {
+        if (!backRequested) {
+            backRequested = true
+            onBack()
+        }
+    }
 
     LaunchedEffect(activity?.reviewCandidateCanonicalId, activity?.dedupStatus) {
         val candidateId = activity?.reviewCandidateCanonicalId
@@ -108,8 +120,8 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
     LaunchedEffect(activity) {
         if (activity != null) {
             hasObservedActivity = true
-        } else if (hasObservedActivity && !isDeleting) {
-            onBack()
+        } else if (hasObservedActivity && !isDeleting && !isMerging) {
+            navigateBackOnce()
         }
     }
 
@@ -131,17 +143,17 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                                 result.onSuccess { deletion ->
                                     showDeleteConfirmation = false
                                     when (deletion) {
-                                        ActivityDeletionResult.AlreadyDeleted -> onBack()
+                                        ActivityDeletionResult.AlreadyDeleted -> navigateBackOnce()
                                         is ActivityDeletionResult.Deleted -> {
                                             if (deletion.failedPaths.isEmpty()) {
-                                                onBack()
+                                                navigateBackOnce()
                                             } else {
                                                 Toast.makeText(
                                                     context,
                                                     "活动已删除，但有 ${deletion.failedPaths.size} 个残留文件未能清理",
                                                     Toast.LENGTH_LONG,
                                                 ).show()
-                                                onBack()
+                                                navigateBackOnce()
                                             }
                                         }
                                     }
@@ -182,7 +194,6 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                         scope.launch(Dispatchers.IO) {
                             val result = runCatching { app.activityMergeService.mergeIntoCandidate(activityId) }
                             withContext(Dispatchers.Main) {
-                                isMerging = false
                                 showMergeConfirmation = false
                                 result.onSuccess { merge ->
                                     when (merge) {
@@ -192,7 +203,7 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                                                 "已合并，迁移 ${merge.movedVariants} 个副本",
                                                 Toast.LENGTH_SHORT,
                                             ).show()
-                                            onBack()
+                                            navigateBackOnce()
                                         }
                                         MergeResult.CandidateMissing ->
                                             actionMessage = "候选活动已不存在"
@@ -204,6 +215,7 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                                 }.onFailure {
                                     actionMessage = "合并失败：${it.message ?: "请稍后重试"}"
                                 }
+                                isMerging = false
                             }
                         }
                     },
@@ -218,9 +230,9 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
             title = "活动详情",
-            subtitle = activity?.title ?: activity?.sportType?.let(::sportLabel),
+            subtitle = activity?.let { dateFormat.format(Date(it.startTimeEpochMs)) },
             navigationIcon = {
-                IconButton(onClick = onBack) {
+                IconButton(onClick = navigateBackOnce) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                 }
             },
@@ -244,12 +256,19 @@ fun ActivityDetailScreen(activityId: Long, onBack: () -> Unit) {
                             busy = isMerging,
                             onMerge = { showMergeConfirmation = true },
                             onKeepSeparate = {
+                                isMerging = true
                                 scope.launch(Dispatchers.IO) {
                                     val ok = runCatching {
                                         app.activityMergeService.keepSeparate(activityId)
                                     }.getOrDefault(false)
                                     withContext(Dispatchers.Main) {
-                                        actionMessage = if (ok) "已标记为保持分离" else "操作失败"
+                                        isMerging = false
+                                        if (ok) {
+                                            Toast.makeText(context, "已保持分离", Toast.LENGTH_SHORT).show()
+                                            navigateBackOnce()
+                                        } else {
+                                            actionMessage = "操作失败"
+                                        }
                                     }
                                 }
                             },
@@ -520,7 +539,7 @@ private fun ActivitySummary(activity: CanonicalActivityEntity, dateFormat: Simpl
                 ) { Icon(sportIcon(activity.sportType), contentDescription = null, tint = FitOrangeSoft) }
                 Column {
                     Text(
-                        activity.title?.takeIf { it.isNotBlank() } ?: sportLabel(activity.sportType),
+                        activitySummaryTitle(activity),
                         style = MaterialTheme.typography.titleLarge,
                         color = Color.White,
                     )
@@ -539,6 +558,15 @@ private fun ActivitySummary(activity: CanonicalActivityEntity, dateFormat: Simpl
         }
     }
 }
+
+private val generatedActivityTitle = Regex(
+    """^\d{4}-\d{2}-\d{2}\s+(凌晨|上午|中午|下午|晚上)\s+.+$""",
+)
+
+private fun activitySummaryTitle(activity: CanonicalActivityEntity): String =
+    activity.title
+        ?.takeIf { it.isNotBlank() && !generatedActivityTitle.matches(it) }
+        ?: sportLabel(activity.sportType)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable

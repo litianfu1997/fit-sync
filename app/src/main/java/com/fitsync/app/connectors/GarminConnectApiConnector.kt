@@ -82,6 +82,10 @@ internal class GarminConnectApiConnector(
                     !resp.isSuccessful -> failureStatus(resp)
                     else -> {
                         val all = parseGarminActivities(resp.body?.string().orEmpty())
+                            ?: return@use ConnectorResult.RetryableFailure(
+                                "GARMIN_INVALID_RESPONSE",
+                                "Garmin 活动列表响应格式异常",
+                            )
                         // Garmin 默认按时间倒序：只保留窗口内活动；整页都被剔除说明已越过下界，停止翻页。
                         val items = all.filter { it.startTimeEpochMs == null || it.startTimeEpochMs >= sinceEpochMs }
                         val hasMore = all.size >= LIST_PAGE_SIZE && items.isNotEmpty()
@@ -112,10 +116,12 @@ internal class GarminConnectApiConnector(
         }.getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "Garmin FIT 下载失败") }
     }
 
-    override suspend fun uploadFit(activity: CanonicalActivityEntity): ConnectorResult<RemoteCopy> {
-        val pair = primaryFile(activity)
+    override suspend fun uploadFit(
+        activity: CanonicalActivityEntity,
+        sourceVariant: ActivityVariantEntity,
+    ): ConnectorResult<RemoteCopy> {
+        val file = File(sourceVariant.localFilePath).takeIf { it.isFile }
             ?: return ConnectorResult.PermanentFailure("FILE_MISSING", "本地 FIT 文件不存在")
-        val (file, _) = pair
         if (file.length() <= 0) return ConnectorResult.PermanentFailure("FILE_EMPTY", "本地 FIT 文件为空")
         if (file.length() > GARMIN_MAX_FIT_BYTES) {
             return ConnectorResult.PermanentFailure("FILE_TOO_LARGE", "Garmin 限制 FIT 不超过 25 MB")
@@ -159,8 +165,7 @@ internal class GarminConnectApiConnector(
         return when {
             response.code in 200..299 -> interpretSuccess(body, response, cookieHeader, csrf)
             response.code == 409 -> ConnectorResult.Duplicate(
-                parseGarminImportState(body)?.let { remoteCopy(it.remoteActivityId, true) }
-                    ?: RemoteCopy("", duplicate = true),
+                parseGarminImportState(body)?.let { garminRemoteCopyOrNull(it.remoteActivityId, true) },
             )
             isGarminLoginResponse(response.code, response.header("Location")) -> requiresLogin()
             response.code == 403 -> garminForbiddenFailure()
@@ -183,8 +188,10 @@ internal class GarminConnectApiConnector(
         val state = parseGarminImportState(body)
         if (state != null && state.isFinal) {
             return when {
-                state.duplicate -> ConnectorResult.Duplicate(remoteCopy(state.remoteActivityId, true))
-                state.success -> ConnectorResult.Success(remoteCopy(state.remoteActivityId, false))
+                state.duplicate -> ConnectorResult.Duplicate(garminRemoteCopyOrNull(state.remoteActivityId, true))
+                state.success -> garminRemoteCopyOrNull(state.remoteActivityId, false)
+                    ?.let { ConnectorResult.Success(it) }
+                    ?: ConnectorResult.RetryableFailure("GARMIN_ACTIVITY_ID_MISSING", "Garmin 未返回活动 ID")
                 else -> ConnectorResult.RequiresUserAction(
                     PlatformWebConfigs.get(platform).uploadUrl,
                     "Garmin 拒绝导入该文件，请在网页中确认后重试",
@@ -225,8 +232,10 @@ internal class GarminConnectApiConnector(
             if (forbidden) return garminForbiddenFailure()
             if (state?.isFinal == true) {
                 return when {
-                    state.duplicate -> ConnectorResult.Duplicate(remoteCopy(state.remoteActivityId, true))
-                    state.success -> ConnectorResult.Success(remoteCopy(state.remoteActivityId, false))
+                    state.duplicate -> ConnectorResult.Duplicate(garminRemoteCopyOrNull(state.remoteActivityId, true))
+                    state.success -> garminRemoteCopyOrNull(state.remoteActivityId, false)
+                        ?.let { ConnectorResult.Success(it) }
+                        ?: ConnectorResult.RetryableFailure("GARMIN_ACTIVITY_ID_MISSING", "Garmin 未返回活动 ID")
                     else -> ConnectorResult.RequiresUserAction(
                         PlatformWebConfigs.get(platform).uploadUrl,
                         "Garmin 拒绝导入该文件，请在网页中确认后重试",
@@ -246,15 +255,6 @@ internal class GarminConnectApiConnector(
         }.getOrElse {
             ConnectorResult.PermanentFailure("GARMIN_DOWNLOAD_INVALID", it.message ?: "下载的内容不是有效 FIT")
         }
-    }
-
-    private fun remoteCopy(remoteActivityId: String?, duplicate: Boolean): RemoteCopy {
-        val id = remoteActivityId?.takeIf { it.isNotBlank() }
-        return RemoteCopy(
-            remoteActivityId = id ?: "",
-            remoteUrl = id?.let { "https://connect.garmin.cn/modern/activity/$it" },
-            duplicate = duplicate,
-        )
     }
 
     private fun sessionCookie(): String? = selectGarminApiCookie(
@@ -281,15 +281,6 @@ internal class GarminConnectApiConnector(
         client.newCall(request).execute()
     }
 
-    private suspend fun primaryFile(activity: CanonicalActivityEntity): Pair<File, ActivityVariantEntity>? {
-        val variants = db.activityVariantDao().findByCanonical(activity.id)
-        val variant = activity.primaryVariantId?.let { id -> variants.firstOrNull { it.id == id } }
-            ?: variants.maxByOrNull { it.qualityScore ?: 0 }
-            ?: return null
-        val file = File(variant.localFilePath)
-        return if (file.isFile) file to variant else null
-    }
-
     companion object {
         private const val GARMIN_GC_API_BASE = "https://connect.garmin.cn/gc-api"
         private const val LIST_PAGE_SIZE = 20
@@ -307,6 +298,15 @@ internal class GarminConnectApiConnector(
             .followRedirects(false)
             .build()
     }
+}
+
+internal fun garminRemoteCopyOrNull(remoteActivityId: String?, duplicate: Boolean): RemoteCopy? {
+    val id = remoteActivityId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return RemoteCopy(
+        remoteActivityId = id,
+        remoteUrl = "https://connect.garmin.cn/modern/activity/$id",
+        duplicate = duplicate,
+    )
 }
 
 private val OCTET_STREAM = "application/octet-stream".toMediaType()
