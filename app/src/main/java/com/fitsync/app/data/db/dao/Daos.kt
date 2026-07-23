@@ -472,6 +472,20 @@ interface DeliveryJobDao {
 
     @Query("DELETE FROM delivery_job WHERE requestedByRuleId = :ruleId")
     suspend fun deleteByRequestedRule(ruleId: Long)
+
+    @Query("DELETE FROM delivery_job WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>)
+
+    @Query("""
+        UPDATE delivery_job 
+        SET status = 'PENDING', 
+            nextRetryAtEpochMs = NULL, 
+            errorCode = NULL, 
+            errorMessage = NULL, 
+            updatedAtEpochMs = :now 
+        WHERE id IN (:ids)
+    """)
+    suspend fun retryByIds(ids: List<Long>, now: Long = System.currentTimeMillis())
 }
 
 @Dao

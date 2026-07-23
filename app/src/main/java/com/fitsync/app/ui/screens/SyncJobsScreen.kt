@@ -5,9 +5,11 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -17,16 +19,25 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+
+import androidx.compose.material3.AlertDialog
 import androidx.paging.LoadState
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
@@ -45,6 +56,7 @@ import com.fitsync.app.ui.components.deliveryStatusTone
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 enum class SyncJobFilter(
     val routeValue: String,
@@ -118,13 +130,45 @@ fun SyncJobsScreen(
     val jobs = pager.flow.collectAsLazyPagingItems()
     val dateFormat = remember { SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.getDefault()) }
 
+    // 批量操作的选择状态
+    var selectionMode by remember { mutableStateOf(false) }
+    val selectedIds = remember { mutableStateListOf<Long>() }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
+
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
-            title = filter.title,
-            subtitle = "${jobs.itemCount} 条已加载",
+            title = if (selectionMode) "已选中 ${selectedIds.size} 项" else filter.title,
+            subtitle = if (selectionMode) null else "${jobs.itemCount} 条已加载",
             navigationIcon = {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                }
+            },
+            actions = {
+                if (selectionMode) {
+                    Row {
+                        TextButton(onClick = {
+                            selectionMode = false
+                            selectedIds.clear()
+                        }) { Text("取消") }
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(onClick = { showDeleteDialog = true }) {
+                            Text("批量删除")
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(onClick = {
+                            if (selectedIds.isNotEmpty()) {
+                                coroutineScope.launch {
+                                    FitSyncApp.instance.syncCoordinator.retryJobs(selectedIds.toList())
+                                    selectionMode = false
+                                    selectedIds.clear()
+                                }
+                            }
+                        }) {
+                            Text("批量重试")
+                        }
+                    }
                 }
             },
         )
@@ -152,10 +196,42 @@ fun SyncJobsScreen(
                             job = job,
                             dateFormat = dateFormat,
                             onOpenActivity = onOpenActivity,
+                            isSelectionMode = selectionMode,
+                            selectedIds = selectedIds,
+                            onToggleSelect = { id ->
+                                if (selectionMode) {
+                                    if (selectedIds.contains(id)) selectedIds.remove(id) else selectedIds.add(id)
+                                } else {
+                                    onOpenActivity(job.canonicalActivityId)
+                                }
+                            },
                         )
                     }
                 }
             }
+        }
+
+        if (showDeleteDialog && selectedIds.isNotEmpty()) {
+            AlertDialog(
+                onDismissRequest = { showDeleteDialog = false },
+                title = { Text("删除选中任务？") },
+                text = {
+                    Text("确定要删除 ${selectedIds.size} 个同步任务吗？此操作不可恢复，会同时清除关联的平台拷贝和导入记录。")
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        coroutineScope.launch {
+                            FitSyncApp.instance.syncCoordinator.deleteJobs(selectedIds.toList())
+                            showDeleteDialog = false
+                            selectionMode = false
+                            selectedIds.clear()
+                        }
+                    }) { Text("删除") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDeleteDialog = false }) { Text("取消") }
+                },
+            )
         }
     }
 }
@@ -165,9 +241,18 @@ private fun SyncJobCard(
     job: SyncJobListItem,
     dateFormat: SimpleDateFormat,
     onOpenActivity: (Long) -> Unit,
+    isSelectionMode: Boolean = false,
+    selectedIds: Collection<Long> = emptySet(),
+    onToggleSelect: (Long) -> Unit = {},
 ) {
+    val cardModifier = if (isSelectionMode) {
+        Modifier.fillMaxWidth().clickable { onToggleSelect(job.canonicalActivityId) }
+    } else {
+        Modifier.fillMaxWidth().clickable { onOpenActivity(job.canonicalActivityId) }
+    }
+
     Card(
-        modifier = Modifier.fillMaxWidth().clickable { onOpenActivity(job.canonicalActivityId) },
+        modifier = cardModifier,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
     ) {
@@ -178,7 +263,15 @@ private fun SyncJobCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            job.destinationPlatform?.let { PlatformAvatar(it, 44.dp) }
+            if (isSelectionMode) {
+                Checkbox(
+                    checked = selectedIds.contains(job.canonicalActivityId),
+                    onCheckedChange = { onToggleSelect(job.canonicalActivityId) },
+                    modifier = Modifier.padding(start = 8.dp, end = 12.dp),
+                )
+            } else {
+                job.destinationPlatform?.let { PlatformAvatar(it, 44.dp) }
+            }
             Column(Modifier.weight(1f)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -212,11 +305,13 @@ private fun SyncJobCard(
                     maxLines = 2,
                 )
             }
-            Icon(
-                Icons.Default.ChevronRight,
-                contentDescription = "查看活动详情",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (!isSelectionMode) {
+                Icon(
+                    Icons.Default.ChevronRight,
+                    contentDescription = "查看活动详情",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
     }
 }

@@ -451,6 +451,15 @@ class SyncCoordinator(
         )
     }
 
+    suspend fun retryJobs(ids: List<Long>) = mutationGate.withLock {
+        val now = System.currentTimeMillis()
+        db.deliveryJobDao().retryByIds(ids, now)
+    }
+
+    suspend fun deleteJobs(ids: List<Long>) = mutationGate.withLock {
+        db.deliveryJobDao().deleteByIds(ids)
+    }
+
     suspend fun enqueueManual(activityId: Long, destinationAccountId: Long): Long = mutationGate.withLock {
         if (db.canonicalActivityDao().getById(activityId) == null) return@withLock -1L
         planner.enqueueManual(activityId, destinationAccountId)
