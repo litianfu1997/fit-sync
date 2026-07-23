@@ -14,7 +14,7 @@ FitSync 是一个**纯 Android 应用**（无自建服务器），用于在迈�
 
 ```bash
 export JAVA_HOME="D:/jdk-21"
-export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"   # 或对应的 SDK 路径
+export ANDROID_HOME="D:/Android/Sdk"   # 必须用这套完整 SDK（见下「在模拟器上运行」）
 ./gradlew :app:assembleDebug
 ```
 
@@ -31,6 +31,26 @@ export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"   # 或对应的 SDK 路径
 测试用 JUnit4 + Google Truth + kotlinx-coroutines-test。Room 迁移测试（`Migration1To2Test`）在 `androidTest` 下。
 
 **Release 签名**：`keystore.properties`（gitignored）提供 `storeFile/storePassword/keyAlias/keyPassword`，由 `app/build.gradle.kts` 在构建期读取；文件缺失会导致 release 构建报错，debug 不受影响。keystore 文件放在仓库根的 `keystore/`（同样被忽略）。
+
+### 在模拟器上运行
+
+本机装了两套 SDK，**只有 `D:\Android\Sdk` 是完整的**（含 platform-tools、emulator、system-image 内核文件 `kernel-ranchu` 等）；机器的 `ANDROID_HOME`/`ANDROID_SDK_ROOT` 已指向它。`…\AppData\Local\Android\Sdk` 那套不完整，system-image 目录只有 `.installer/` 元数据——**不要**把 `ANDROID_HOME` 覆盖成它，否则启动模拟器会报 `missing a kernel file "kernel-ranchu"` 然后退出。
+
+AVD 存放在 `D:\Android\Avd`（`ANDROID_AVD_HOME=D:\Android\Avd`，非默认的 `~/.android/avd`），常用 AVD：`FitSync_API_34`、`Pixel_8_API_36`。
+
+```bash
+# 启动模拟器（git bash 里直接跑 .exe）
+"D:/Android/Sdk/emulator/emulator.exe" -avd FitSync_API_34 -no-snapshot-load
+
+# 等开机完成（返回 1 即就绪）
+"D:/Android/Sdk/platform-tools/adb.exe" shell getprop sys.boot_completed
+
+# 安装并拉起（applicationId=com.fitsync.app，启动 Activity=MainActivity）
+"D:/Android/Sdk/platform-tools/adb.exe" install -r app/build/outputs/apk/debug/app-debug.apk
+"D:/Android/Sdk/platform-tools/adb.exe" shell monkey -p com.fitsync.app -c android.intent.category.LAUNCHER 1
+```
+
+git bash 下 `adb shell … /sdcard/xxx` 会被 MSYS 路径转换破坏（变成 `D:/Git/sdcard/...`）；截图改用 `adb exec-out screencap -p > 本地.png`，或先 `export MSYS_NO_PATHCONV=1`。
 
 ## 架构（必读：跨多文件的大图景）
 
