@@ -1,7 +1,8 @@
 package com.fitsync.app.ui.screens
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,10 +14,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -34,6 +39,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 
@@ -45,6 +51,7 @@ import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.paging.compose.itemKey
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.data.db.dao.SyncJobListItem
+import com.fitsync.app.sync.SyncScheduler
 import com.fitsync.app.data.db.entity.DeliveryJobEntity
 import com.fitsync.app.domain.model.DeliveryJobStatus
 import com.fitsync.app.ui.components.AppTopBar
@@ -135,6 +142,7 @@ fun SyncJobsScreen(
     val selectedIds = remember { mutableStateListOf<Long>() }
     var showDeleteDialog by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
@@ -148,26 +156,31 @@ fun SyncJobsScreen(
             actions = {
                 if (selectionMode) {
                     Row {
-                        TextButton(onClick = {
+                        IconButton(onClick = {
                             selectionMode = false
                             selectedIds.clear()
-                        }) { Text("取消") }
-                        Spacer(Modifier.width(8.dp))
-                        TextButton(onClick = { showDeleteDialog = true }) {
-                            Text("批量删除")
+                        }) { Icon(Icons.Default.Close, contentDescription = "取消") }
+                        IconButton(onClick = { showDeleteDialog = true }) {
+                            Icon(Icons.Default.Delete, contentDescription = "批量删除")
                         }
-                        Spacer(Modifier.width(8.dp))
-                        TextButton(onClick = {
-                            if (selectedIds.isNotEmpty()) {
-                                coroutineScope.launch {
-                                    FitSyncApp.instance.syncCoordinator.retryJobs(selectedIds.toList())
-                                    selectionMode = false
-                                    selectedIds.clear()
+                        if (filter != SyncJobFilter.COMPLETED) {
+                            IconButton(onClick = {
+                                if (selectedIds.isNotEmpty()) {
+                                    coroutineScope.launch {
+                                        FitSyncApp.instance.syncCoordinator.retryJobs(selectedIds.toList())
+                                        SyncScheduler.enqueueDeliveryNow(context)
+                                        selectionMode = false
+                                        selectedIds.clear()
+                                    }
                                 }
+                            }) {
+                                Icon(Icons.Default.Refresh, contentDescription = "批量重试")
                             }
-                        }) {
-                            Text("批量重试")
                         }
+                    }
+                } else {
+                    IconButton(onClick = { selectionMode = true }) {
+                        Icon(Icons.Default.Checklist, contentDescription = "多选")
                     }
                 }
             },
@@ -199,11 +212,11 @@ fun SyncJobsScreen(
                             isSelectionMode = selectionMode,
                             selectedIds = selectedIds,
                             onToggleSelect = { id ->
-                                if (selectionMode) {
-                                    if (selectedIds.contains(id)) selectedIds.remove(id) else selectedIds.add(id)
-                                } else {
-                                    onOpenActivity(job.canonicalActivityId)
-                                }
+                                if (selectedIds.contains(id)) selectedIds.remove(id) else selectedIds.add(id)
+                            },
+                            onLongSelect = { id ->
+                                selectionMode = true
+                                if (!selectedIds.contains(id)) selectedIds.add(id)
                             },
                         )
                     }
@@ -216,7 +229,7 @@ fun SyncJobsScreen(
                 onDismissRequest = { showDeleteDialog = false },
                 title = { Text("删除选中任务？") },
                 text = {
-                    Text("确定要删除 ${selectedIds.size} 个同步任务吗？此操作不可恢复，会同时清除关联的平台拷贝和导入记录。")
+                    Text("确定要删除选中的 ${selectedIds.size} 个同步任务吗？此操作只会删除这些同步任务记录，不会删除已上传到平台的文件，也不会删除本地活动。")
                 },
                 confirmButton = {
                     TextButton(onClick = {
@@ -236,6 +249,7 @@ fun SyncJobsScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SyncJobCard(
     job: SyncJobListItem,
@@ -244,12 +258,17 @@ private fun SyncJobCard(
     isSelectionMode: Boolean = false,
     selectedIds: Collection<Long> = emptySet(),
     onToggleSelect: (Long) -> Unit = {},
+    onLongSelect: (Long) -> Unit = {},
 ) {
-    val cardModifier = if (isSelectionMode) {
-        Modifier.fillMaxWidth().clickable { onToggleSelect(job.canonicalActivityId) }
-    } else {
-        Modifier.fillMaxWidth().clickable { onOpenActivity(job.canonicalActivityId) }
-    }
+    val cardModifier = Modifier
+        .fillMaxWidth()
+        .combinedClickable(
+            onClick = {
+                if (isSelectionMode) onToggleSelect(job.id)
+                else onOpenActivity(job.canonicalActivityId)
+            },
+            onLongClick = { onLongSelect(job.id) },
+        )
 
     Card(
         modifier = cardModifier,
@@ -265,8 +284,8 @@ private fun SyncJobCard(
         ) {
             if (isSelectionMode) {
                 Checkbox(
-                    checked = selectedIds.contains(job.canonicalActivityId),
-                    onCheckedChange = { onToggleSelect(job.canonicalActivityId) },
+                    checked = selectedIds.contains(job.id),
+                    onCheckedChange = { onToggleSelect(job.id) },
                     modifier = Modifier.padding(start = 8.dp, end = 12.dp),
                 )
             } else {
