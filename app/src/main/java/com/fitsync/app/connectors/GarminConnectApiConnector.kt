@@ -4,6 +4,7 @@ import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.ActivityVariantEntity
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
 import com.fitsync.app.data.file.FitFileStore
+import com.fitsync.app.domain.model.AccountStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SessionState
 import com.fitsync.app.web.PlatformWebConfigs
@@ -43,7 +44,7 @@ internal class GarminConnectApiConnector(
     override val platform = Platform.GARMIN
 
     override suspend fun validateSession(): SessionState {
-        val cookie = sessionCookie() ?: return SessionState.NOT_CONNECTED
+        val cookie = sessionCookie("VALIDATE") ?: return SessionState.NOT_CONNECTED
         val request = buildGcApiRequest(
             "$GARMIN_GC_API_BASE/activitylist-service/activities/search/activities?start=0&limit=1",
             cookie,
@@ -70,7 +71,7 @@ internal class GarminConnectApiConnector(
         sinceEpochMs: Long,
         cursor: SyncCursor?,
     ): ConnectorResult<ActivityPage> {
-        val cookie = sessionCookie() ?: return requiresLogin()
+        val cookie = sessionCookie("LIST") ?: return cookieMissingResult("LIST")
         val csrf = sessionManager.garminCsrf()
         val start = cursor?.raw?.toIntOrNull()?.coerceAtLeast(0) ?: 0
         val url = "$GARMIN_GC_API_BASE/activitylist-service/activities/search/activities" +
@@ -78,8 +79,8 @@ internal class GarminConnectApiConnector(
         return runCatching {
             execute(buildGcApiRequest(url, cookie, csrf, null)).use { resp ->
                 when {
-                    isGarminLoginResponse(resp.code, resp.header("Location")) -> requiresLogin()
-                    !resp.isSuccessful -> failureStatus(resp)
+                    isGarminLoginResponse(resp.code, resp.header("Location")) -> requiresLogin("LIST")
+                    !resp.isSuccessful -> failureStatus(resp, "LIST")
                     else -> {
                         val all = parseGarminActivities(resp.body?.string().orEmpty())
                             ?: return@use ConnectorResult.RetryableFailure(
@@ -99,17 +100,17 @@ internal class GarminConnectApiConnector(
     }
 
     override suspend fun downloadFit(activity: RemoteActivitySummary): ConnectorResult<FitFile> {
-        val cookie = sessionCookie() ?: return requiresLogin()
+        val cookie = sessionCookie("DOWNLOAD") ?: return cookieMissingResult("DOWNLOAD")
         val csrf = sessionManager.garminCsrf()
         val url = "$GARMIN_GC_API_BASE/download-service/files/activity/${activity.remoteActivityId}/fit"
         return runCatching {
             execute(buildGcApiRequest(url, cookie, csrf, null)).use { resp ->
                 when {
-                    isGarminLoginResponse(resp.code, resp.header("Location")) -> requiresLogin()
+                    isGarminLoginResponse(resp.code, resp.header("Location")) -> requiresLogin("DOWNLOAD")
                     resp.code == 404 -> ConnectorResult.PermanentFailure(
                         "GARMIN_FIT_NOT_FOUND", "Garmin 未保留该活动的原始 FIT",
                     )
-                    !resp.isSuccessful -> failureStatus(resp)
+                    !resp.isSuccessful -> failureStatus(resp, "DOWNLOAD")
                     else -> storeFit(resp, "garmin_${activity.remoteActivityId}.fit")
                 }
             }
@@ -135,7 +136,7 @@ internal class GarminConnectApiConnector(
     }
 
     private suspend fun postUpload(multipart: MultipartBody): ConnectorResult<RemoteCopy> {
-        val cookie = sessionCookie() ?: return requiresLogin()
+        val cookie = sessionCookie("UPLOAD") ?: return cookieMissingResult("UPLOAD")
         val csrf = sessionManager.garminCsrf()
         val resp = execute(buildGcApiRequest(garminUploadUrl(sessionManager.garminDomain()), cookie, csrf, multipart))
         return resp.use { handleUploadResponse(it, cookie, csrf) }
@@ -167,7 +168,7 @@ internal class GarminConnectApiConnector(
             response.code == 409 -> ConnectorResult.Duplicate(
                 parseGarminImportState(body)?.let { garminRemoteCopyOrNull(it.remoteActivityId, true) },
             )
-            isGarminLoginResponse(response.code, response.header("Location")) -> requiresLogin()
+            isGarminLoginResponse(response.code, response.header("Location")) -> requiresLogin("UPLOAD")
             response.code == 403 -> garminForbiddenFailure()
             response.code == 429 || response.code >= 500 -> ConnectorResult.RetryableFailure(
                 response.code.toString(), "Garmin 暂时不可用（HTTP ${response.code}）",
@@ -228,7 +229,7 @@ internal class GarminConnectApiConnector(
                     parseGarminImportState(resp.body?.string().orEmpty())
                 }
             }.getOrNull()
-            if (authExpired) return requiresLogin()
+            if (authExpired) return requiresLogin("POLL")
             if (forbidden) return garminForbiddenFailure()
             if (state?.isFinal == true) {
                 return when {
@@ -257,21 +258,91 @@ internal class GarminConnectApiConnector(
         }
     }
 
-    private fun sessionCookie(): String? = selectGarminApiCookie(
-        liveCookie = sessionManager.cookieHeader(platform),
-        storedCookie = sessionManager.garminCookieHeader(),
-        storedJwt = sessionManager.garminJwtWeb(),
-    )
-
-    private fun requiresLogin(): ConnectorResult<Nothing> =
-        ConnectorResult.RequiresLogin(loginUrl, "Garmin 登录已失效，请重新登录")
-
-    private fun failureStatus(resp: Response): ConnectorResult<Nothing> = when (resp.code) {
-        403 -> garminForbiddenFailure()
-        429, in 500..599 -> ConnectorResult.RetryableFailure(
-            resp.code.toString(), "Garmin 暂时不可用（HTTP ${resp.code}）",
+    private fun sessionCookie(operation: String): String? {
+        val live = sessionManager.cookieHeader(platform)
+        val stored = sessionManager.garminCookieHeader()
+        val jwt = sessionManager.garminJwtWeb()
+        val liveHasJwt = cookieValue(live, "JWT_WEB") != null
+        val storedHasJwt = cookieValue(stored, "JWT_WEB") != null
+        val jwtPresent = !jwt.isNullOrBlank()
+        val source = when {
+            liveHasJwt -> "LIVE"
+            storedHasJwt -> "STORED"
+            jwtPresent -> "JWT"
+            else -> "NONE"
+        }
+        GarminAuthDiagnostics.record(
+            GarminAuthDiagnostics.Event(
+                timestampEpochMs = System.currentTimeMillis(),
+                operation = operation,
+                phase = "COOKIE_SELECT",
+                outcome = if (source == "NONE") "MISS" else GarminAuthDiagnostics.OUTCOME_OK,
+                cookieSource = source,
+            ),
         )
-        else -> ConnectorResult.PermanentFailure(resp.code.toString(), "Garmin 请求失败（HTTP ${resp.code}）")
+        return selectGarminApiCookie(live, stored, jwt)
+    }
+
+    private fun requiresLogin(operation: String = "OTHER"): ConnectorResult<Nothing> {
+        GarminAuthDiagnostics.record(
+            GarminAuthDiagnostics.Event(
+                timestampEpochMs = System.currentTimeMillis(),
+                operation = operation,
+                phase = "DECISION",
+                outcome = GarminAuthDiagnostics.OUTCOME_REQUIRES_LOGIN,
+            ),
+        )
+        return ConnectorResult.RequiresLogin(loginUrl, "Garmin 登录已失效，请重新登录")
+    }
+
+    /**
+     * Cookie 三级回退都读不到时的容错：若数据库里有 Garmin 账号行（说明登录过），降级为可重试失败，
+     * 让 WorkManager 下一轮自动重试，而不是立即误报「登录已失效」；从未登录过才真正要求登录。
+     * 用账号行而非 hasSession() 判定——后者与 sessionCookie() 同源（secureStore / WebView cookie），
+     * 后台进程里会一起失明，不可靠。
+     */
+    private suspend fun cookieMissingResult(operation: String): ConnectorResult<Nothing> {
+        val account = db.platformAccountDao().getByPlatform(platform)
+        val hasPersistedAccount = account != null && account.status != AccountStatus.DISABLED
+        GarminAuthDiagnostics.record(
+            GarminAuthDiagnostics.Event(
+                timestampEpochMs = System.currentTimeMillis(),
+                operation = operation,
+                phase = "COOKIE_MISSING",
+                outcome = if (hasPersistedAccount) {
+                    GarminAuthDiagnostics.OUTCOME_RETRYABLE
+                } else {
+                    GarminAuthDiagnostics.OUTCOME_REQUIRES_LOGIN
+                },
+                cookieSource = "NONE",
+                hadPersistedAccount = hasPersistedAccount,
+            ),
+        )
+        return garminCookieMissingResult(hasPersistedAccount, loginUrl)
+    }
+
+    private fun failureStatus(resp: Response, operation: String = "OTHER"): ConnectorResult<Nothing> {
+        val outcome = when (resp.code) {
+            403 -> GarminAuthDiagnostics.OUTCOME_RETRYABLE
+            429, in 500..599 -> GarminAuthDiagnostics.OUTCOME_RETRYABLE
+            else -> GarminAuthDiagnostics.OUTCOME_PERMANENT_FAIL
+        }
+        GarminAuthDiagnostics.record(
+            GarminAuthDiagnostics.Event(
+                timestampEpochMs = System.currentTimeMillis(),
+                operation = operation,
+                phase = "DECISION",
+                outcome = outcome,
+                httpCode = resp.code,
+            ),
+        )
+        return when (resp.code) {
+            403 -> garminForbiddenFailure()
+            429, in 500..599 -> ConnectorResult.RetryableFailure(
+                resp.code.toString(), "Garmin 暂时不可用（HTTP ${resp.code}）",
+            )
+            else -> ConnectorResult.PermanentFailure(resp.code.toString(), "Garmin 请求失败（HTTP ${resp.code}）")
+        }
     }
 
     private val loginUrl: String
@@ -296,6 +367,7 @@ internal class GarminConnectApiConnector(
             .readTimeout(90, TimeUnit.SECONDS)
             .writeTimeout(90, TimeUnit.SECONDS)
             .followRedirects(false)
+            .addInterceptor(GarminAuthDiagnosticsInterceptor())
             .build()
     }
 }
@@ -350,6 +422,17 @@ internal fun isGarminLoginResponse(code: Int, location: String?): Boolean {
         host.endsWith("sso.garmin.cn") || path.contains("/signin") || path.contains("/portal/sso")
     }.getOrDefault(false)
 }
+
+/**
+ * Cookie 读不到时的判定：[hasPersistedAccount] = true（数据库里有 Garmin 账号，说明登录过）
+ * → 可重试失败，避免一次读取抖动就误报「登录已失效」；否则 → 要求登录。
+ */
+internal fun garminCookieMissingResult(hasPersistedAccount: Boolean, loginUrl: String): ConnectorResult<Nothing> =
+    if (hasPersistedAccount) {
+        ConnectorResult.RetryableFailure("GARMIN_COOKIE_UNREADABLE", "Garmin 会话凭据暂时读取失败，稍后会自动重试")
+    } else {
+        ConnectorResult.RequiresLogin(loginUrl, "Garmin 尚未登录，请先完成登录")
+    }
 
 private fun garminForbiddenFailure(): ConnectorResult.RetryableFailure =
     ConnectorResult.RetryableFailure(

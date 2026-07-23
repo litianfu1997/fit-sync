@@ -12,6 +12,7 @@ import com.fitsync.app.data.repo.FitStorageJanitor
 import com.fitsync.app.data.repo.ImportService
 import com.fitsync.app.data.repo.PlatformAccountRepository
 import com.fitsync.app.connectors.ConnectorRegistry
+import com.fitsync.app.connectors.GarminAuthDiagnostics
 import com.fitsync.app.fit.FitEngine
 import com.fitsync.app.notification.SyncNotificationManager
 import com.fitsync.app.security.SecureSessionStore
@@ -117,6 +118,7 @@ class FitSyncApp : Application(), Configuration.Provider {
         Trace.beginSection("FitSync:app_onCreate")
         try {
             instance = this
+            GarminAuthDiagnostics.init(this)
         } finally {
             Trace.endSection()
         }

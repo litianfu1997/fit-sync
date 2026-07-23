@@ -184,4 +184,29 @@ class GarminConnectorTest {
         assertThat(garminStatusApiUrl("https://example.org/activity/status/123/abc")).isNull()
         assertThat(garminStatusApiUrl("http://connectapi.garmin.com/activity/status/123")).isNull()
     }
+
+    @Test
+    fun cookieMissing_returnsRetryableFailureWhenAccountPreviouslyConnected() {
+        val r = garminCookieMissingResult(hasPersistedAccount = true, loginUrl = "https://connect.garmin.cn")
+        assertThat(r).isInstanceOf(ConnectorResult.RetryableFailure::class.java)
+        assertThat((r as ConnectorResult.RetryableFailure).code).isEqualTo("GARMIN_COOKIE_UNREADABLE")
+    }
+
+    @Test
+    fun cookieMissing_returnsRequiresLoginWhenNeverConnected() {
+        val r = garminCookieMissingResult(hasPersistedAccount = false, loginUrl = "https://connect.garmin.cn")
+        assertThat(r).isInstanceOf(ConnectorResult.RequiresLogin::class.java)
+        assertThat((r as ConnectorResult.RequiresLogin).url).isEqualTo("https://connect.garmin.cn")
+    }
+
+    @Test
+    fun apiCookie_returnsNullWhenAllSourcesEmpty() {
+        assertThat(selectGarminApiCookie(liveCookie = null, storedCookie = null, storedJwt = null)).isNull()
+        assertThat(selectGarminApiCookie(liveCookie = "", storedCookie = "", storedJwt = "")).isNull()
+    }
+
+    @Test
+    fun loginResponse_normalModernRedirectIsNotExpired() {
+        assertThat(isGarminLoginResponse(302, "https://connect.garmin.cn/modern/")).isFalse()
+    }
 }

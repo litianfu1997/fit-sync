@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.ChevronRight
@@ -65,13 +66,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.fitsync.app.connectors.GarminAuthDiagnostics
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.data.db.entity.AppSettingsEntity
 import com.fitsync.app.domain.model.AccountStatus
@@ -519,6 +523,9 @@ fun PrivacyAboutScreen(onBack: () -> Unit) {
                 }
             }
             item {
+                GarminDiagnosticsCard()
+            }
+            item {
                 Text(
                     "FitSync 0.2.0",
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 8.dp),
@@ -528,6 +535,70 @@ fun PrivacyAboutScreen(onBack: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun GarminDiagnosticsCard() {
+    val clipboard = LocalClipboardManager.current
+    var events by remember { mutableStateOf(GarminAuthDiagnostics.snapshot()) }
+    SettingsCard(
+        icon = Icons.Default.BugReport,
+        title = "Garmin 登录诊断",
+        subtitle = "记录后台判定「登录失效」的真实原因，便于反馈",
+    ) {
+        if (events.isEmpty()) {
+            Text(
+                "暂无事件。下次同步触发 Garmin 登录判定后会出现在这里。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Text(
+                "共 ${events.size} 条（仅本机记录，不含敏感凭据）",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
+            events.forEach { ev ->
+                Text(
+                    formatGarminDiagEvent(ev),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 1.dp),
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.padding(top = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(onClick = { events = GarminAuthDiagnostics.snapshot() }) { Text("刷新") }
+            OutlinedButton(
+                enabled = events.isNotEmpty(),
+                onClick = {
+                    clipboard.setText(AnnotatedString(events.joinToString("\n") { formatGarminDiagEvent(it) }))
+                },
+            ) { Text("复制") }
+            OutlinedButton(
+                enabled = events.isNotEmpty(),
+                onClick = {
+                    GarminAuthDiagnostics.clear()
+                    events = emptyList()
+                },
+            ) { Text("清除") }
+        }
+    }
+}
+
+private fun formatGarminDiagEvent(ev: GarminAuthDiagnostics.Event): String {
+    val time = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.US)
+        .format(java.util.Date(ev.timestampEpochMs))
+    val code = ev.httpCode?.let { " code=${ev.httpCode}" }.orEmpty()
+    val src = ev.cookieSource.takeIf { it.isNotBlank() }?.let { " src=$it" }.orEmpty()
+    val jwt = if (ev.setCookieHasJwtWeb) " setCookie=JWT" else ""
+    val loc = ev.locationHost?.takeIf { it.isNotBlank() }?.let { " loc=$it" }.orEmpty()
+    val acct = if (ev.hadPersistedAccount) " hadAccount" else ""
+    return "$time ${ev.operation}/${ev.phase}=${ev.outcome}$code$src$jwt$loc$acct"
 }
 
 @Composable
