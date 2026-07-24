@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Checklist
@@ -25,12 +26,14 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.TriStateCheckbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -40,6 +43,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 
@@ -143,6 +147,30 @@ fun SyncJobsScreen(
     var showDeleteDialog by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
+    val listState = rememberLazyListState()
+
+    // 进入选择模式时自动滚回顶部，确保「全选」行立即可见
+    LaunchedEffect(selectionMode) {
+        if (selectionMode) listState.scrollToItem(0)
+    }
+
+    // 全选作用于当前已加载的任务（Paging maxSize=150；滚动加载更多后会自动重算）
+    val loadedIds = remember(jobs.itemCount) {
+        (0 until jobs.itemCount).mapNotNull { jobs[it]?.id }.distinct()
+    }
+    val selectAllState = when {
+        selectedIds.isEmpty() -> ToggleableState.Off
+        loadedIds.isNotEmpty() && selectedIds.containsAll(loadedIds) -> ToggleableState.On
+        else -> ToggleableState.Indeterminate
+    }
+    fun toggleSelectAll() {
+        if (selectAllState == ToggleableState.On) {
+            selectedIds.clear()
+        } else {
+            selectedIds.clear()
+            selectedIds.addAll(loadedIds)
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
@@ -186,6 +214,7 @@ fun SyncJobsScreen(
             },
         )
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -199,6 +228,27 @@ fun SyncJobsScreen(
                     )
                 }
             } else {
+                if (selectionMode && jobs.itemCount > 0) {
+                    item(key = "select-all") {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 4.dp, top = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            TriStateCheckbox(
+                                state = selectAllState,
+                                onClick = { toggleSelectAll() },
+                            )
+                            Text("全选", style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                "已选 ${selectedIds.size}/${jobs.itemCount}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
                 items(
                     count = jobs.itemCount,
                     key = jobs.itemKey { it.id },
