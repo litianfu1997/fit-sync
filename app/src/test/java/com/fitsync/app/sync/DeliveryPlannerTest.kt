@@ -76,4 +76,12 @@ class DeliveryPlannerTest {
             ),
         ).isTrue()
     }
+
+    @Test
+    fun destinationWhitelist_onlyAllowsAccountsRefreshedInCurrentRun() {
+        assertThat(isDestinationReadyForPlanning(7, null)).isTrue()
+        assertThat(isDestinationReadyForPlanning(7, setOf(7, 8))).isTrue()
+        assertThat(isDestinationReadyForPlanning(7, setOf(8))).isFalse()
+        assertThat(isDestinationReadyForPlanning(7, emptySet())).isFalse()
+    }
 }

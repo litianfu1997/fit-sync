@@ -140,7 +140,7 @@ internal class CorosApiConnector(
     override suspend fun downloadFit(activity: RemoteActivitySummary): ConnectorResult<FitFile> {
         // download 端点强制要 sportType（list 时写入 metadata）。
         val rawSportType = activity.metadata["sport_type"]
-            ?: return ConnectorResult.PermanentFailure("COROS_SPORT_TYPE_MISSING", "COROS 活动缺少 sportType，无法下载")
+            ?: return ConnectorResult.PermanentFailure("NO_ORIGINAL_FILE", "COROS 活动缺少 sportType，无法下载")
         // 多项运动(65535)在下载端点不被接受，回退到 100（与开源实现 woshicby/NYT87 一致）
         val sportType = if (rawSportType == "65535") "100" else rawSportType
         return runCatching { downloadViaTwoSteps(activity.remoteActivityId, sportType) }
@@ -156,24 +156,28 @@ internal class CorosApiConnector(
         val fileUrl = execute(apiRequest(url).post(EMPTY_BODY).build()).use { resp ->
             when {
                 resp.code == 401 || resp.code == 403 -> return@withRelogin requiresLogin()
+                resp.code == 404 || resp.code == 410 -> return@withRelogin ConnectorResult.PermanentFailure(
+                    "NO_ORIGINAL_FILE",
+                    "COROS 未保留该活动的原始 FIT",
+                )
                 !resp.isSuccessful -> return@withRelogin failureStatus(resp)
                 else -> parseCorosFitUrl(resp.body?.string().orEmpty())
             }
         }
         if (fileUrl == null) {
             return@withRelogin ConnectorResult.PermanentFailure(
-                "COROS_FIT_URL_MISSING", "COROS 未返回该活动的 FIT 下载地址",
+                "NO_ORIGINAL_FILE", "COROS 未返回该活动的 FIT 下载地址",
             )
         }
         if (!isTrustedCorosHost(fileUrl)) {
             return@withRelogin ConnectorResult.PermanentFailure(
-                "COROS_FIT_UNSAFE_HOST", "COROS 返回了非预期的 FIT 地址",
+                "UNSUPPORTED_ORIGINAL_FORMAT", "COROS 返回了非预期的 FIT 地址",
             )
         }
         execute(Request.Builder().url(fileUrl).get().build()).use { resp ->
             when {
-                resp.code == 404 -> ConnectorResult.PermanentFailure(
-                    "COROS_FIT_NOT_FOUND", "COROS 未保留该活动的原始 FIT",
+                resp.code == 404 || resp.code == 410 -> ConnectorResult.PermanentFailure(
+                    "NO_ORIGINAL_FILE", "COROS 未保留该活动的原始 FIT",
                 )
                 !resp.isSuccessful -> ConnectorResult.RetryableFailure(
                     resp.code.toString(), "COROS FIT 下载失败（HTTP ${resp.code}）",
@@ -197,6 +201,9 @@ internal class CorosApiConnector(
         return runCatching { uploadViaOss(file, uploadName) }
             .getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "COROS 上传请求失败") }
     }
+
+    override suspend fun checkUpload(remoteUploadId: String): ConnectorResult<RemoteCopy> =
+        pendingAsyncUploadConfirmation(remoteUploadId, platform)
 
     /** STS 凭证 → 打 zip → OSS V1 签名 PUT → multipart import。 */
     private suspend fun uploadViaOss(file: File, uploadName: String): ConnectorResult<RemoteCopy> = withRelogin {
@@ -238,9 +245,11 @@ internal class CorosApiConnector(
                 else -> {
                     val root = runCatching { JSONObject(resp.body?.string().orEmpty()) }.getOrDefault(JSONObject())
                     if (root.optString("result") == "0000") {
-                        // import 异步解析；用 fitMd5 作临时 remoteActivityId，
-                        // 真正 labelId 会在下次 list 拉取时按 sha256 去重对齐（PlatformCopy 防重复投递）。
-                        ConnectorResult.Success(RemoteCopy(fitMd5))
+                        // import 只表示已提交异步解析；待下一轮目标列表拉到真实 labelId 后再确认成功。
+                        ConnectorResult.Processing(
+                            encodeAsyncUploadConfirmationToken(platform, fitMd5),
+                            ASYNC_UPLOAD_CONFIRM_POLL_MS,
+                        )
                     } else {
                         ConnectorResult.PermanentFailure(
                             root.optString("result").takeIf { it.isNotBlank() },
@@ -295,12 +304,12 @@ internal class CorosApiConnector(
 
     private suspend fun storeFit(response: Response, displayName: String): ConnectorResult<FitFile> {
         val body = response.body
-            ?: return ConnectorResult.PermanentFailure(null, "COROS 未返回 FIT 文件")
+            ?: return ConnectorResult.PermanentFailure("NO_ORIGINAL_FILE", "COROS 未返回 FIT 文件")
         return runCatching {
             val stored = body.byteStream().use { fileStore.storeFromStream(it, displayName) }
             ConnectorResult.Success(FitFile(stored.file, stored.sha256, stored.displayName))
         }.getOrElse {
-            ConnectorResult.PermanentFailure("COROS_DOWNLOAD_INVALID", it.message ?: "下载的内容不是有效 FIT")
+            ConnectorResult.PermanentFailure("UNSUPPORTED_ORIGINAL_FORMAT", it.message ?: "下载的内容不是有效 FIT")
         }
     }
 

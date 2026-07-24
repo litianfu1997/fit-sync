@@ -22,6 +22,11 @@ class PullCursorSafetyTest {
                 ConnectorResult.PermanentFailure("NO_ORIGINAL_FILE", "no fit"),
             ),
         ).isFalse()
+        assertThat(
+            shouldAbortPullAfterItemResult(
+                ConnectorResult.PermanentFailure("UNSUPPORTED_ORIGINAL_FORMAT", "not a fit"),
+            ),
+        ).isFalse()
         assertThat(shouldAbortPullAfterItemResult(ConnectorResult.Success(1L))).isFalse()
     }
 }

@@ -1,6 +1,7 @@
 package com.fitsync.app.sync
 
 import android.os.Trace
+import android.os.SystemClock
 import androidx.room.withTransaction
 import com.fitsync.app.connectors.ConnectorRegistry
 import com.fitsync.app.connectors.ConnectorCapabilities
@@ -61,9 +62,9 @@ class SyncCoordinator(
         if (!force && settings?.autoSyncEnabled == false) return@sync SyncRunSummary()
         var pulled = 0
         var queued = 0
-        var failedAccounts = 0
         val historyDays = settings?.initialHistoryDays ?: 90
         val allAccounts = db.platformAccountDao().getAll()
+        val enabledRules = if (manualSelection == null) db.syncRuleDao().getEnabled() else emptyList()
         val destinationAccount = manualSelection?.let { selection ->
             val destination = allAccounts.firstOrNull { it.id == selection.destinationAccountId }
                 ?: throw IllegalArgumentException("目标平台账号已不存在")
@@ -76,8 +77,9 @@ class SyncCoordinator(
             }
             destination
         }
-        val accounts = when {
-            manualSelection == null -> allAccounts.filter { it.status != AccountStatus.DISABLED }
+        val activeAccounts = allAccounts.filter { it.status != AccountStatus.DISABLED }
+        val sourceAccounts = when {
+            manualSelection == null -> activeAccounts
             manualSelection.sourcePlatform == Platform.LOCAL_IMPORT -> emptyList()
             else -> allAccounts.filter {
                 it.platform == manualSelection.sourcePlatform &&
@@ -86,73 +88,151 @@ class SyncCoordinator(
                 require(it.isNotEmpty()) { "来源平台需要先完成登录" }
             }
         }
-        val enabledRuleCount = if (manualSelection == null) db.syncRuleDao().getEnabled().size else 1
-        val accountResults = coroutineScope {
-            val accountSemaphore = Semaphore(MAX_CONCURRENT_ACCOUNTS)
-            accounts.map { account ->
-                async {
-                    accountSemaphore.withPermit {
-                        syncAccount(
-                            account = account,
-                            historyDays = historyDays,
-                            force = force,
-                            planWithRules = manualSelection == null,
-                            notificationsEnabled = settings?.notificationsEnabled != false,
-                        )
-                    }
-                }
-            }.awaitAll()
+        val accountsToCheck = when (manualSelection) {
+            null -> activeAccounts
+            else -> listOfNotNull(destinationAccount) + sourceAccounts
+        }.distinctBy { it.id }
+        val activeDeliveryDestinationIds = if (manualSelection == null) {
+            db.deliveryJobDao().findActiveDestinationAccountIds().toSet()
+        } else {
+            emptySet()
         }
-        pulled += accountResults.sumOf { it.pulled }
-        queued += accountResults.sumOf { it.queued }
-        failedAccounts += accountResults.count { !it.completedNormally }
-        if (manualSelection != null) {
-            val fromEpochMs = calculatePullSince(
+        val destinationAccountIds = when (manualSelection) {
+            null -> enabledRules.mapTo(mutableSetOf()) { it.destinationAccountId } + activeDeliveryDestinationIds
+            else -> setOf(manualSelection.destinationAccountId)
+        }
+        val accountById = accountsToCheck.associateBy { it.id }
+        val phases = buildSyncAccountPhases(accountsToCheck.map { it.id }, destinationAccountIds)
+        val manualFromEpochMs = manualSelection?.let {
+            calculatePullSince(
                 nowEpochMs = System.currentTimeMillis(),
                 previousSyncEpochMs = null,
                 historyDays = historyDays,
                 forceFullHistory = true,
             )
+        }
+        val targetSinceOverrides = buildTargetSinceOverrides(
+            destinationAccountIds = destinationAccountIds,
+            includeAllHistoryAccountIds = enabledRules
+                .filter { it.includeHistory }
+                .mapTo(mutableSetOf()) { it.destinationAccountId },
+            includeHistoryFromEpochMs = calculatePullSince(
+                nowEpochMs = System.currentTimeMillis(),
+                previousSyncEpochMs = null,
+                historyDays = historyDays,
+                forceFullHistory = true,
+            ),
+            manualDestinationAccountId = manualSelection?.destinationAccountId,
+            manualFromEpochMs = manualFromEpochMs,
+        )
+        // 第一阶段必须完整结束后才进入来源阶段，确保 DeliveryPlanner 看到的是目标端最新副本集合。
+        val destinationResults = syncAccounts(
+            accounts = phases.destinationAccountIds.mapNotNull(accountById::get),
+            historyDays = historyDays,
+            force = force,
+            notificationsEnabled = settings?.notificationsEnabled != false,
+            sinceEpochMsByAccount = targetSinceOverrides,
+        )
+        val readyDestinationAccountIds = destinationResults
+            .filter { it.pull.completedNormally }
+            .mapTo(mutableSetOf()) { it.accountId }
+        val mayPullSources = manualSelection == null || manualSelection.destinationAccountId in readyDestinationAccountIds
+        if (manualSelection == null && readyDestinationAccountIds.isNotEmpty()) {
+            queued += mutationGate.withLock {
+                enabledRules
+                    .filter { it.includeHistory && it.destinationAccountId in readyDestinationAccountIds }
+                    .sumOf { rule ->
+                        planner.planHistory(
+                            ruleId = rule.id,
+                            allowedDestinationAccountIds = readyDestinationAccountIds,
+                        )
+                    }
+            }
+        }
+        val sourceResults = if (mayPullSources) {
+            syncAccounts(
+                accounts = phases.remainingAccountIds.mapNotNull(accountById::get),
+                historyDays = historyDays,
+                force = force,
+                notificationsEnabled = settings?.notificationsEnabled != false,
+            )
+        } else {
+            emptyList()
+        }
+        val accountResults = destinationResults + sourceResults
+        pulled += accountResults.sumOf { it.pull.pulled }
+        val failedAccounts = accountResults.count { !it.pull.completedNormally }
+        if (manualSelection != null && mayPullSources) {
             queued += mutationGate.withLock {
                 planner.planManualSelection(
                     sourcePlatform = manualSelection.sourcePlatform,
                     destinationAccountId = manualSelection.destinationAccountId,
                     sportTypes = manualSelection.sportTypes,
-                    fromEpochMs = fromEpochMs,
+                    fromEpochMs = requireNotNull(manualFromEpochMs),
                 )
             }
+        } else if (manualSelection == null && readyDestinationAccountIds.isNotEmpty()) {
+            accountResults
+                .groupBy { it.platform }
+                .forEach { (sourcePlatform, results) ->
+                    val canonicalIds = results.flatMap { it.pull.importedCanonicalIds }.distinct()
+                    if (canonicalIds.isNotEmpty()) {
+                        queued += mutationGate.withLock {
+                            planner.planForActivities(
+                                canonicalActivityIds = canonicalIds,
+                                sourcePlatform = sourcePlatform,
+                                allowedDestinationAccountIds = readyDestinationAccountIds,
+                            )
+                        }
+                    }
+                }
         }
-        val delivered = processDeliveryJobs()
+        val deliveryResult = processDeliveryQueue(readyDestinationAccountIds)
         runCatching { storageJanitor?.run() }
+        val checkedAccountIds = accountResults.mapTo(hashSetOf()) { it.accountId }
         val actionRequiredAccounts = db.platformAccountDao().getAll().count { account ->
-            account.needsUserAction && (
-                manualSelection == null ||
-                    account.id == destinationAccount?.id ||
-                    accounts.any { it.id == account.id }
-                )
+            account.needsUserAction && account.id in checkedAccountIds
         }
-        val deliverySchedule = deliverySchedule()
         SyncRunSummary(
             pulledActivities = pulled,
             queuedDeliveries = queued,
-            completedDeliveries = delivered,
-            hasMoreDeliveries = deliverySchedule.hasMore,
-            nextDeliveryDelayMs = deliverySchedule.delayMs,
-            checkedAccounts = if (manualSelection?.sourcePlatform == Platform.LOCAL_IMPORT) 1 else accounts.size,
-            enabledRules = enabledRuleCount,
+            completedDeliveries = deliveryResult.completed,
+            hasMoreDeliveries = deliveryResult.schedule.hasMore,
+            nextDeliveryDelayMs = deliveryResult.schedule.delayMs,
+            checkedAccounts = checkedAccountIds.size,
+            enabledRules = if (manualSelection == null) enabledRules.size else 1,
             actionRequiredAccounts = actionRequiredAccounts,
             failedAccounts = failedAccounts,
         )
     }
 
     suspend fun runDeliveryBatch(): SyncRunSummary = syncMutex.withLock {
-        val delivered = processDeliveryJobs()
+        val settings = db.appSettingsDao().get()
+        val destinationAccountIds = db.deliveryJobDao().findActiveDestinationAccountIds().toSet()
+        val accounts = db.platformAccountDao().getAll().filter { account ->
+            account.id in destinationAccountIds && account.status != AccountStatus.DISABLED
+        }
+        val targetSinceOverrides = buildTargetSinceOverrides(destinationAccountIds)
+        val accountResults = syncAccounts(
+            accounts = accounts,
+            historyDays = settings?.initialHistoryDays ?: 90,
+            force = false,
+            notificationsEnabled = settings?.notificationsEnabled != false,
+            sinceEpochMsByAccount = targetSinceOverrides,
+        )
+        val readyDestinationAccountIds = accountResults
+            .filter { it.pull.completedNormally }
+            .mapTo(mutableSetOf()) { it.accountId }
+        val deliveryResult = processDeliveryQueue(readyDestinationAccountIds)
         runCatching { storageJanitor?.run() }
-        val deliverySchedule = deliverySchedule()
+        val refreshedAccounts = db.platformAccountDao().getAll().associateBy { it.id }
         SyncRunSummary(
-            completedDeliveries = delivered,
-            hasMoreDeliveries = deliverySchedule.hasMore,
-            nextDeliveryDelayMs = deliverySchedule.delayMs,
+            completedDeliveries = deliveryResult.completed,
+            hasMoreDeliveries = deliveryResult.schedule.hasMore,
+            nextDeliveryDelayMs = deliveryResult.schedule.delayMs,
+            checkedAccounts = accountResults.size,
+            actionRequiredAccounts = accountResults.count { refreshedAccounts[it.accountId]?.needsUserAction == true },
+            failedAccounts = accountResults.count { !it.pull.completedNormally },
         )
     }
 
@@ -190,7 +270,8 @@ class SyncCoordinator(
         return imported
     }
 
-    suspend fun processDeliveryJobs(): Int {
+    suspend fun processDeliveryJobs(allowedDestinationAccountIds: Set<Long>? = null): Int {
+        if (allowedDestinationAccountIds != null && allowedDestinationAccountIds.isEmpty()) return 0
         var completed = 0
         val now = System.currentTimeMillis()
         // 恢复上一轮被 Worker 中断（进程被杀/超时）而卡在 UPLOADING 的任务，避免永久卡死。
@@ -199,7 +280,12 @@ class SyncCoordinator(
         db.deliveryJobDao().resetStaleUploading(now)
         val preparedJobs = mutationGate.withLock {
             db.withTransaction {
-                db.deliveryJobDao().findRunnable(now).mapNotNull { candidateJob ->
+                val runnableJobs = if (allowedDestinationAccountIds == null) {
+                    db.deliveryJobDao().findRunnable(now)
+                } else {
+                    db.deliveryJobDao().findRunnableForAccounts(now, allowedDestinationAccountIds.toList())
+                }
+                runnableJobs.mapNotNull { candidateJob ->
                 val currentJob = db.deliveryJobDao().getById(candidateJob.id) ?: return@mapNotNull null
                 val account = db.platformAccountDao().getById(currentJob.destinationAccountId)
                 val activity = db.canonicalActivityDao().getById(currentJob.canonicalActivityId)
@@ -215,6 +301,42 @@ class SyncCoordinator(
                             updatedAtEpochMs = now,
                         ),
                     )
+                    return@mapNotNull null
+                }
+                val existingCopy = db.platformCopyDao().findByCanonicalAndAccount(
+                    currentJob.canonicalActivityId,
+                    currentJob.destinationAccountId,
+                )
+                if (existingCopy != null) {
+                    val submittedByCurrentJob = !currentJob.remoteUploadId.isNullOrBlank()
+                    if (submittedByCurrentJob && !existingCopy.createdBySync) {
+                        upsertPlatformCopy(
+                            canonicalId = currentJob.canonicalActivityId,
+                            accountId = currentJob.destinationAccountId,
+                            remoteActivityId = existingCopy.remoteActivityId,
+                            remoteUrl = existingCopy.remoteUrl,
+                            fileSha256 = existingCopy.fileSha256,
+                            sourceVariantId = existingCopy.sourceVariantId ?: currentJob.sourceVariantId,
+                            createdBySync = true,
+                        )
+                    }
+                    db.deliveryJobDao().update(
+                        currentJob.copy(
+                            status = if (submittedByCurrentJob) {
+                                DeliveryJobStatus.SUCCEEDED
+                            } else {
+                                DeliveryJobStatus.DUPLICATE_REMOTE
+                            },
+                            nextRetryAtEpochMs = null,
+                            remoteUploadId = null,
+                            remoteActivityId = existingCopy.remoteActivityId,
+                            userActionUrl = null,
+                            errorCode = null,
+                            errorMessage = null,
+                            updatedAtEpochMs = now,
+                        ),
+                    )
+                    completed++
                     return@mapNotNull null
                 }
                 val currentMode = connector.detectCapabilities().uploadFitMode
@@ -483,22 +605,123 @@ class SyncCoordinator(
         val polling: Boolean,
     )
 
-    private suspend fun deliverySchedule(): DeliverySchedule {
+    /**
+     * DAO 每批仍限制 20 条以控制并发与内存，但同一个前台 Worker 会连续取下一批；
+     * 到达时间/批次数预算后才交给 WorkManager 持久化续跑，不再要求用户重复点击。
+     */
+    private suspend fun processDeliveryQueue(
+        allowedDestinationAccountIds: Set<Long>? = null,
+    ): DeliveryQueueResult {
+        if (allowedDestinationAccountIds != null && allowedDestinationAccountIds.isEmpty()) {
+            return DeliveryQueueResult(0, DeliverySchedule(false, null))
+        }
+        val startedAt = SystemClock.elapsedRealtime()
+        var completed = 0
+        var completedBatches = 0
+        var schedule: DeliverySchedule
+        do {
+            completed += processDeliveryJobs(allowedDestinationAccountIds)
+            completedBatches++
+            schedule = deliverySchedule(allowedDestinationAccountIds)
+        } while (
+            shouldContinueDeliveryDrain(
+                hasMore = schedule.hasMore,
+                nextDelayMs = schedule.delayMs,
+                completedBatches = completedBatches,
+                elapsedMs = SystemClock.elapsedRealtime() - startedAt,
+            )
+        )
+        return DeliveryQueueResult(completed, schedule)
+    }
+
+    private suspend fun deliverySchedule(
+        allowedDestinationAccountIds: Set<Long>? = null,
+    ): DeliverySchedule {
+        if (allowedDestinationAccountIds != null && allowedDestinationAccountIds.isEmpty()) {
+            return DeliverySchedule(false, null)
+        }
         val now = System.currentTimeMillis()
-        if (db.deliveryJobDao().countRunnable(now) > 0) return DeliverySchedule(true, 0)
-        val next = db.deliveryJobDao().findNextScheduledAt() ?: return DeliverySchedule(false, null)
+        val runnableCount = if (allowedDestinationAccountIds == null) {
+            db.deliveryJobDao().countRunnable(now)
+        } else {
+            db.deliveryJobDao().countRunnableForAccounts(now, allowedDestinationAccountIds.toList())
+        }
+        if (runnableCount > 0) return DeliverySchedule(true, 0)
+        val next = if (allowedDestinationAccountIds == null) {
+            db.deliveryJobDao().findNextScheduledAt()
+        } else {
+            db.deliveryJobDao().findNextScheduledAtForAccounts(allowedDestinationAccountIds.toList())
+        } ?: return DeliverySchedule(false, null)
         return DeliverySchedule(true, (next - now).coerceAtLeast(0))
+    }
+
+    /**
+     * 目标端必须覆盖所有待投递活动；开启“包含历史”时还要覆盖本地最早活动。
+     * 返回值会在 [pullAccount] 中与默认增量窗口取更早者，不会缩短已有窗口。
+     */
+    private suspend fun buildTargetSinceOverrides(
+        destinationAccountIds: Set<Long>,
+        includeAllHistoryAccountIds: Set<Long> = emptySet(),
+        includeHistoryFromEpochMs: Long? = null,
+        manualDestinationAccountId: Long? = null,
+        manualFromEpochMs: Long? = null,
+    ): Map<Long, Long> {
+        if (destinationAccountIds.isEmpty()) return emptyMap()
+        val historyDestinations = destinationAccountIds intersect includeAllHistoryAccountIds
+        val earliestLocalStart = if (historyDestinations.isEmpty()) {
+            null
+        } else {
+            db.canonicalActivityDao().findEarliestStartTime()
+        }
+        return buildMap {
+            destinationAccountIds.forEach { accountId ->
+                var earliest = db.deliveryJobDao().findEarliestActiveActivityStart(accountId)
+                if (accountId in historyDestinations) {
+                    earliest = earlierEpoch(earliest, earliestLocalStart)
+                    earliest = earlierEpoch(earliest, includeHistoryFromEpochMs)
+                }
+                if (accountId == manualDestinationAccountId) {
+                    earliest = earlierEpoch(earliest, manualFromEpochMs)
+                }
+                earliest?.let { put(accountId, targetPrefetchSince(it)) }
+            }
+        }
+    }
+
+    private suspend fun syncAccounts(
+        accounts: List<PlatformAccountEntity>,
+        historyDays: Int,
+        force: Boolean,
+        notificationsEnabled: Boolean,
+        sinceEpochMsByAccount: Map<Long, Long> = emptyMap(),
+    ): List<AccountPullResult> = coroutineScope {
+        val accountSemaphore = Semaphore(MAX_CONCURRENT_ACCOUNTS)
+        accounts.map { account ->
+            async {
+                val pull = accountSemaphore.withPermit {
+                    syncAccount(
+                        account = account,
+                        historyDays = historyDays,
+                        force = force,
+                        notificationsEnabled = notificationsEnabled,
+                        sinceEpochMsOverride = sinceEpochMsByAccount[account.id],
+                    )
+                }
+                AccountPullResult(account.id, account.platform, pull)
+            }
+        }.awaitAll()
     }
 
     private suspend fun syncAccount(
         account: PlatformAccountEntity,
         historyDays: Int,
         force: Boolean,
-        planWithRules: Boolean,
         notificationsEnabled: Boolean,
+        sinceEpochMsOverride: Long? = null,
     ): PullAccountResult {
         val connector = connectors.get(account.platform) ?: return PullAccountResult(completedNormally = false)
         val capabilities = connector.detectCapabilities()
+        val backgroundComparisonAvailable = canCompareTargetInBackground(capabilities)
         if (account.capabilitySnapshot != capabilities.serialize()) {
             db.platformAccountDao().update(
                 account.copy(
@@ -519,7 +742,7 @@ class SyncCoordinator(
                     )
                 }
             }
-            return PullAccountResult(completedNormally = true)
+            return PullAccountResult(completedNormally = backgroundComparisonAvailable)
         }
         if (capabilities.downloadFitMode != ConnectorExecution.BACKGROUND) {
             markAccountNeedsAction(account.id, false)
@@ -531,11 +754,11 @@ class SyncCoordinator(
                     "请登录 ${account.platform.displayName} 网页以启用原文件拉取",
                 )
             }
-            return PullAccountResult(completedNormally = true)
+            return PullAccountResult(completedNormally = backgroundComparisonAvailable)
         }
         Trace.beginSection("FitSync:pull_${account.platform.name}")
         return try {
-            pullAccount(account.id, historyDays, force, planWithRules)
+            pullAccount(account.id, historyDays, force, sinceEpochMsOverride)
         } finally {
             Trace.endSection()
         }
@@ -545,22 +768,29 @@ class SyncCoordinator(
         accountId: Long,
         historyDays: Int,
         forceFullHistory: Boolean,
-        planWithRules: Boolean = true,
+        sinceEpochMsOverride: Long? = null,
     ): PullAccountResult {
         var account = db.platformAccountDao().getById(accountId) ?: return PullAccountResult()
         val connector = connectors.get(account.platform) ?: return PullAccountResult()
         val now = System.currentTimeMillis()
         val previousSync = account.lastSyncAtEpochMs
-        val since = calculatePullSince(now, previousSync, historyDays, forceFullHistory)
+        val defaultSince = calculatePullSince(now, previousSync, historyDays, forceFullHistory)
+        val since = sinceEpochMsOverride?.coerceAtLeast(0L)?.let { minOf(defaultSince, it) } ?: defaultSince
         // A manual history rescan must restart at page 1; a saved cursor belongs
-        // to the previous incremental window and would otherwise skip records.
-        var cursor = if (forceFullHistory) null else account.syncCursor?.let(::SyncCursor)
+        // to the previous incremental window and would otherwise skip records. 目标窗口扩大时同理。
+        var cursor = if (forceFullHistory || sinceEpochMsOverride != null) {
+            null
+        } else {
+            account.syncCursor?.let(::SyncCursor)
+        }
         var pulled = 0
-        var queued = 0
         var pages = 0
         var completedNormally = true
+        var reachedWindowEnd = false
+        val importedCanonicalIds = linkedSetOf<Long>()
         val accountDownloadSemaphore = Semaphore(MAX_DOWNLOADS_PER_ACCOUNT)
-        while (pages++ < 100) {
+        while (pages < MAX_PULL_PAGES) {
+            pages++
             when (val pageResult = globalNetworkSemaphore.withPermit { connector.listActivities(since, cursor) }) {
                 is ConnectorResult.Success -> {
                     var abortAccount = false
@@ -588,13 +818,12 @@ class SyncCoordinator(
                             }
                         }.awaitAll()
                     }
-                    val successfulCanonicalIds = mutableListOf<Long>()
                     var actionRequest: Triple<Boolean, String, String>? = null
                     for ((remote, imported) in importedResults) {
                         when (imported) {
                             is ConnectorResult.Success -> {
                                 pulled++
-                                successfulCanonicalIds += imported.value
+                                importedCanonicalIds += imported.value
                             }
                             is ConnectorResult.RequiresLogin -> {
                                 markAccountNeedsAction(account.id, true)
@@ -635,11 +864,6 @@ class SyncCoordinator(
                         }
                         if (shouldAbortPullAfterItemResult(imported)) abortAccount = true
                     }
-                    if (successfulCanonicalIds.isNotEmpty() && planWithRules) {
-                        queued += mutationGate.withLock {
-                            planner.planForActivities(successfulCanonicalIds.distinct(), account.platform)
-                        }
-                    }
                     actionRequest?.let { (_, url, message) ->
                         notifyAccountActionIfEnabled(account.id, account.platform, url, message)
                     }
@@ -650,7 +874,10 @@ class SyncCoordinator(
                         updatedAtEpochMs = System.currentTimeMillis(),
                     )
                     db.platformAccountDao().update(account)
-                    if (!pageResult.value.hasMore || cursor == null) break
+                    if (!pageResult.value.hasMore || cursor == null) {
+                        reachedWindowEnd = true
+                        break
+                    }
                 }
                 is ConnectorResult.RequiresLogin -> {
                     markAccountNeedsAction(account.id, true)
@@ -680,7 +907,7 @@ class SyncCoordinator(
                 }
             }
         }
-        if (pages >= 100 && cursor != null) completedNormally = false
+        if (pages >= MAX_PULL_PAGES && !reachedWindowEnd) completedNormally = false
         account = db.platformAccountDao().getById(account.id) ?: account
         if (completedNormally) {
             db.platformAccountDao().update(
@@ -693,7 +920,11 @@ class SyncCoordinator(
                 ),
             )
         }
-        return PullAccountResult(pulled, queued, completedNormally)
+        return PullAccountResult(
+            pulled = pulled,
+            completedNormally = completedNormally,
+            importedCanonicalIds = importedCanonicalIds.toList(),
+        )
     }
 
     private suspend fun downloadAndImport(
@@ -743,7 +974,7 @@ class SyncCoordinator(
             is ImportOutcome.Success -> outcome.canonicalActivityId to outcome.variantId
             is ImportOutcome.DuplicateFile -> outcome.canonicalActivityId to outcome.variantId
             is ImportOutcome.Invalid -> return ConnectorResult.PermanentFailure(
-                outcome.validationStatus.name,
+                "UNSUPPORTED_ORIGINAL_FORMAT",
                 outcome.message ?: "下载的 FIT 无效",
             )
             is ImportOutcome.Failed -> return ConnectorResult.RetryableFailure(null, outcome.message ?: "FIT 导入失败")
@@ -896,6 +1127,10 @@ internal const val MAX_CONCURRENT_ACCOUNTS = 2
 internal const val MAX_DOWNLOADS_PER_ACCOUNT = 2
 internal const val MAX_UPLOADS_PER_ACCOUNT = 2
 internal const val MAX_GLOBAL_NETWORK_TRANSFERS = 3
+internal const val MAX_PULL_PAGES = 500
+internal const val MAX_DELIVERY_BATCHES_PER_WORKER = 50
+internal const val DELIVERY_DRAIN_BUDGET_MS = 8L * 60 * 1000
+internal const val TARGET_PREFETCH_TOLERANCE_MS = 10L * 60 * 1000
 
 data class SyncRunSummary(
     val pulledActivities: Int = 0,
@@ -911,11 +1146,63 @@ data class SyncRunSummary(
 
 private data class DeliverySchedule(val hasMore: Boolean, val delayMs: Long?)
 
+private data class DeliveryQueueResult(
+    val completed: Int,
+    val schedule: DeliverySchedule,
+)
+
+private data class AccountPullResult(
+    val accountId: Long,
+    val platform: Platform,
+    val pull: PullAccountResult,
+)
+
 private data class PullAccountResult(
     val pulled: Int = 0,
-    val queued: Int = 0,
     val completedNormally: Boolean = false,
+    val importedCanonicalIds: List<Long> = emptyList(),
 )
+
+internal data class SyncAccountPhases(
+    val destinationAccountIds: List<Long>,
+    val remainingAccountIds: List<Long>,
+)
+
+/** 目标账号必须处于第一阶段；第二阶段开始前，第一阶段已全部完成预拉取。 */
+internal fun buildSyncAccountPhases(
+    accountIds: List<Long>,
+    destinationAccountIds: Set<Long>,
+): SyncAccountPhases {
+    val destinations = accountIds.filter { it in destinationAccountIds }
+    val destinationSet = destinations.toHashSet()
+    return SyncAccountPhases(
+        destinationAccountIds = destinations,
+        remainingAccountIds = accountIds.filterNot { it in destinationSet },
+    )
+}
+
+internal fun shouldContinueDeliveryDrain(
+    hasMore: Boolean,
+    nextDelayMs: Long?,
+    completedBatches: Int,
+    elapsedMs: Long,
+): Boolean = hasMore &&
+    (nextDelayMs ?: 0L) <= 0L &&
+    completedBatches < MAX_DELIVERY_BATCHES_PER_WORKER &&
+    elapsedMs < DELIVERY_DRAIN_BUDGET_MS
+
+internal fun earlierEpoch(current: Long?, candidate: Long?): Long? = when {
+    current == null -> candidate
+    candidate == null -> current
+    else -> minOf(current, candidate)
+}
+
+internal fun targetPrefetchSince(activityStartEpochMs: Long): Long =
+    (activityStartEpochMs - TARGET_PREFETCH_TOLERANCE_MS).coerceAtLeast(0L)
+
+internal fun canCompareTargetInBackground(capabilities: ConnectorCapabilities): Boolean =
+    capabilities.listActivitiesMode == ConnectorExecution.BACKGROUND &&
+        capabilities.downloadFitMode == ConnectorExecution.BACKGROUND
 
 internal val PERMANENT_REMOTE_SKIP_CODES = setOf(
     "NO_ORIGINAL_FILE",

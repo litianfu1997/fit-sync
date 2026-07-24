@@ -130,6 +130,9 @@ interface CanonicalActivityDao {
     @Query("SELECT COUNT(*) FROM canonical_activity")
     fun observeCount(): Flow<Int>
 
+    @Query("SELECT MIN(startTimeEpochMs) FROM canonical_activity")
+    suspend fun findEarliestStartTime(): Long?
+
     @Query("SELECT COUNT(*) FROM canonical_activity WHERE dedupStatus = :status")
     fun observeCountByDedup(status: DedupStatus): Flow<Int>
 
@@ -409,6 +412,25 @@ interface DeliveryJobDao {
 
     @Query(
         """
+        SELECT * FROM delivery_job
+        WHERE destinationAccountId IN (:accountIds)
+          AND (
+            status = 'PENDING'
+            OR (status = 'RETRY_WAIT' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
+            OR (status = 'WAITING_REMOTE_PROCESS' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
+          )
+        ORDER BY createdAtEpochMs ASC
+        LIMIT :limit
+        """,
+    )
+    suspend fun findRunnableForAccounts(
+        now: Long,
+        accountIds: List<Long>,
+        limit: Int = 20,
+    ): List<DeliveryJobEntity>
+
+    @Query(
+        """
         SELECT COUNT(*) FROM delivery_job
         WHERE status = 'PENDING'
            OR (status = 'RETRY_WAIT' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
@@ -418,10 +440,52 @@ interface DeliveryJobDao {
     suspend fun countRunnable(now: Long): Int
 
     @Query(
+        """
+        SELECT COUNT(*) FROM delivery_job
+        WHERE destinationAccountId IN (:accountIds)
+          AND (
+            status = 'PENDING'
+            OR (status = 'RETRY_WAIT' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
+            OR (status = 'WAITING_REMOTE_PROCESS' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
+          )
+        """,
+    )
+    suspend fun countRunnableForAccounts(now: Long, accountIds: List<Long>): Int
+
+    @Query(
         "SELECT MIN(nextRetryAtEpochMs) FROM delivery_job " +
             "WHERE status = 'WAITING_REMOTE_PROCESS' OR status = 'RETRY_WAIT'",
     )
     suspend fun findNextScheduledAt(): Long?
+
+    @Query(
+        "SELECT MIN(nextRetryAtEpochMs) FROM delivery_job " +
+            "WHERE destinationAccountId IN (:accountIds) " +
+            "AND (status = 'WAITING_REMOTE_PROCESS' OR status = 'RETRY_WAIT')",
+    )
+    suspend fun findNextScheduledAtForAccounts(accountIds: List<Long>): Long?
+
+    @Query(
+        """
+        SELECT DISTINCT destinationAccountId FROM delivery_job
+        WHERE status = 'PENDING'
+           OR status = 'UPLOADING'
+           OR status = 'WAITING_REMOTE_PROCESS'
+           OR status = 'RETRY_WAIT'
+        """,
+    )
+    suspend fun findActiveDestinationAccountIds(): List<Long>
+
+    @Query(
+        """
+        SELECT MIN(activity.startTimeEpochMs)
+        FROM delivery_job job
+        INNER JOIN canonical_activity activity ON activity.id = job.canonicalActivityId
+        WHERE job.destinationAccountId = :accountId
+          AND job.status IN ('PENDING', 'UPLOADING', 'WAITING_REMOTE_PROCESS', 'RETRY_WAIT')
+        """,
+    )
+    suspend fun findEarliestActiveActivityStart(accountId: Long): Long?
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(entity: DeliveryJobEntity): Long

@@ -136,23 +136,23 @@ internal class IgpsportApiConnector(
                 is ConnectorResult.PermanentFailure -> return d
                 is ConnectorResult.RequiresUserAction -> return d
                 is ConnectorResult.Duplicate<*> ->
-                    return ConnectorResult.PermanentFailure("IGPSPORT_FIT_URL_MISSING", "iGPSPORT 未返回该活动的 FIT 下载地址")
+                    return ConnectorResult.PermanentFailure("NO_ORIGINAL_FILE", "iGPSPORT 未返回该活动的 FIT 下载地址")
                 is ConnectorResult.Processing ->
-                    return ConnectorResult.PermanentFailure("IGPSPORT_FIT_URL_MISSING", "iGPSPORT 返回了无效的下载状态")
+                    return ConnectorResult.PermanentFailure("NO_ORIGINAL_FILE", "iGPSPORT 返回了无效的下载状态")
             }
         }
         if (!fitUrl.startsWith("http")) {
-            return ConnectorResult.PermanentFailure("IGPSPORT_FIT_URL_MISSING", "iGPSPORT 未返回该活动的 FIT 下载地址")
+            return ConnectorResult.PermanentFailure("NO_ORIGINAL_FILE", "iGPSPORT 未返回该活动的 FIT 下载地址")
         }
         if (!isTrustedIgpHost(fitUrl)) {
-            return ConnectorResult.PermanentFailure("IGPSPORT_FIT_UNSAFE_HOST", "iGPSPORT 返回了非预期的 FIT 地址")
+            return ConnectorResult.PermanentFailure("UNSUPPORTED_ORIGINAL_FORMAT", "iGPSPORT 返回了非预期的 FIT 地址")
         }
         return runCatching {
             // OSS 公共读，匿名 GET（不带 Authorization）。
             execute(Request.Builder().url(fitUrl).get().build()).use { resp ->
                 when {
-                    resp.code == 404 -> ConnectorResult.PermanentFailure(
-                        "IGPSPORT_FIT_NOT_FOUND", "iGPSPORT 未保留该活动的原始 FIT",
+                    resp.code == 404 || resp.code == 410 -> ConnectorResult.PermanentFailure(
+                        "NO_ORIGINAL_FILE", "iGPSPORT 未保留该活动的原始 FIT",
                     )
                     !resp.isSuccessful -> ConnectorResult.RetryableFailure(
                         resp.code.toString(), "iGPSPORT FIT 下载失败（HTTP ${resp.code}）",
@@ -178,12 +178,19 @@ internal class IgpsportApiConnector(
             .getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "iGPSPORT 上传请求失败") }
     }
 
+    override suspend fun checkUpload(remoteUploadId: String): ConnectorResult<RemoteCopy> =
+        pendingAsyncUploadConfirmation(remoteUploadId, platform)
+
     /** 列表行未带 fitUrl 时，查 detail 拿 fitUrl/fitOssPath。 */
     private suspend fun resolveFitUrlByDetail(rideId: String): ConnectorResult<String> = withRelogin {
         runCatching {
             execute(apiRequest("$DETAIL_URL/$rideId").get().build()).use { resp ->
                 when {
                     resp.code == 401 || resp.code == 403 -> requiresLogin()
+                    resp.code == 404 || resp.code == 410 -> ConnectorResult.PermanentFailure(
+                        "NO_ORIGINAL_FILE",
+                        "iGPSPORT 未保留该活动的原始 FIT",
+                    )
                     !resp.isSuccessful -> failureStatus(resp)
                     else -> {
                         val url = parseIgpsportFitUrl(resp.body?.string().orEmpty())
@@ -191,7 +198,7 @@ internal class IgpsportApiConnector(
                             ConnectorResult.Success(url)
                         } else {
                             ConnectorResult.PermanentFailure(
-                                "IGPSPORT_FIT_URL_MISSING", "iGPSPORT 详情未返回 FIT 地址",
+                                "NO_ORIGINAL_FILE", "iGPSPORT 详情未返回 FIT 地址",
                             )
                         }
                     }
@@ -233,9 +240,11 @@ internal class IgpsportApiConnector(
                 else -> {
                     val root = runCatching { JSONObject(resp.body?.string().orEmpty()) }.getOrDefault(JSONObject())
                     if (root.optInt("code", -1) == 0) {
-                        // uploadByOss 异步解析、响应 data 多为 null；用 ossId 作临时 remoteActivityId，
-                        // 真正 rideId 会在下次 list 拉取时按 sha256 去重对齐（PlatformCopy 防重复投递）。
-                        ConnectorResult.Success(RemoteCopy(signed.ossId))
+                        // uploadByOss 只表示已提交异步解析；待下一轮目标列表拉到真实 rideId 后再确认成功。
+                        ConnectorResult.Processing(
+                            encodeAsyncUploadConfirmationToken(platform, signed.ossId),
+                            ASYNC_UPLOAD_CONFIRM_POLL_MS,
+                        )
                     } else {
                         ConnectorResult.PermanentFailure(
                             root.opt("code")?.toString(),
@@ -279,12 +288,12 @@ internal class IgpsportApiConnector(
 
     private suspend fun storeFit(response: Response, displayName: String): ConnectorResult<FitFile> {
         val body = response.body
-            ?: return ConnectorResult.PermanentFailure(null, "iGPSPORT 未返回 FIT 文件")
+            ?: return ConnectorResult.PermanentFailure("NO_ORIGINAL_FILE", "iGPSPORT 未返回 FIT 文件")
         return runCatching {
             val stored = body.byteStream().use { fileStore.storeFromStream(it, displayName) }
             ConnectorResult.Success(FitFile(stored.file, stored.sha256, stored.displayName))
         }.getOrElse {
-            ConnectorResult.PermanentFailure("IGPSPORT_DOWNLOAD_INVALID", it.message ?: "下载的内容不是有效 FIT")
+            ConnectorResult.PermanentFailure("UNSUPPORTED_ORIGINAL_FORMAT", it.message ?: "下载的内容不是有效 FIT")
         }
     }
 

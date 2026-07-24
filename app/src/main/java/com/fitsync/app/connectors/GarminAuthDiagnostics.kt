@@ -175,6 +175,7 @@ class GarminAuthDiagnosticsInterceptor : Interceptor {
         encodedPath.contains("upload-service") -> "UPLOAD"
         encodedPath.contains("/status/") -> "POLL"
         encodedPath.contains("search/activities") -> "VALIDATE"
+        encodedPath.contains("/signin") || encodedPath.contains("/sso/") || encodedPath.contains("/portal/sso") -> "SSO"
         else -> "OTHER"
     }
 }

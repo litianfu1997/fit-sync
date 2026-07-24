@@ -174,10 +174,16 @@ private class OnelapConnector(
     private suspend fun resolveAndDownloadFit(activity: RemoteActivitySummary): ConnectorResult<FitFile> = runCatching {
         val detailUrl = "$baseUrl/api/otm/ride_record/analysis/${activity.remoteActivityId}"
         executeAuthorized(request(detailUrl).get().build()).use { response ->
+            if (response.code == 404 || response.code == 410) {
+                return@use ConnectorResult.PermanentFailure(
+                    "NO_ORIGINAL_FILE",
+                    "迈金未保留该活动的原始 FIT",
+                )
+            }
             if (!response.isSuccessful) return@use failure(response, PlatformWebConfigs.get(platform).loginUrl)
             val root = JSONObject(response.body?.string().orEmpty())
             val fitUrl = JsonPlatformParser.firstString(root, "fitUrl", "fit_url", "file_url", "download_url")
-                ?: return@use ConnectorResult.PermanentFailure(null, "顽鹿未返回 FIT 下载地址")
+                ?: return@use ConnectorResult.PermanentFailure("NO_ORIGINAL_FILE", "迈金未返回 FIT 下载地址")
             downloadFitUrl(fitUrl, activity)
         }
     }.getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "顽鹿活动详情读取失败") }
@@ -197,16 +203,31 @@ private class OnelapConnector(
         activity: RemoteActivitySummary,
     ): ConnectorResult<FitFile> = runCatching {
         executeAuthorized(request(url).get().build()).use outer@ { response ->
+            if (response.code == 404 || response.code == 410) {
+                return@outer ConnectorResult.PermanentFailure(
+                    "NO_ORIGINAL_FILE",
+                    "迈金未保留该活动的原始 FIT",
+                )
+            }
             if (!response.isSuccessful) return@outer failure(response, PlatformWebConfigs.get(platform).loginUrl)
             val contentType = response.header("Content-Type").orEmpty()
             if (contentType.contains("json", ignoreCase = true)) {
                 val json = JSONObject(response.body?.string().orEmpty())
                 val target = JsonPlatformParser.firstString(json, "url", "fit_url", "download_url", "data")
-                    ?: return@outer ConnectorResult.PermanentFailure(null, "迈金未返回 FIT 文件")
+                    ?: return@outer ConnectorResult.PermanentFailure("NO_ORIGINAL_FILE", "迈金未返回 FIT 文件")
                 val targetUrl = target.toHttpUrlOrNull()
                     ?.takeIf { it.isHttps && isTrustedFitHost(it.host) }
-                    ?: return@outer ConnectorResult.PermanentFailure(null, "迈金返回了不安全的 FIT 地址")
+                    ?: return@outer ConnectorResult.PermanentFailure(
+                        "UNSUPPORTED_ORIGINAL_FORMAT",
+                        "迈金返回了不安全的 FIT 地址",
+                    )
                 execute(Request.Builder().url(targetUrl).get().build()).use nested@ { nested ->
+                    if (nested.code == 404 || nested.code == 410) {
+                        return@nested ConnectorResult.PermanentFailure(
+                            "NO_ORIGINAL_FILE",
+                            "迈金未保留该活动的原始 FIT",
+                        )
+                    }
                     if (!nested.isSuccessful) return@nested failure(nested, PlatformWebConfigs.get(platform).loginUrl)
                     ConnectorResult.Success(storeFit(nested, "onelap_${activity.remoteActivityId}.fit"))
                 }
@@ -322,7 +343,7 @@ private class XingzheConnector(
                 val all = JsonPlatformParser.activities(root)
                     ?: return@use ConnectorResult.RetryableFailure("XINGZHE_INVALID_RESPONSE", "行者活动列表响应格式异常")
                 val items = all.filter { it.startTimeEpochMs == null || it.startTimeEpochMs >= sinceEpochMs }
-                val hasMore = all.size >= PAGE_SIZE
+                val hasMore = shouldContinueXingzhePagination(all.size, items.size, PAGE_SIZE)
                 ConnectorResult.Success(
                     ActivityPage(items, if (hasMore) SyncCursor((offset + PAGE_SIZE).toString()) else null, hasMore),
                 )
@@ -334,6 +355,12 @@ private class XingzheConnector(
         val url = "$baseUrl/api/v1/workout/${activity.remoteActivityId}/fit/"
         return runCatching {
             execute(request(url).get().build()).use { response ->
+                if (response.code == 404 || response.code == 410) {
+                    return@use ConnectorResult.PermanentFailure(
+                        "NO_ORIGINAL_FILE",
+                        "行者未保留该活动的原始 FIT",
+                    )
+                }
                 if (!response.isSuccessful) return@use failure(response, PlatformWebConfigs.get(platform).loginUrl)
                 ConnectorResult.Success(storeFit(response, "xingzhe_${activity.remoteActivityId}.fit"))
             }
@@ -409,6 +436,12 @@ private class XingzheConnector(
         private const val PAGE_SIZE = 50
     }
 }
+
+internal fun shouldContinueXingzhePagination(
+    rawItemCount: Int,
+    eligibleItemCount: Int,
+    pageSize: Int = 50,
+): Boolean = rawItemCount >= pageSize && eligibleItemCount > 0
 
 internal object JsonPlatformParser {
     fun activities(root: Any): List<RemoteActivitySummary>? {

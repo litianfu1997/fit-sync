@@ -209,4 +209,28 @@ class GarminConnectorTest {
     fun loginResponse_normalModernRedirectIsNotExpired() {
         assertThat(isGarminLoginResponse(302, "https://connect.garmin.cn/modern/")).isFalse()
     }
+
+    @Test
+    fun ssoEntryUrl_encodesServiceParam() {
+        val url = garminSsoEntryUrl("https://connect.garmin.cn/modern/")
+        assertThat(url).startsWith("https://connect.garmin.cn/signin/?service=")
+        assertThat(url).contains("https%3A%2F%2Fconnect.garmin.cn%2Fmodern%2F")
+    }
+
+    @Test
+    fun extractJwtWeb_picksFirstJwtFromSetCookieHeaders() {
+        assertThat(
+            extractJwtWebFromHeaders(listOf("locale=zh; Path=/", "JWT_WEB=eyJabc; Path=/; Secure; HttpOnly")),
+        ).isEqualTo("eyJabc")
+        assertThat(extractJwtWebFromHeaders(listOf("JWT_WEB=\"quoted\"; Path=/"))).isEqualTo("quoted")
+        assertThat(extractJwtWebFromHeaders(listOf("OTHER=x"))).isNull()
+        assertThat(extractJwtWebFromHeaders(emptyList())).isNull()
+    }
+
+    @Test
+    fun isGarminSsoHost_detectsSsoDomain() {
+        assertThat(isGarminSsoHost("https://sso.garmin.cn/sso/signin")).isTrue()
+        assertThat(isGarminSsoHost("https://connect.garmin.cn/modern/")).isFalse()
+        assertThat(isGarminSsoHost("not a url")).isFalse()
+    }
 }

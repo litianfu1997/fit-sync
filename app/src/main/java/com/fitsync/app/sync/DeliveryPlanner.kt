@@ -13,29 +13,36 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
     suspend fun planForActivity(canonicalActivityId: Long, sourcePlatform: Platform): Int =
         planForActivities(listOf(canonicalActivityId), sourcePlatform)
 
-    suspend fun planForActivities(canonicalActivityIds: List<Long>, sourcePlatform: Platform): Int {
+    suspend fun planForActivities(
+        canonicalActivityIds: List<Long>,
+        sourcePlatform: Platform,
+        allowedDestinationAccountIds: Set<Long>? = null,
+    ): Int {
         if (canonicalActivityIds.isEmpty()) return 0
         val activities = db.canonicalActivityDao().getByIds(canonicalActivityIds)
             .filter { isDeliveryPlanningAllowed(it.dedupStatus) }
         if (activities.isEmpty()) return 0
         val variants = db.activityVariantDao().findByCanonicalIds(activities.map { it.id })
             .groupBy { it.canonicalActivityId }
-        val rules = db.syncRuleDao().getEnabled().filter { it.sourcePlatform == sourcePlatform }
+        val rules = db.syncRuleDao().getEnabled().filter { rule ->
+            rule.sourcePlatform == sourcePlatform &&
+                isDestinationReadyForPlanning(rule.destinationAccountId, allowedDestinationAccountIds)
+        }
         if (rules.isEmpty()) return 0
         val accounts = db.platformAccountDao().getAll().associateBy { it.id }
         val existingCopies = db.platformCopyDao().findByCanonicalIds(activities.map { it.id })
             .mapTo(hashSetOf()) { it.canonicalActivityId to it.platformAccountId }
         val jobs = buildList {
-            activities.forEach { activity ->
+            activities.forEach activityLoop@ { activity ->
                 val candidates = variants[activity.id].orEmpty()
                 val variant = candidates.firstOrNull { it.id == activity.primaryVariantId }
                     ?: candidates.maxByOrNull { it.qualityScore ?: 0 }
-                    ?: return@forEach
-                rules.forEach { rule ->
-                    if (!isActivityEligibleForRule(activity.startTimeEpochMs, rule)) return@forEach
-                    val destination = accounts[rule.destinationAccountId] ?: return@forEach
-                    if (destination.platform == sourcePlatform) return@forEach
-                    if ((activity.id to destination.id) in existingCopies) return@forEach
+                    ?: return@activityLoop
+                rules.forEach ruleLoop@ { rule ->
+                    if (!isActivityEligibleForRule(activity.startTimeEpochMs, rule)) return@ruleLoop
+                    val destination = accounts[rule.destinationAccountId] ?: return@ruleLoop
+                    if (destination.platform == sourcePlatform) return@ruleLoop
+                    if ((activity.id to destination.id) in existingCopies) return@ruleLoop
                     add(
                         DeliveryJobEntity(
                             canonicalActivityId = activity.id,
@@ -144,7 +151,7 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
             if (existing != null) db.syncRuleDao().delete(existing.id)
             return
         }
-        val ruleId = db.syncRuleDao().upsert(
+        db.syncRuleDao().upsert(
             SyncRuleEntity(
                 id = existing?.id ?: 0,
                 sourcePlatform = source,
@@ -155,13 +162,14 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
                 createdAtEpochMs = existing?.createdAtEpochMs ?: System.currentTimeMillis(),
             ),
         )
-        if (includeHistory && (existing?.includeHistory != true)) {
-            planHistory(if (existing?.id == null || existing.id == 0L) ruleId else existing.id)
-        }
     }
 
-    suspend fun planHistory(ruleId: Long): Int {
+    suspend fun planHistory(
+        ruleId: Long,
+        allowedDestinationAccountIds: Set<Long>? = null,
+    ): Int {
         val rule = db.syncRuleDao().getAll().firstOrNull { it.id == ruleId } ?: return 0
+        if (!isDestinationReadyForPlanning(rule.destinationAccountId, allowedDestinationAccountIds)) return 0
         var count = 0
         var beforeTime = Long.MAX_VALUE
         var beforeId = Long.MAX_VALUE
@@ -175,7 +183,11 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
                     (it.sourcePlatform ?: Platform.LOCAL_IMPORT) == rule.sourcePlatform
                 }
             }.map { it.id }
-            count += planForActivities(sourceIds, rule.sourcePlatform)
+            count += planForActivities(
+                canonicalActivityIds = sourceIds,
+                sourcePlatform = rule.sourcePlatform,
+                allowedDestinationAccountIds = setOf(rule.destinationAccountId),
+            )
             val last = page.last()
             beforeTime = last.startTimeEpochMs
             beforeId = last.id
@@ -231,6 +243,14 @@ internal fun isActivityEligibleForRule(activityStartTimeEpochMs: Long, rule: Syn
 
 internal fun isDeliveryPlanningAllowed(dedupStatus: DedupStatus): Boolean =
     dedupStatus != DedupStatus.NEEDS_REVIEW
+
+/**
+ * 传入目标账号白名单时，只允许已经完成本轮目标端预拉取的账号创建投递任务。
+ */
+internal fun isDestinationReadyForPlanning(
+    destinationAccountId: Long,
+    allowedDestinationAccountIds: Set<Long>?,
+): Boolean = allowedDestinationAccountIds == null || destinationAccountId in allowedDestinationAccountIds
 
 /**
  * “本机导入”表示已经进入 FitSync 本地活动库的全部活动，不受原始平台标签限制。
