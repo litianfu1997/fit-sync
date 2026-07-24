@@ -369,31 +369,48 @@ internal class GarminConnectApiConnector(
      * 用 SSO 长会话（sso.garmin.cn 的 CASTGC 等）走 CAS 重定向链换发新 JWT_WEB。手动逐跳
      * （client 是 followRedirects(false)），每跳按 host 拼对应域 cookie；诊断拦截器会把每跳的
      * code/Location/Set-Cookie 记成 RESPONSE(operation=SSO)，这里再补一条换发总结。
-     * 成功后同步写回 CookieManager（LIVE）和 secureStore（STORED），让下一次 sessionCookie() 读到新值。
-     * 第一版只刷 JWT_WEB、不动 CSRF（读操作不需要；上传若 403 走现有重试，不致命）。
+     *
+     * CASTGC 优先取 live CookieManager；为空时回退登录时持久化到 Keystore 的副本（[selectGarminSsoCookie]），
+     * 这样进程被杀、WebView cookie 库被清后仍能静默换发。换发用到的 sso cookie 直接以 Cookie 头发送，
+     * 不依赖 CookieManager，故回退值即可生效。
+     *
+     * 成功后同步写回 CookieManager（LIVE）和 secureStore（STORED）：新 JWT_WEB，以及若链路轮换了的新 CASTGC，
+     * 让下一次 sessionCookie()/refreshJwtWebViaSso() 读到新值、且 STORED 的 ticket 保持新鲜。
+     * 仍只刷 JWT_WEB/CASTGC、不动 CSRF（读操作不需要；上传若 403 走现有重试，不致命）。
      */
     private suspend fun refreshJwtWebViaSso(operation: String): SessionState {
         val cm = CookieManager.getInstance()
         val connectCookie = cm.getCookie("https://connect.garmin.cn/").orEmpty()
-        val ssoCookie = cm.getCookie("https://sso.garmin.cn/")
+            .ifBlank { sessionManager.garminCookieHeader().orEmpty() }
+        val ssoChoice = selectGarminSsoCookie(
+            liveSso = cm.getCookie("https://sso.garmin.cn/"),
+            storedSso = sessionManager.garminSsoCookie(),
+        )
+        val ssoCookie = ssoChoice.cookie
+        val ssoSource = ssoChoice.source
         val ua = sessionManager.garminUserAgent() ?: GARMIN_DESKTOP_USER_AGENT
         var currentUrl = garminSsoEntryUrl("https://connect.garmin.cn/modern/")
         var newJwt: String? = null
+        var rotatedCastgc: String? = null
         var lastCode: Int? = null
         var lastLocation: String? = null
         for (hop in 0 until SSO_MAX_HOPS) {
             val cookieForHop = if (isGarminSsoHost(currentUrl)) ssoCookie.orEmpty() else connectCookie
             val req = buildGarminBrowserRequest(currentUrl, cookieForHop, ua)
-            val pair = runCatching {
+            val advanced = runCatching {
                 execute(req).use { resp ->
                     lastCode = resp.code
                     lastLocation = resp.header("Location")
-                    val jwtHere = extractJwtWebFromHeaders(resp.headers("Set-Cookie"))
-                    if (jwtHere != null) newJwt = jwtHere
+                    val setCookies = resp.headers("Set-Cookie")
+                    extractJwtWebFromHeaders(setCookies)?.let { newJwt = it }
+                    // SSO 域跳跳可能轮换 CASTGC；抓最新值，换发成功后回写，避免下次用到过期 ticket。
+                    if (isGarminSsoHost(currentUrl)) {
+                        extractCookieValueFromSetCookie(setCookies, "CASTGC")?.let { rotatedCastgc = it }
+                    }
                     resp.code to resp.header("Location")
                 }
             }.getOrNull() ?: break
-            val (code, location) = pair
+            val (code, location) = advanced
             if (code in 300..399 && !location.isNullOrBlank()) {
                 currentUrl = location
             } else {
@@ -408,15 +425,19 @@ internal class GarminConnectApiConnector(
                 outcome = if (newJwt != null) GarminAuthDiagnostics.OUTCOME_OK else "FAIL",
                 httpCode = lastCode,
                 locationHost = lastLocation?.let { runCatching { java.net.URI(it).host }.getOrNull() },
+                cookieSource = ssoSource,
             ),
         )
         val jwt = newJwt ?: return SessionState.EXPIRED
-        // 同步写回 CookieManager（LIVE，sessionCookie 优先读它）和 secureStore（STORED 兜底）
+        // 换发成功：合并轮换后的 CASTGC（若有），得到要持久化的最终 sso cookie 串。
+        val finalSso = rotatedCastgc?.let { replaceCastgcInHeader(ssoCookie, it) } ?: ssoCookie
+        // 同步写回 CookieManager（LIVE，sessionCookie 优先读它）和 secureStore（STORED 兜底）。
         runCatching {
             cm.setCookie("https://connect.garmin.cn/", "JWT_WEB=$jwt; Path=/; Secure; HttpOnly")
+            if (!finalSso.isNullOrBlank()) rehydrateSsoCookie(cm, "https://sso.garmin.cn/", finalSso)
             cm.flush()
         }
-        sessionManager.saveGarminSession(jwt, sessionManager.garminCsrf(), "garmin.cn", ua, null)
+        sessionManager.saveGarminSession(jwt, sessionManager.garminCsrf(), "garmin.cn", ua, null, finalSso)
         return SessionState.AUTHENTICATED
     }
 
@@ -430,6 +451,21 @@ internal class GarminConnectApiConnector(
             .header("Upgrade-Insecure-Requests", "1")
             .get()
             .build()
+
+    /** 把 sso 域 cookie 串（name=val; name2=val2，无属性）逐个写回 CookieManager，保持 LIVE 与 STORED 一致。 */
+    private fun rehydrateSsoCookie(cm: CookieManager, url: String, header: String) {
+        header.split(';').map { it.trim() }.filter { it.isNotBlank() }.forEach { pair ->
+            cm.setCookie(url, "$pair; Path=/; Secure; HttpOnly")
+        }
+    }
+
+    /** 用新 CASTGC 值替换 sso cookie 串里的旧 CASTGC（保留其它 cookie），无旧值则追加。 */
+    private fun replaceCastgcInHeader(base: String?, newCastgcValue: String): String {
+        val kept = base.orEmpty().split(';').map { it.trim() }.filter {
+            it.isNotBlank() && !it.substringBefore('=').trim().equals("CASTGC", ignoreCase = true)
+        }
+        return (kept + "CASTGC=$newCastgcValue").joinToString("; ")
+    }
 
     private val loginUrl: String
         get() = PlatformWebConfigs.get(platform).loginUrl
@@ -499,6 +535,21 @@ internal fun selectGarminApiCookie(
     .firstOrNull { cookieValue(it, "JWT_WEB") != null }
     ?: storedJwt?.takeIf { it.isNotBlank() }?.let { "JWT_WEB=$it" }
 
+/**
+ * 选择 SSO 换发要带的 sso.garmin.cn cookie：优先 LIVE（CookieManager 里最新的），LIVE 为空或不含
+ * CASTGC 时回退 STORED（Keystore 里登录时抓的）。返回所选 cookie 与来源标签（LIVE/STORED/NONE）。
+ * 来源标签写入 SSO_RELOGIN 诊断的 cookieSource，用来定位「进程被杀后还能不能静默换发」。
+ */
+internal data class GarminSsoCookieChoice(val cookie: String?, val source: String)
+
+internal fun selectGarminSsoCookie(liveSso: String?, storedSso: String?): GarminSsoCookieChoice {
+    if (cookieValue(liveSso, "CASTGC") != null) return GarminSsoCookieChoice(liveSso, "LIVE")
+    if (cookieValue(storedSso, "CASTGC") != null) return GarminSsoCookieChoice(storedSso, "STORED")
+    // 都没 CASTGC：尽力一搏（可能仍带 GDID 等），标记 NONE 让诊断区分「真无 ticket」。
+    val best = liveSso?.takeIf { it.isNotBlank() } ?: storedSso?.takeIf { it.isNotBlank() }
+    return GarminSsoCookieChoice(best, "NONE")
+}
+
 internal fun isGarminLoginResponse(code: Int, location: String?): Boolean {
     if (code == 401) return true
     if (code !in 300..399 || location.isNullOrBlank()) return false
@@ -525,14 +576,18 @@ internal fun garminCookieMissingResult(hasPersistedAccount: Boolean, loginUrl: S
 internal fun garminSsoEntryUrl(serviceUrl: String): String =
     "https://connect.garmin.cn/signin/?service=" + URLEncoder.encode(serviceUrl, "UTF-8")
 
-/** 从一组 Set-Cookie 头里提取 JWT_WEB 的值（首个匹配），取不到返回 null。 */
-internal fun extractJwtWebFromHeaders(setCookieHeaders: List<String>): String? =
+/** 从一组 Set-Cookie 头里提取指定 cookie 的值（首个匹配），取不到返回 null。 */
+internal fun extractCookieValueFromSetCookie(setCookieHeaders: List<String>, name: String): String? =
     setCookieHeaders.firstNotNullOfOrNull { header ->
-        if (header.substringBefore('=').trim().equals("JWT_WEB", ignoreCase = true)) {
+        if (header.substringBefore('=').trim().equals(name, ignoreCase = true)) {
             header.substringAfter('=').substringBefore(';').trim().removeSurrounding("\"")
                 .takeIf { it.isNotEmpty() }
         } else null
     }
+
+/** 从一组 Set-Cookie 头里提取 JWT_WEB 的值（首个匹配），取不到返回 null。 */
+internal fun extractJwtWebFromHeaders(setCookieHeaders: List<String>): String? =
+    extractCookieValueFromSetCookie(setCookieHeaders, "JWT_WEB")
 
 /** 判断 URL 是否属于 SSO 域（决定换发该跳带 sso cookie 还是 connect cookie）。 */
 internal fun isGarminSsoHost(url: String): Boolean =

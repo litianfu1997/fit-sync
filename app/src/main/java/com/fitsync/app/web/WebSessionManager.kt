@@ -152,6 +152,9 @@ class WebSessionManager(
      * - [csrf]：中国站写操作使用的 `Connect-Csrf-Token`；`NK: NT` 是额外代理头，不能替代它。
      * - [domain]：登录域归属 garmin.cn / garmin.com（决定 connectapi 后缀）。
      * - [userAgent]：复用 WebView 登录时的 UA，避免被网关按移动端拦截。
+     * - [ssoCookieHeader]：sso.garmin.cn 域的 cookie 串（含 CASTGC 等），作为后台静默续登的持久化
+     *   「重登凭据」——进程被杀、WebView cookie 库被清后，[com.fitsync.app.connectors.GarminConnectApiConnector]
+     *   的 refreshJwtWebViaSso 仍可凭它换发新 JWT_WEB。Garmin 无账号密码登录，CASTGC 即等价的长会话凭据。
      */
     fun saveGarminSession(
         jwtWeb: String?,
@@ -159,6 +162,7 @@ class WebSessionManager(
         domain: String?,
         userAgent: String?,
         cookieHeader: String? = null,
+        ssoCookieHeader: String? = null,
     ) {
         secureStore.put(key(Platform.GARMIN, "jwt_web"), jwtWeb)
         // 完整 Cookie 头用于网页代理路径（connect.garmin.cn/modern/proxy 上传）；
@@ -170,6 +174,8 @@ class WebSessionManager(
         secureStore.put(key(Platform.GARMIN, "csrf"), csrf)
         secureStore.put(key(Platform.GARMIN, "domain"), domain)
         secureStore.put(key(Platform.GARMIN, "user_agent"), userAgent)
+        // put(null/blank) 会自动 remove（见 SecureSessionStore），向后兼容既有调用点。
+        secureStore.put(key(Platform.GARMIN, "sso_cookie"), ssoCookieHeader)
     }
 
     fun garminJwtWeb(): String? = secureStore.get(key(Platform.GARMIN, "jwt_web"))
@@ -178,6 +184,7 @@ class WebSessionManager(
     fun garminDomain(): String =
         secureStore.get(key(Platform.GARMIN, "domain"))?.takeIf { it.isNotBlank() } ?: "garmin.cn"
     fun garminUserAgent(): String? = secureStore.get(key(Platform.GARMIN, "user_agent"))
+    fun garminSsoCookie(): String? = secureStore.get(key(Platform.GARMIN, "sso_cookie"))
 
     /**
      * 持久化 iGPSPORT 中国站后台登录凭据（Keystore 加密）。
@@ -246,7 +253,7 @@ class WebSessionManager(
         lastWebViewUrls.remove(platform)
         cookies.flush()
         listOf(
-            "token", "refresh_token", "uid", "csrf", "jwt_web", "cookie", "domain",
+            "token", "refresh_token", "uid", "csrf", "jwt_web", "cookie", "sso_cookie", "domain",
             "user_agent", "username", "password", "client_id", "client_secret", "expires_at",
             "scope", "display_name", "oauth_state", "oauth_state_created_at",
         ).forEach {

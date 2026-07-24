@@ -490,7 +490,15 @@ class PlatformWebActivity : ComponentActivity() {
         val csrf = connectCsrf?.takeIf { it.isNotBlank() } ?: sessions.garminCsrf()
         val host = runCatching { java.net.URI(webView?.url.orEmpty()).host }.getOrNull().orEmpty()
         val domain = if (host.endsWith("garmin.com")) "garmin.com" else "garmin.cn"
-        sessions.saveGarminSession(jwtWeb, csrf, domain, webView?.settings?.userAgentString, cookieHeader)
+        // 单独抓 sso.garmin.cn 域 cookie（CASTGC 等长会话凭据），与 connect 域分开，避免跨域混存。
+        // 这是后台静默续登（refreshJwtWebViaSso）的命脉：持久化后进程被杀仍可换发新 JWT_WEB。
+        val ssoCookieHeader = sequenceOf(
+            "https://sso.garmin.cn/",
+            "https://sso.garmin.cn/sso/",
+        ).mapNotNull { CookieManager.getInstance().getCookie(it) }
+            .joinToString("; ")
+            .takeIf { it.isNotBlank() }
+        sessions.saveGarminSession(jwtWeb, csrf, domain, webView?.settings?.userAgentString, cookieHeader, ssoCookieHeader)
         return true
     }
 

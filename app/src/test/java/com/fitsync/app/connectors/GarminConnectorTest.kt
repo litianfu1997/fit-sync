@@ -233,4 +233,57 @@ class GarminConnectorTest {
         assertThat(isGarminSsoHost("https://connect.garmin.cn/modern/")).isFalse()
         assertThat(isGarminSsoHost("not a url")).isFalse()
     }
+
+    @Test
+    fun ssoCookie_prefersLiveCastgc() {
+        val choice = selectGarminSsoCookie(liveSso = "GDID=x; CASTGC=live-ticket", storedSso = "CASTGC=stored-ticket")
+        assertThat(choice.source).isEqualTo("LIVE")
+        assertThat(choice.cookie).contains("CASTGC=live-ticket")
+    }
+
+    @Test
+    fun ssoCookie_fallsBackToStoredWhenLiveLacksCastgc() {
+        val choice = selectGarminSsoCookie(liveSso = "GDID=x", storedSso = "CASTGC=stored-ticket")
+        assertThat(choice.source).isEqualTo("STORED")
+        assertThat(choice.cookie).isEqualTo("CASTGC=stored-ticket")
+    }
+
+    @Test
+    fun ssoCookie_treatsBlankLiveAsMissing() {
+        val choice = selectGarminSsoCookie(liveSso = "", storedSso = "CASTGC=stored-ticket")
+        assertThat(choice.source).isEqualTo("STORED")
+    }
+
+    @Test
+    fun ssoCookie_prefersLiveWhenBothHaveCastgc() {
+        val choice = selectGarminSsoCookie(liveSso = "CASTGC=live", storedSso = "CASTGC=stored")
+        assertThat(choice.source).isEqualTo("LIVE")
+        assertThat(choice.cookie).isEqualTo("CASTGC=live")
+    }
+
+    @Test
+    fun ssoCookie_returnsNoneWhenNeitherHasCastgc() {
+        val choice = selectGarminSsoCookie(liveSso = "GDID=x", storedSso = "GDID=y")
+        assertThat(choice.source).isEqualTo("NONE")
+        // 尽力一搏：优先 live 的非空串
+        assertThat(choice.cookie).isEqualTo("GDID=x")
+    }
+
+    @Test
+    fun ssoCookie_returnsNullWhenEverythingEmpty() {
+        val choice = selectGarminSsoCookie(liveSso = null, storedSso = null)
+        assertThat(choice.source).isEqualTo("NONE")
+        assertThat(choice.cookie).isNull()
+    }
+
+    @Test
+    fun extractCookieValue_picksNamedValueFromSetCookie() {
+        assertThat(
+            extractCookieValueFromSetCookie(
+                listOf("OTHER=x; Path=/", "CASTGC=abc; Path=/; Secure; HttpOnly"),
+                "CASTGC",
+            ),
+        ).isEqualTo("abc")
+        assertThat(extractCookieValueFromSetCookie(emptyList(), "CASTGC")).isNull()
+    }
 }
