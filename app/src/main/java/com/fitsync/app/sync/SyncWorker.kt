@@ -49,6 +49,7 @@ class SyncWorker(
 
 object SyncScheduler {
     private const val PERIODIC_NAME = "fitsync-periodic-sync"
+    private const val AUTO_NOW_NAME = "fitsync-auto-sync-now"
     private const val DELIVERY_NAME = "fitsync-delivery-sync"
     const val MANUAL_NAME = "fitsync-manual-sync"
     const val PERIODIC_WORK_NAME = PERIODIC_NAME
@@ -72,15 +73,29 @@ object SyncScheduler {
     /**
      * 从 Room 读取偏好并注册/取消周期任务。供冷启动与开机广播共用。
      */
-    suspend fun ensureScheduled(context: Context) {
+    suspend fun ensureScheduled(context: Context): Boolean {
         val appContext = context.applicationContext
         val settings = runCatching {
             (appContext as? FitSyncApp)?.database?.appSettingsDao()?.get()
         }.getOrNull()
+        val enabled = settings?.autoSyncEnabled != false
         schedule(
             appContext,
-            enabled = settings?.autoSyncEnabled != false,
+            enabled = enabled,
             intervalMinutes = settings?.syncIntervalMinutes ?: 15,
+        )
+        return enabled
+    }
+
+    /**
+     * 冷启动或平台登录恢复后立即执行一次完整自动同步。
+     * 与手动同步使用不同的唯一任务链，避免覆盖用户正在执行的一次性同步。
+     */
+    fun enqueueAutoNow(context: Context) {
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            AUTO_NOW_NAME,
+            ExistingWorkPolicy.APPEND_OR_REPLACE,
+            oneTimeRequest(force = false, deliveryOnly = false, expedited = true),
         )
     }
 

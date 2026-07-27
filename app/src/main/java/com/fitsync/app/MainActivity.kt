@@ -18,7 +18,11 @@ class MainActivity : ComponentActivity() {
         }
         window.decorView.postOnAnimation {
             reportFullyDrawn()
-            (application as FitSyncApp).onFirstFrame()
+            (application as FitSyncApp).also { app ->
+                app.onFirstFrame()
+                // 自动在不可见 WebView 中续期 Garmin SSO，会话有效时无需用户打开平台页。
+                app.garminSilentSessionRefresher.refreshOnAppStart(this)
+            }
         }
     }
 }

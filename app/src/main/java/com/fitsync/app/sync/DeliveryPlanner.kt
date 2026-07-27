@@ -164,7 +164,13 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
         )
     }
 
-    suspend fun planHistory(
+    /**
+     * 补扫规则当前应投递但尚未建任务的活动。
+     *
+     * 目标端临时不可用时，来源活动仍可能已经拉入本地；恢复后必须补扫，否则这些活动不会再作为
+     * “本轮新导入”出现。未开启 includeHistory 的规则仍由 [isActivityEligibleForRule] 限制为规则创建后的活动。
+     */
+    suspend fun planRuleBacklog(
         ruleId: Long,
         allowedDestinationAccountIds: Set<Long>? = null,
     ): Int {
@@ -251,6 +257,12 @@ internal fun isDestinationReadyForPlanning(
     destinationAccountId: Long,
     allowedDestinationAccountIds: Set<Long>?,
 ): Boolean = allowedDestinationAccountIds == null || destinationAccountId in allowedDestinationAccountIds
+
+/** 规则积压补扫不区分 includeHistory；历史边界由 [isActivityEligibleForRule] 逐活动判断。 */
+internal fun isRuleBacklogPlanningAllowed(
+    rule: SyncRuleEntity,
+    readyDestinationAccountIds: Set<Long>,
+): Boolean = rule.enabled && rule.destinationAccountId in readyDestinationAccountIds
 
 /**
  * “本机导入”表示已经进入 FitSync 本地活动库的全部活动，不受原始平台标签限制。

@@ -82,6 +82,8 @@ class PlatformWebActivity : ComponentActivity() {
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var grantedUploadUri: Uri? = null
     private var mainFrameLoadFailed = false
+    private var garminAutoValidationInFlight = false
+    private var garminAutoValidationCompleted = false
     private var statusText by mutableStateOf("请在平台网页中登录；本页仅保存 Cookie/会话令牌，不收集网页里输入的密码")
     private var uploadFileProvided by mutableStateOf(false)
     private var uploadConfirmationBusy by mutableStateOf(false)
@@ -242,6 +244,17 @@ class PlatformWebActivity : ComponentActivity() {
                         "页面已加载；登录完成后点击“验证并保存登录”"
                     }
                 }
+                if (platform == Platform.GARMIN &&
+                    shouldAutoCaptureGarminSession(url, mainFrameLoadFailed) &&
+                    !garminAutoValidationInFlight &&
+                    !garminAutoValidationCompleted
+                ) {
+                    // SSO 仍有效时，打开 Connect 会自动换发 JWT_WEB；页面落地后立即保存，
+                    // 不再要求用户额外点击“验证并保存登录”。
+                    garminAutoValidationInFlight = true
+                    statusText = "检测到 Garmin 登录状态，正在自动保存并恢复同步…"
+                    validateGarminFromWebView(autoTriggered = true)
+                }
             }
 
             override fun onReceivedError(
@@ -375,7 +388,7 @@ class PlatformWebActivity : ComponentActivity() {
         CookieManager.getInstance().flush()
         FitSyncApp.instance.webSessionManager.rememberWebViewUrl(platform, webView?.url)
         when (platform) {
-            Platform.GARMIN -> validateGarminFromWebView()
+            Platform.GARMIN -> validateGarminFromWebView(autoTriggered = false)
             Platform.ONELAP -> captureOnelapTokens {
                 persistDetectedState(detectedOverride = null)
             }
@@ -403,7 +416,8 @@ class PlatformWebActivity : ComponentActivity() {
                     "网页会话校验未通过，请在页面完成验证码/二次确认后重试（页面 $page；$cookieInfo）"
             }
             if (state == SessionState.AUTHENTICATED) {
-                SyncScheduler.enqueueContinuation(this@PlatformWebActivity)
+                // 登录恢复后需要重新执行目标预拉取与规则积压补扫，不能只续跑已有投递任务。
+                SyncScheduler.enqueueAutoNow(this@PlatformWebActivity)
             }
         }
     }
@@ -431,7 +445,7 @@ class PlatformWebActivity : ComponentActivity() {
     }
 
     /** Garmin 登录页成功跳回中国站 Connect 后即可确认；不依赖厂商可能随时改名的 Cookie。 */
-    private fun validateGarminFromWebView() {
+    private fun validateGarminFromWebView(autoTriggered: Boolean) {
         val script = """
             (function(){
               var host = location.host || '';
@@ -448,7 +462,8 @@ class PlatformWebActivity : ComponentActivity() {
         """.trimIndent()
         val view = webView
         if (view == null) {
-            persistDetectedState(detectedOverride = null)
+            garminAutoValidationInFlight = false
+            if (!autoTriggered) persistDetectedState(detectedOverride = null)
             return
         }
         view.evaluateJavascript(script) { encoded ->
@@ -464,10 +479,22 @@ class PlatformWebActivity : ComponentActivity() {
             when {
                 pageReady -> {
                     val captured = captureGarminSession(proof?.optString("csrf"))
+                    if (autoTriggered) {
+                        garminAutoValidationInFlight = false
+                        if (!captured) {
+                            statusText = "Garmin 页面已打开，但尚未拿到新的登录令牌；可等待页面刷新或手动验证"
+                            return@evaluateJavascript
+                        }
+                        garminAutoValidationCompleted = true
+                    }
                     persistDetectedState(
                         detectedOverride = if (captured) SessionState.AUTHENTICATED
                         else SessionState.NEEDS_USER_ACTION,
                     )
+                }
+                autoTriggered -> {
+                    // 自动探测失败不改写账号状态，保留手动验证作为兜底。
+                    garminAutoValidationInFlight = false
                 }
                 onSso -> persistDetectedState(detectedOverride = SessionState.EXPIRED)
                 sessions.hasSession(platform) -> persistDetectedState(detectedOverride = SessionState.NEEDS_USER_ACTION)
@@ -479,27 +506,12 @@ class PlatformWebActivity : ComponentActivity() {
     /** 抓取并持久化 Garmin 会话；成功返回 true，未抓到 JWT_WEB 返回 false
      * （调用方据此把登录判定降级为 NEEDS_USER_ACTION，避免「标记已登录实则无凭据」）。 */
     private fun captureGarminSession(connectCsrf: String?): Boolean {
-        val sessions = FitSyncApp.instance.webSessionManager
-        val cookieHeader = sequenceOf(
-            "https://connect.garmin.cn/",
-            "https://connect.garmin.com/",
-            webView?.url,
-        ).mapNotNull { CookieManager.getInstance().getCookie(it) }.joinToString("; ")
-        val jwtWeb = cookieValue(cookieHeader, "JWT_WEB") ?: return false
-        // Connect-Csrf-Token 来自登录页 <meta name="csrf-token">（gc-api 写操作强制要求），由调用方从 JS 传入。
-        val csrf = connectCsrf?.takeIf { it.isNotBlank() } ?: sessions.garminCsrf()
-        val host = runCatching { java.net.URI(webView?.url.orEmpty()).host }.getOrNull().orEmpty()
-        val domain = if (host.endsWith("garmin.com")) "garmin.com" else "garmin.cn"
-        // 单独抓 sso.garmin.cn 域 cookie（CASTGC 等长会话凭据），与 connect 域分开，避免跨域混存。
-        // 这是后台静默续登（refreshJwtWebViaSso）的命脉：持久化后进程被杀仍可换发新 JWT_WEB。
-        val ssoCookieHeader = sequenceOf(
-            "https://sso.garmin.cn/",
-            "https://sso.garmin.cn/sso/",
-        ).mapNotNull { CookieManager.getInstance().getCookie(it) }
-            .joinToString("; ")
-            .takeIf { it.isNotBlank() }
-        sessions.saveGarminSession(jwtWeb, csrf, domain, webView?.settings?.userAgentString, cookieHeader, ssoCookieHeader)
-        return true
+        val view = webView ?: return false
+        return persistGarminSessionFromWebView(
+            view = view,
+            sessions = FitSyncApp.instance.webSessionManager,
+            connectCsrf = connectCsrf,
+        )
     }
 
     private fun providePendingFitFile() {
@@ -806,4 +818,47 @@ class PlatformWebActivity : ComponentActivity() {
             putExtra(EXTRA_URL, url ?: PlatformWebConfigs.get(platform).loginUrl)
         }
     }
+}
+
+/** 仅在 Garmin 中国站 Connect 主页面成功落地后自动抓取会话；SSO/登录页仍等待用户完成操作。 */
+internal fun shouldAutoCaptureGarminSession(url: String, mainFrameLoadFailed: Boolean): Boolean {
+    if (mainFrameLoadFailed) return false
+    return runCatching {
+        val uri = java.net.URI(url)
+        val host = uri.host.orEmpty()
+        val path = uri.path.orEmpty()
+        host.equals("connect.garmin.cn", ignoreCase = true) &&
+            !path.contains("/signin", ignoreCase = true) &&
+            !path.contains("/portal/sso", ignoreCase = true)
+    }.getOrDefault(false)
+}
+
+/** 从可见或隐藏 WebView 抓取 Garmin 中国站会话，并加密持久化供后台同步使用。 */
+internal fun persistGarminSessionFromWebView(
+    view: WebView,
+    sessions: WebSessionManager,
+    connectCsrf: String?,
+): Boolean {
+    val cookieManager = CookieManager.getInstance()
+    val cookieHeader = sequenceOf(
+        "https://connect.garmin.cn/",
+        view.url,
+    ).mapNotNull(cookieManager::getCookie).joinToString("; ")
+    val jwtWeb = cookieValue(cookieHeader, "JWT_WEB") ?: return false
+    val csrf = connectCsrf?.takeIf { it.isNotBlank() } ?: sessions.garminCsrf()
+    val ssoCookieHeader = sequenceOf(
+        "https://sso.garmin.cn/",
+        "https://sso.garmin.cn/sso/",
+    ).mapNotNull(cookieManager::getCookie)
+        .joinToString("; ")
+        .takeIf { it.isNotBlank() }
+    sessions.saveGarminSession(
+        jwtWeb = jwtWeb,
+        csrf = csrf,
+        domain = "garmin.cn",
+        userAgent = view.settings.userAgentString,
+        cookieHeader = cookieHeader,
+        ssoCookieHeader = ssoCookieHeader,
+    )
+    return true
 }

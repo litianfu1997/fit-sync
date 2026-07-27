@@ -140,9 +140,10 @@ class SyncCoordinator(
         if (manualSelection == null && readyDestinationAccountIds.isNotEmpty()) {
             queued += mutationGate.withLock {
                 enabledRules
-                    .filter { it.includeHistory && it.destinationAccountId in readyDestinationAccountIds }
+                    .filter { isRuleBacklogPlanningAllowed(it, readyDestinationAccountIds) }
                     .sumOf { rule ->
-                        planner.planHistory(
+                        // 所有规则都要补扫：目标端上轮不可用时，来源活动可能已拉取但尚未创建投递任务。
+                        planner.planRuleBacklog(
                             ruleId = rule.id,
                             allowedDestinationAccountIds = readyDestinationAccountIds,
                         )

@@ -189,7 +189,7 @@ class GarminConnectorTest {
     fun cookieMissing_returnsRetryableFailureWhenAccountPreviouslyConnected() {
         val r = garminCookieMissingResult(hasPersistedAccount = true, loginUrl = "https://connect.garmin.cn")
         assertThat(r).isInstanceOf(ConnectorResult.RetryableFailure::class.java)
-        assertThat((r as ConnectorResult.RetryableFailure).code).isEqualTo("GARMIN_COOKIE_UNREADABLE")
+        assertThat((r as ConnectorResult.RetryableFailure).code).isEqualTo(GARMIN_COOKIE_UNREADABLE_CODE)
     }
 
     @Test
@@ -215,6 +215,59 @@ class GarminConnectorTest {
         val url = garminSsoEntryUrl("https://connect.garmin.cn/modern/")
         assertThat(url).startsWith("https://connect.garmin.cn/signin/?service=")
         assertThat(url).contains("https%3A%2F%2Fconnect.garmin.cn%2Fmodern%2F")
+
+        val direct = garminDirectSsoUrl("https://connect.garmin.cn/modern/")
+        assertThat(direct).startsWith(
+            "https://sso.garmin.cn/portal/sso/zh-CN/sign-in?clientId=GarminConnect&service=",
+        )
+        assertThat(direct).contains("https%3A%2F%2Fconnect.garmin.cn%2Fmodern%2F")
+    }
+
+    @Test
+    fun ssoRedirect_resolvesAbsoluteAndRelativeLocations() {
+        assertThat(
+            resolveGarminRedirect(
+                "https://connect.garmin.cn/signin/?service=x",
+                "https://sso.garmin.cn/sso/signin?service=x",
+            ),
+        ).isEqualTo("https://sso.garmin.cn/sso/signin?service=x")
+        assertThat(
+            resolveGarminRedirect(
+                "https://sso.garmin.cn/sso/signin?service=x",
+                "/sso/login?ticket=abc",
+            ),
+        ).isEqualTo("https://sso.garmin.cn/sso/login?ticket=abc")
+        assertThat(resolveGarminRedirect("https://sso.garmin.cn/sso/", "http://example.org"))
+            .isNull()
+        assertThat(resolveGarminRedirect("https://sso.garmin.cn/sso/", "https://example.org/steal"))
+            .isNull()
+    }
+
+    @Test
+    fun ssoCookies_areMergedAcrossRedirectHops() {
+        val merged = mergeGarminCookieHeader(
+            currentHeader = "CASTGC=old; GDID=device",
+            setCookieHeaders = listOf(
+                "CASTGC=new; Path=/; Secure; HttpOnly",
+                "JSESSIONID=session-1; Path=/sso; Secure",
+            ),
+        )
+
+        assertThat(merged).isEqualTo("CASTGC=new; GDID=device; JSESSIONID=session-1")
+        assertThat(
+            mergeGarminCookieHeader(merged, listOf("JSESSIONID=; Max-Age=0; Path=/sso")),
+        ).isEqualTo("CASTGC=new; GDID=device")
+    }
+
+    @Test
+    fun csrf_isExtractedFromConnectHtmlOrEmbeddedConfig() {
+        assertThat(
+            extractGarminCsrfFromHtml("""<meta name="csrf-token" content="csrf-meta-1">"""),
+        ).isEqualTo("csrf-meta-1")
+        assertThat(
+            extractGarminCsrfFromHtml("""window.config={"csrfToken":"csrf-json-2"};"""),
+        ).isEqualTo("csrf-json-2")
+        assertThat(extractGarminCsrfFromHtml("<html>no token</html>")).isNull()
     }
 
     @Test

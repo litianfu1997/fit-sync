@@ -84,4 +84,18 @@ class DeliveryPlannerTest {
         assertThat(isDestinationReadyForPlanning(7, setOf(8))).isFalse()
         assertThat(isDestinationReadyForPlanning(7, emptySet())).isFalse()
     }
+
+    @Test
+    fun backlogPlanning_includesNonHistoryRuleAfterDestinationRecovers() {
+        val rule = SyncRuleEntity(
+            sourcePlatform = Platform.ONELAP,
+            destinationAccountId = 7,
+            enabled = true,
+            includeHistory = false,
+            createdAtEpochMs = 1_000,
+        )
+
+        assertThat(isRuleBacklogPlanningAllowed(rule, setOf(7))).isTrue()
+        assertThat(isRuleBacklogPlanningAllowed(rule, setOf(8))).isFalse()
+    }
 }

@@ -37,6 +37,16 @@ class PlatformWebConfigsTest {
     }
 
     @Test
+    fun garminSessionAutoCapture_onlyRunsOnSuccessfulConnectLandingPage() {
+        assertThat(shouldAutoCaptureGarminSession("https://connect.garmin.cn/modern/", false)).isTrue()
+        assertThat(shouldAutoCaptureGarminSession("https://connect.garmin.cn/app/activity/1", false)).isTrue()
+        assertThat(shouldAutoCaptureGarminSession("https://connect.garmin.cn/signin/?service=x", false)).isFalse()
+        assertThat(shouldAutoCaptureGarminSession("https://sso.garmin.cn/sso/signin", false)).isFalse()
+        assertThat(shouldAutoCaptureGarminSession("https://connect.garmin.cn/modern/", true)).isFalse()
+        assertThat(shouldAutoCaptureGarminSession("not-a-url", false)).isFalse()
+    }
+
+    @Test
     fun igpsportWebEntries_useChinaSiteOnly() {
         val config = PlatformWebConfigs.get(Platform.IGPSPORT)
 

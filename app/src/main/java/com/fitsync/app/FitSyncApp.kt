@@ -21,6 +21,7 @@ import com.fitsync.app.sync.SyncCoordinator
 import com.fitsync.app.sync.SyncScheduler
 import com.fitsync.app.sync.MaintenanceScheduler
 import com.fitsync.app.web.GarminUploadFilePreparer
+import com.fitsync.app.web.GarminSilentSessionRefresher
 import com.fitsync.app.web.WebSessionManager
 import com.fitsync.app.strava.StravaOAuthService
 import kotlinx.coroutines.CoroutineScope
@@ -109,6 +110,13 @@ class FitSyncApp : Application(), Configuration.Provider {
             notifications = syncNotificationManager,
         )
     }
+    val garminSilentSessionRefresher: GarminSilentSessionRefresher by lazy {
+        GarminSilentSessionRefresher(
+            db = database,
+            sessions = webSessionManager,
+            accounts = platformAccountRepository,
+        )
+    }
 
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val firstFrameHandled = AtomicBoolean(false)
@@ -128,7 +136,10 @@ class FitSyncApp : Application(), Configuration.Provider {
     fun onFirstFrame() {
         if (!firstFrameHandled.compareAndSet(false, true)) return
         applicationScope.launch {
-            runCatching { SyncScheduler.ensureScheduled(this@FitSyncApp) }
+            // 自动同步开启时，冷启动不只补注册周期任务，还立即完成一次“拉取 + 规则投递”。
+            val autoSyncEnabled = runCatching { SyncScheduler.ensureScheduled(this@FitSyncApp) }
+                .getOrDefault(false)
+            if (autoSyncEnabled) SyncScheduler.enqueueAutoNow(this@FitSyncApp)
             MaintenanceScheduler.enqueue(this@FitSyncApp)
         }
     }
