@@ -291,6 +291,13 @@ class SyncCoordinator(
         db.deliveryJobDao().resetStaleUploading(now)
         val preparedJobs = mutationGate.withLock {
             db.withTransaction {
+                val serializedOnelapAccounts = db.platformAccountDao().getAll()
+                    .filter { it.platform == Platform.ONELAP }
+                    .filterTo(mutableSetOf()) { account ->
+                        db.deliveryJobDao().findByDestinationAccount(account.id)
+                            .any { it.status == DeliveryJobStatus.WAITING_REMOTE_PROCESS }
+                    }
+                    .mapTo(mutableSetOf()) { it.id }
                 val runnableJobs = if (allowedDestinationAccountIds == null) {
                     db.deliveryJobDao().findRunnable(now)
                 } else {
@@ -367,6 +374,23 @@ class SyncCoordinator(
                     )
                     return@mapNotNull null
                 }
+                val polling = !currentJob.remoteUploadId.isNullOrBlank()
+                if (account.platform == Platform.ONELAP && !polling &&
+                    !serializedOnelapAccounts.add(account.id)
+                ) {
+                    // 迈金提交接口不返回真实活动 ID。上一条尚未出现在目标列表时，
+                    // 延后后续提交，避免瞬间灌入整批 FIT 后全部悬挂在确认态。
+                    db.deliveryJobDao().update(
+                        currentJob.copy(
+                            status = DeliveryJobStatus.PENDING,
+                            nextRetryAtEpochMs = now + ONELAP_SERIAL_UPLOAD_DELAY_MS,
+                            errorCode = null,
+                            errorMessage = null,
+                            updatedAtEpochMs = now,
+                        ),
+                    )
+                    return@mapNotNull null
+                }
                 db.deliveryJobDao().update(
                     currentJob.copy(
                         status = DeliveryJobStatus.UPLOADING,
@@ -380,7 +404,7 @@ class SyncCoordinator(
                     activity = activity,
                     sourceVariant = sourceVariant,
                     connector = connector,
-                    polling = !currentJob.remoteUploadId.isNullOrBlank(),
+                    polling = polling,
                 )
                 }
             }
@@ -577,6 +601,8 @@ class SyncCoordinator(
             job.copy(
                 status = DeliveryJobStatus.PENDING,
                 nextRetryAtEpochMs = null,
+                remoteUploadId = null,
+                remoteActivityId = null,
                 errorCode = null,
                 errorMessage = null,
                 updatedAtEpochMs = System.currentTimeMillis(),
@@ -1201,6 +1227,7 @@ private const val DAY_MS = 24L * HOUR_MS
 internal const val MAX_CONCURRENT_ACCOUNTS = 2
 internal const val MAX_DOWNLOADS_PER_ACCOUNT = 2
 internal const val MAX_UPLOADS_PER_ACCOUNT = 2
+internal const val ONELAP_SERIAL_UPLOAD_DELAY_MS = 30_000L
 internal const val MAX_GLOBAL_NETWORK_TRANSFERS = 3
 internal const val MAX_PULL_PAGES = 500
 internal const val MAX_DELIVERY_BATCHES_PER_WORKER = 50

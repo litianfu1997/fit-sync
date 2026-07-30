@@ -401,7 +401,7 @@ interface DeliveryJobDao {
     @Query(
         """
         SELECT * FROM delivery_job
-        WHERE status = 'PENDING'
+        WHERE (status = 'PENDING' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
            OR (status = 'RETRY_WAIT' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
            OR (status = 'WAITING_REMOTE_PROCESS' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
         ORDER BY createdAtEpochMs ASC
@@ -415,7 +415,7 @@ interface DeliveryJobDao {
         SELECT * FROM delivery_job
         WHERE destinationAccountId IN (:accountIds)
           AND (
-            status = 'PENDING'
+            (status = 'PENDING' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
             OR (status = 'RETRY_WAIT' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
             OR (status = 'WAITING_REMOTE_PROCESS' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
           )
@@ -432,7 +432,7 @@ interface DeliveryJobDao {
     @Query(
         """
         SELECT COUNT(*) FROM delivery_job
-        WHERE status = 'PENDING'
+        WHERE (status = 'PENDING' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
            OR (status = 'RETRY_WAIT' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
            OR (status = 'WAITING_REMOTE_PROCESS' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
         """,
@@ -444,7 +444,7 @@ interface DeliveryJobDao {
         SELECT COUNT(*) FROM delivery_job
         WHERE destinationAccountId IN (:accountIds)
           AND (
-            status = 'PENDING'
+            (status = 'PENDING' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
             OR (status = 'RETRY_WAIT' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
             OR (status = 'WAITING_REMOTE_PROCESS' AND (nextRetryAtEpochMs IS NULL OR nextRetryAtEpochMs <= :now))
           )
@@ -454,14 +454,14 @@ interface DeliveryJobDao {
 
     @Query(
         "SELECT MIN(nextRetryAtEpochMs) FROM delivery_job " +
-            "WHERE status = 'WAITING_REMOTE_PROCESS' OR status = 'RETRY_WAIT'",
+            "WHERE status = 'PENDING' OR status = 'WAITING_REMOTE_PROCESS' OR status = 'RETRY_WAIT'",
     )
     suspend fun findNextScheduledAt(): Long?
 
     @Query(
         "SELECT MIN(nextRetryAtEpochMs) FROM delivery_job " +
             "WHERE destinationAccountId IN (:accountIds) " +
-            "AND (status = 'WAITING_REMOTE_PROCESS' OR status = 'RETRY_WAIT')",
+            "AND (status = 'PENDING' OR status = 'WAITING_REMOTE_PROCESS' OR status = 'RETRY_WAIT')",
     )
     suspend fun findNextScheduledAtForAccounts(accountIds: List<Long>): Long?
 
@@ -544,6 +544,8 @@ interface DeliveryJobDao {
         UPDATE delivery_job 
         SET status = 'PENDING', 
             nextRetryAtEpochMs = NULL, 
+            remoteUploadId = NULL,
+            remoteActivityId = NULL,
             errorCode = NULL, 
             errorMessage = NULL, 
             updatedAtEpochMs = :now 

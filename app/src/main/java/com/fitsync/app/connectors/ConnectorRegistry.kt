@@ -14,12 +14,16 @@ import com.fitsync.app.strava.StravaOAuthService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Cookie
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okio.BufferedSink
+import okio.source
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -111,6 +115,8 @@ private class OnelapConnector(
 ) : HttpPlatformConnector(db, fileStore, sessionManager, client) {
     override val platform = Platform.ONELAP
     private val baseUrl = "https://otm.onelap.cn"
+    @Volatile
+    private var responseCookieHeader: String? = null
 
     override suspend fun validateSession(): SessionState {
         if (!sessionManager.hasSession(platform)) return SessionState.NOT_CONNECTED
@@ -242,20 +248,74 @@ private class OnelapConnector(
         if (file.length() <= 0L) {
             return ConnectorResult.PermanentFailure("FILE_EMPTY", "本地 FIT 文件为空")
         }
-        val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
-            .addFormDataPart("jilu", file.name, file.asRequestBody(FIT))
-            .build()
         return runCatching {
-            executeAuthorized(request("$baseUrl/api/otm/ride_record/upload/fit").post(multipart).build()).use { response ->
-                if (!response.isSuccessful) return@use failure(response, PlatformWebConfigs.get(platform).loginUrl)
-                val text = response.body?.string().orEmpty()
-                onelapAcceptedUploadResult(text, sourceVariant.fileSha256)
+            var lastMissingFile: ConnectorResult.PermanentFailure? = null
+            for (fieldName in ONELAP_UPLOAD_FIELD_FALLBACKS) {
+                val result = uploadFitOnce(file, sourceVariant.fileSha256, fieldName)
+                if (!result.isOnelapMissingFile()) return@runCatching result
+                lastMissingFile = result as ConnectorResult.PermanentFailure
             }
+            lastMissingFile?.let {
+                ConnectorResult.PermanentFailure(
+                    "ONELAP_FILE_FIELD_REJECTED",
+                    "迈金仍未识别上传文件（已兼容 jilu、file、fit_file）",
+                )
+            } ?: ConnectorResult.PermanentFailure("ONELAP_UPLOAD_REJECTED", "迈金拒绝 FIT 上传")
         }.getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "迈金 FIT 上传失败") }
     }
 
+    private suspend fun uploadFitOnce(
+        file: File,
+        fileSha256: String,
+        fieldName: String,
+    ): ConnectorResult<RemoteCopy> {
+        val multipart = onelapUploadMultipart(file, fileSha256, fieldName)
+        return executeUploadAuthorized(multipart).use { response ->
+            captureResponseCookies(response)
+            if (!response.isSuccessful) return@use failure(response, PlatformWebConfigs.get(platform).loginUrl)
+            onelapAcceptedUploadResult(
+                responseBody = response.body?.string().orEmpty(),
+                provisionalRemoteId = fileSha256,
+                loginUrl = PlatformWebConfigs.get(platform).loginUrl,
+            )
+        }
+    }
+
+    private suspend fun executeUploadAuthorized(multipart: RequestBody): Response {
+        val uploadUrl = "$baseUrl/api/otm/ride_record/upload/fit"
+        val cookieHeader = currentUploadCookieHeader(uploadUrl)
+        val firstToken = sessionManager.token(platform)
+            ?: return execute(onelapUploadRequest(uploadUrl, "", multipart, cookieHeader))
+        val first = execute(onelapUploadRequest(uploadUrl, firstToken, multipart, cookieHeader))
+        captureResponseCookies(first)
+        if (first.code != 401 && first.code != 403) return first
+        first.close()
+        if (!refreshSession()) {
+            return execute(onelapUploadRequest(uploadUrl, firstToken, multipart, currentUploadCookieHeader(uploadUrl)))
+        }
+        val refreshedToken = sessionManager.token(platform) ?: firstToken
+        return execute(onelapUploadRequest(uploadUrl, refreshedToken, multipart, currentUploadCookieHeader(uploadUrl)))
+    }
+
+    private fun currentUploadCookieHeader(uploadUrl: String): String? = mergeCookieHeaders(
+        sessionManager.cookieHeader(platform, uploadUrl),
+        responseCookieHeader,
+    )
+
+    private fun captureResponseCookies(response: Response) {
+        val received = Cookie.parseAll(response.request.url, response.headers)
+            .joinToString("; ") { "${it.name}=${it.value}" }
+            .takeIf { it.isNotBlank() }
+            ?: return
+        responseCookieHeader = mergeCookieHeaders(responseCookieHeader, received)
+    }
+
     override suspend fun checkUpload(remoteUploadId: String): ConnectorResult<RemoteCopy> =
-        pendingAsyncUploadConfirmation(remoteUploadId, platform)
+        pendingAsyncUploadConfirmation(
+            rawToken = remoteUploadId,
+            expectedPlatform = platform,
+            timeoutMs = ONELAP_UPLOAD_CONFIRM_TIMEOUT_MS,
+        )
 
     private suspend fun executeAuthorized(original: Request): Response {
         val first = execute(original)
@@ -299,6 +359,97 @@ private class OnelapConnector(
 }
 
 internal const val ONELAP_PAGE_SIZE = 10
+internal const val ONELAP_UPLOAD_CONFIRM_TIMEOUT_MS = 5L * 60 * 1000
+internal val ONELAP_UPLOAD_FIELD_FALLBACKS = listOf("jilu", "jilu", "file", "fit_file")
+
+internal fun onelapUploadMultipart(
+    file: File,
+    fileSha256: String,
+    fieldName: String = "jilu",
+): RequestBody {
+    // 迈金 Web 端由浏览器 FormData 生成 multipart。OkHttp MultipartBody 会额外写入分片级
+    // Content-Length，迈金的解析器可能因此忽略文件；这里严格生成浏览器风格的单文件请求体。
+    val uploadName = "fitsync_${fileSha256.take(16)}.fit"
+    val boundary = "----WebKitFormBoundary${fileSha256.take(24)}"
+    return OnelapBrowserMultipartBody(file, uploadName, fieldName, boundary)
+}
+
+private class OnelapBrowserMultipartBody(
+    private val file: File,
+    uploadName: String,
+    fieldName: String,
+    private val boundary: String,
+) : RequestBody() {
+    private val prefix = buildString {
+        append("--").append(boundary).append("\r\n")
+        append("Content-Disposition: form-data; name=\"")
+            .append(fieldName)
+            .append("\"; filename=\"")
+            .append(uploadName)
+            .append("\"\r\n")
+        append("Content-Type: application/octet-stream\r\n\r\n")
+    }.toByteArray(Charsets.UTF_8)
+    private val suffix = "\r\n--$boundary--\r\n".toByteArray(Charsets.UTF_8)
+    private val mediaType = "multipart/form-data; boundary=$boundary".toMediaType()
+
+    override fun contentType() = mediaType
+
+    override fun contentLength(): Long = prefix.size.toLong() + file.length() + suffix.size
+
+    override fun writeTo(sink: BufferedSink) {
+        sink.write(prefix)
+        file.source().use { source -> sink.writeAll(source) }
+        sink.write(suffix)
+    }
+}
+
+internal fun onelapUploadRequest(
+    url: String,
+    token: String,
+    multipart: RequestBody,
+    cookieHeader: String? = null,
+): Request =
+    Request.Builder()
+        .url(url)
+        .apply {
+            if (token.isNotBlank()) header("Authorization", token)
+            if (!cookieHeader.isNullOrBlank()) header("Cookie", cookieHeader)
+        }
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Origin", "https://otm.onelap.cn")
+        .header("Referer", "https://otm.onelap.cn/")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36",
+        )
+        .header("Sec-Fetch-Dest", "empty")
+        .header("Sec-Fetch-Mode", "cors")
+        .header("Sec-Fetch-Site", "same-origin")
+        .post(multipart)
+        .build()
+
+internal fun ConnectorResult<RemoteCopy>.isOnelapMissingFile(): Boolean =
+    this is ConnectorResult.PermanentFailure &&
+        code?.startsWith("ONELAP_") == true &&
+        ONELAP_MISSING_FILE_MESSAGES.any(message::contains)
+
+private val ONELAP_MISSING_FILE_MESSAGES = listOf(
+    "没有上传文件",
+    "没有文件上传",
+)
+
+internal fun mergeCookieHeaders(vararg rawHeaders: String?): String? {
+    val cookies = linkedMapOf<String, String>()
+    rawHeaders.filterNotNull().forEach { raw ->
+        raw.split(';').forEach { part ->
+            val name = part.substringBefore('=').trim()
+            val value = part.substringAfter('=', "").trim()
+            if (name.isNotBlank() && value.isNotBlank()) cookies[name] = value
+        }
+    }
+    return cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }.takeIf { it.isNotBlank() }
+}
 
 internal fun nextOnelapCursor(page: Int, itemCount: Int): SyncCursor? =
     if (itemCount >= ONELAP_PAGE_SIZE) SyncCursor((page + 1).toString()) else null
@@ -444,8 +595,37 @@ internal fun activityListSessionState(httpCode: Int, responseBody: String): Sess
 internal fun onelapAcceptedUploadResult(
     responseBody: String,
     provisionalRemoteId: String,
+    loginUrl: String = "https://otm.onelap.cn/login",
 ): ConnectorResult<RemoteCopy> {
-    val root = JSONObject(responseBody.ifBlank { "{}" })
+    val root = runCatching { JSONObject(responseBody) }.getOrNull()
+        ?: return ConnectorResult.RetryableFailure(
+            "ONELAP_INVALID_UPLOAD_RESPONSE",
+            "迈金上传响应格式异常，请稍后重试",
+        )
+    val responseCode = root.opt("code")
+        ?.takeUnless { it == JSONObject.NULL }
+        ?.toString()
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+    val message = JsonPlatformParser.firstString(root, "msg", "message", "detail", "error")
+    if (responseCode != null && responseCode != "0" && responseCode != "200") {
+        val numericCode = responseCode.toIntOrNull()
+        val errorMessage = message ?: "迈金拒绝 FIT 上传（业务码 $responseCode）"
+        return when {
+            numericCode == 401 || numericCode == 403 ||
+                errorMessage.contains("登录") || errorMessage.contains("token", ignoreCase = true) ->
+                ConnectorResult.RequiresLogin(loginUrl, errorMessage)
+            numericCode == 408 || numericCode == 429 || numericCode != null && numericCode >= 500 ->
+                ConnectorResult.RetryableFailure("ONELAP_$responseCode", errorMessage)
+            else -> ConnectorResult.PermanentFailure("ONELAP_$responseCode", errorMessage)
+        }
+    }
+    if (root.has("success") && !root.optBoolean("success", true)) {
+        return ConnectorResult.PermanentFailure(
+            "ONELAP_UPLOAD_REJECTED",
+            message ?: "迈金拒绝 FIT 上传",
+        )
+    }
     val remoteId = JsonPlatformParser.firstString(root, "id", "record_id", "ride_record_id", "jilu_id")
     return remoteId?.let { ConnectorResult.Success(RemoteCopy(it)) }
         ?: ConnectorResult.Processing(

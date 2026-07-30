@@ -65,4 +65,24 @@ class AsyncUploadConfirmationTest {
 
         assertThat(result).isInstanceOf(ConnectorResult.PermanentFailure::class.java)
     }
+
+    @Test
+    fun confirmation_supportsPlatformSpecificTimeout() {
+        val submittedAt = 1_000_000L
+        val token = encodeAsyncUploadConfirmationToken(Platform.ONELAP, "abc123", submittedAt)
+
+        val result = pendingAsyncUploadConfirmation(
+            rawToken = token,
+            expectedPlatform = Platform.ONELAP,
+            nowEpochMs = submittedAt + 5_000L,
+            timeoutMs = 5_000L,
+        )
+
+        assertThat(result).isEqualTo(
+            ConnectorResult.PermanentFailure(
+                "ONELAP_CONFIRM_TIMEOUT",
+                "迈金 OnelapFit 长时间未创建活动，上传解析可能失败",
+            ),
+        )
+    }
 }

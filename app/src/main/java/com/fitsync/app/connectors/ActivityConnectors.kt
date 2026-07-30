@@ -106,6 +106,7 @@ internal fun pendingAsyncUploadConfirmation(
     rawToken: String,
     expectedPlatform: Platform,
     nowEpochMs: Long = System.currentTimeMillis(),
+    timeoutMs: Long = ASYNC_UPLOAD_CONFIRM_TIMEOUT_MS,
 ): ConnectorResult<RemoteCopy> {
     val token = parseAsyncUploadConfirmationToken(rawToken)
     if (token == null || token.platform != expectedPlatform) {
@@ -115,7 +116,7 @@ internal fun pendingAsyncUploadConfirmation(
         )
     }
     val elapsed = (nowEpochMs - token.submittedAtEpochMs).coerceAtLeast(0L)
-    return if (elapsed < ASYNC_UPLOAD_CONFIRM_TIMEOUT_MS) {
+    return if (elapsed < timeoutMs) {
         ConnectorResult.Processing(rawToken, ASYNC_UPLOAD_CONFIRM_POLL_MS)
     } else {
         ConnectorResult.PermanentFailure(
