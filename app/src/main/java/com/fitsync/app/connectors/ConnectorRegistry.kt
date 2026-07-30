@@ -258,7 +258,7 @@ private class OnelapConnector(
             lastMissingFile?.let {
                 ConnectorResult.PermanentFailure(
                     "ONELAP_FILE_FIELD_REJECTED",
-                    "迈金仍未识别上传文件（已兼容 jilu、file、fit_file）",
+                    "迈金仍未识别上传文件（已兼容 jilu0、jilu、file、fit_file）",
                 )
             } ?: ConnectorResult.PermanentFailure("ONELAP_UPLOAD_REJECTED", "迈金拒绝 FIT 上传")
         }.getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "迈金 FIT 上传失败") }
@@ -360,12 +360,12 @@ private class OnelapConnector(
 
 internal const val ONELAP_PAGE_SIZE = 10
 internal const val ONELAP_UPLOAD_CONFIRM_TIMEOUT_MS = 5L * 60 * 1000
-internal val ONELAP_UPLOAD_FIELD_FALLBACKS = listOf("jilu", "jilu", "file", "fit_file")
+internal val ONELAP_UPLOAD_FIELD_FALLBACKS = listOf("jilu0", "jilu", "file", "fit_file")
 
 internal fun onelapUploadMultipart(
     file: File,
     fileSha256: String,
-    fieldName: String = "jilu",
+    fieldName: String = "jilu0",
 ): RequestBody {
     // 迈金 Web 端由浏览器 FormData 生成 multipart。OkHttp MultipartBody 会额外写入分片级
     // Content-Length，迈金的解析器可能因此忽略文件；这里严格生成浏览器风格的单文件请求体。

@@ -9,7 +9,7 @@ import java.io.File
 
 class PlatformUploadContractTest {
     @Test
-    fun onelapMultipart_usesJiluFieldAndPortableFileMetadata() {
+    fun onelapMultipart_usesCurrentJilu0FieldAndPortableFileMetadata() {
         val file = kotlin.io.path.createTempFile(prefix = "行者_", suffix = ".fit").toFile()
         try {
             file.writeBytes(byteArrayOf(0x0e, 0x20, 0x2e, 0x46, 0x49, 0x54))
@@ -25,7 +25,7 @@ class PlatformUploadContractTest {
                 "multipart/form-data; boundary=----WebKitFormBoundaryac97409d083767b144461475",
             )
             assertThat(raw).contains(
-                "Content-Disposition: form-data; name=\"jilu\"; " +
+                "Content-Disposition: form-data; name=\"jilu0\"; " +
                     "filename=\"fitsync_ac97409d083767b1.fit\"",
             )
             assertThat(raw).contains("Content-Type: application/octet-stream\r\n\r\n")
@@ -100,7 +100,7 @@ class PlatformUploadContractTest {
         assertThat(parseFailure.isOnelapMissingFile()).isFalse()
         assertThat(unrelatedPlatform.isOnelapMissingFile()).isFalse()
         assertThat(ONELAP_UPLOAD_FIELD_FALLBACKS)
-            .containsExactly("jilu", "jilu", "file", "fit_file")
+            .containsExactly("jilu0", "jilu", "file", "fit_file")
             .inOrder()
     }
 
