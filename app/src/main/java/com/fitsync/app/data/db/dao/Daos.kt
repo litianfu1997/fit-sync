@@ -386,6 +386,20 @@ interface DeliveryJobDao {
     @Query("SELECT * FROM delivery_job WHERE destinationAccountId = :accountId")
     suspend fun findByDestinationAccount(accountId: Long): List<DeliveryJobEntity>
 
+    @Query(
+        """
+        SELECT COUNT(*) FROM delivery_job job
+        WHERE job.destinationAccountId = :accountId
+          AND job.status = 'WAITING_REMOTE_PROCESS'
+          AND NOT EXISTS (
+              SELECT 1 FROM platform_copy remote_copy
+              WHERE remote_copy.canonicalActivityId = job.canonicalActivityId
+                AND remote_copy.platformAccountId = job.destinationAccountId
+          )
+        """,
+    )
+    suspend fun countUnconfirmedUploads(accountId: Long): Int
+
     @Query("SELECT * FROM delivery_job WHERE requestedByRuleId = :ruleId")
     suspend fun findByRequestedRule(ruleId: Long): List<DeliveryJobEntity>
 

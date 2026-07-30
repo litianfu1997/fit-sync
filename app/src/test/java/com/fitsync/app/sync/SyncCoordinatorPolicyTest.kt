@@ -87,6 +87,19 @@ class SyncCoordinatorPolicyTest {
     }
 
     @Test
+    fun onelapUploadWindow_acceptsTenItemsPerAccount() {
+        val inFlightByAccount = mutableMapOf(7L to 0)
+
+        repeat(MAX_ONELAP_UPLOADS_PER_BATCH) {
+            assertThat(tryReserveOnelapUploadSlot(inFlightByAccount, 7L)).isTrue()
+        }
+
+        assertThat(inFlightByAccount[7L]).isEqualTo(10)
+        assertThat(tryReserveOnelapUploadSlot(inFlightByAccount, 7L)).isFalse()
+        assertThat(tryReserveOnelapUploadSlot(inFlightByAccount, 8L)).isTrue()
+    }
+
+    @Test
     fun targetComparison_requiresBackgroundListAndOriginalDownload() {
         assertThat(
             canCompareTargetInBackground(
