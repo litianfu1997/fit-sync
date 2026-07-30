@@ -21,7 +21,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -75,41 +75,48 @@ internal class GarminConnectApiConnector(
     override suspend fun listActivities(
         sinceEpochMs: Long,
         cursor: SyncCursor?,
-    ): ConnectorResult<ActivityPage> = withRelogin("LIST") {
-        val cookie = sessionCookie("LIST") ?: return@withRelogin cookieMissingResult("LIST")
-        val csrf = sessionManager.garminCsrf()
+    ): ConnectorResult<ActivityPage> {
         val start = cursor?.raw?.toIntOrNull()?.coerceAtLeast(0) ?: 0
         val url = "$GARMIN_GC_API_BASE/activitylist-service/activities/search/activities" +
             "?start=$start&limit=$LIST_PAGE_SIZE"
-        runCatching {
-            execute(buildGcApiRequest(url, cookie, csrf, null)).use { resp ->
+        return runCatching {
+            executeGcApiWithSessionRecovery(
+                operation = "LIST",
+                requestFactory = { cookie, csrf -> buildGcApiRequest(url, cookie, csrf, null) },
+            ) { resp ->
                 when {
                     isGarminLoginResponse(resp.code, resp.header("Location")) -> requiresLogin("LIST")
                     !resp.isSuccessful -> failureStatus(resp, "LIST")
                     else -> {
                         val all = parseGarminActivities(resp.body?.string().orEmpty())
-                            ?: return@use ConnectorResult.RetryableFailure(
+                        if (all == null) {
+                            ConnectorResult.RetryableFailure(
                                 "GARMIN_INVALID_RESPONSE",
                                 "Garmin 活动列表响应格式异常",
                             )
-                        // Garmin 默认按时间倒序：只保留窗口内活动；整页都被剔除说明已越过下界，停止翻页。
-                        val items = all.filter { it.startTimeEpochMs == null || it.startTimeEpochMs >= sinceEpochMs }
-                        val hasMore = all.size >= LIST_PAGE_SIZE && items.isNotEmpty()
-                        ConnectorResult.Success(
-                            ActivityPage(items, SyncCursor((start + LIST_PAGE_SIZE).toString()), hasMore),
-                        )
+                        } else {
+                            // Garmin 默认按时间倒序：只保留窗口内活动；整页都被剔除说明已越过下界，停止翻页。
+                            val items = all.filter {
+                                it.startTimeEpochMs == null || it.startTimeEpochMs >= sinceEpochMs
+                            }
+                            val hasMore = all.size >= LIST_PAGE_SIZE && items.isNotEmpty()
+                            ConnectorResult.Success(
+                                ActivityPage(items, SyncCursor((start + LIST_PAGE_SIZE).toString()), hasMore),
+                            )
+                        }
                     }
                 }
             }
         }.getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "Garmin 活动列表读取失败") }
     }
 
-    override suspend fun downloadFit(activity: RemoteActivitySummary): ConnectorResult<FitFile> = withRelogin("DOWNLOAD") {
-        val cookie = sessionCookie("DOWNLOAD") ?: return@withRelogin cookieMissingResult("DOWNLOAD")
-        val csrf = sessionManager.garminCsrf()
+    override suspend fun downloadFit(activity: RemoteActivitySummary): ConnectorResult<FitFile> {
         val url = "$GARMIN_GC_API_BASE/download-service/files/activity/${activity.remoteActivityId}/fit"
-        runCatching {
-            execute(buildGcApiRequest(url, cookie, csrf, null)).use { resp ->
+        return runCatching {
+            executeGcApiWithSessionRecovery(
+                operation = "DOWNLOAD",
+                requestFactory = { cookie, csrf -> buildGcApiRequest(url, cookie, csrf, null) },
+            ) { resp ->
                 when {
                     isGarminLoginResponse(resp.code, resp.header("Location")) -> requiresLogin("DOWNLOAD")
                     resp.code == 404 || resp.code == 410 -> ConnectorResult.PermanentFailure(
@@ -132,20 +139,57 @@ internal class GarminConnectApiConnector(
         if (file.length() > GARMIN_MAX_FIT_BYTES) {
             return ConnectorResult.PermanentFailure("FILE_TOO_LARGE", "Garmin 限制 FIT 不超过 25 MB")
         }
-        val uploadName = if (file.name.endsWith(".fit", ignoreCase = true)) file.name else "${file.name}.fit"
+        val prepared = withContext(Dispatchers.IO) { prepareGarminFitBytes(file.readBytes()) }
+            ?: return ConnectorResult.PermanentFailure("GARMIN_FIT_INVALID", "FIT 文件结构或长度不完整")
+        if (prepared.fileCrcRepaired || prepared.headerCrcRepaired) {
+            GarminAuthDiagnostics.record(
+                GarminAuthDiagnostics.Event(
+                    timestampEpochMs = System.currentTimeMillis(),
+                    operation = "UPLOAD",
+                    phase = "FILE_PREPARE",
+                    outcome = "CRC_REPAIRED",
+                    detail = "file=${prepared.fileCrcRepaired} header=${prepared.headerCrcRepaired}",
+                ),
+            )
+        }
+        // Garmin 中国站导入器对非 ASCII multipart 文件名兼容性不稳定；网页上传预处理也采用同一策略。
+        val uploadName = garminUploadFileName(sourceVariant.fileSha256)
         val multipart = MultipartBody.Builder()
-            .addFormDataPart("file", uploadName, file.asRequestBody(OCTET_STREAM))
+            .addFormDataPart("file", uploadName, prepared.bytes.toRequestBody(OCTET_STREAM))
             .build()
-        return runCatching { withRelogin("UPLOAD") { postUpload(multipart) } }
+        return runCatching { postUpload(multipart, sourceVariant.fileSha256) }
             .getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "Garmin 上传请求失败") }
     }
 
-    private suspend fun postUpload(multipart: MultipartBody): ConnectorResult<RemoteCopy> {
-        val cookie = sessionCookie("UPLOAD") ?: return cookieMissingResult("UPLOAD")
-        val csrf = sessionManager.garminCsrf()
-        val resp = execute(buildGcApiRequest(garminUploadUrl(sessionManager.garminDomain()), cookie, csrf, multipart))
-        return resp.use { handleUploadResponse(it, cookie, csrf) }
+    override suspend fun checkUpload(remoteUploadId: String): ConnectorResult<RemoteCopy> {
+        val confirmationToken = parseAsyncUploadConfirmationToken(remoteUploadId)
+        if (confirmationToken?.platform == platform) {
+            val pending = pendingAsyncUploadConfirmation(remoteUploadId, platform)
+            if (pending !is ConnectorResult.Processing) return pending
+            val statusUrl = garminStatusApiUrl(confirmationToken.provisionalRemoteId, "garmin.cn")
+                ?: return pending
+            return pollStatus(statusUrl, remoteUploadId)
+        }
+        val statusUrl = garminStatusApiUrl(remoteUploadId, "garmin.cn")
+            ?: return ConnectorResult.PermanentFailure(
+                "GARMIN_STATUS_URL_INVALID",
+                "Garmin 上传状态地址无效，请重新同步",
+            )
+        val migratedToken = garminAcceptedProcessingResult(statusUrl, statusUrl).remoteUploadId
+        return pollStatus(statusUrl, migratedToken)
     }
+
+    private suspend fun postUpload(
+        multipart: MultipartBody,
+        provisionalRemoteId: String,
+    ): ConnectorResult<RemoteCopy> =
+        executeGcApiWithSessionRecovery(
+            operation = "UPLOAD",
+            requestFactory = { cookie, csrf ->
+                buildGcApiRequest(garminUploadUrl(sessionManager.garminDomain()), cookie, csrf, multipart)
+            },
+            responseHandler = { handleUploadResponse(it, provisionalRemoteId) },
+        )
 
     private fun buildGcApiRequest(
         url: String,
@@ -162,14 +206,29 @@ internal class GarminConnectApiConnector(
         )
     }
 
-    private suspend fun handleUploadResponse(
+    private fun handleUploadResponse(
         response: Response,
-        cookieHeader: String,
-        csrf: String?,
+        provisionalRemoteId: String,
     ): ConnectorResult<RemoteCopy> {
         val body = runCatching { response.body?.string() }.getOrNull().orEmpty()
+        val state = parseGarminImportState(body)
+        if (state?.isFinal == true) {
+            return when {
+                state.duplicate -> ConnectorResult.Duplicate(
+                    garminRemoteCopyOrNull(state.remoteActivityId, true),
+                )
+                state.success -> garminRemoteCopyOrNull(state.remoteActivityId, false)
+                    ?.let { ConnectorResult.Success(it) }
+                    ?: garminAcceptedProcessingResult(null, provisionalRemoteId)
+                else -> garminImportRejectedFailure(
+                    garminImportFailureSummary(body)?.let { summary ->
+                        garminSafeResponseDetail(summary, "text/plain").removePrefix("text=")
+                    },
+                )
+            }
+        }
         return when {
-            response.code in 200..299 -> interpretSuccess(body, response, cookieHeader, csrf)
+            response.code in 200..299 -> interpretSuccess(body, response, provisionalRemoteId)
             response.code == 409 -> ConnectorResult.Duplicate(
                 parseGarminImportState(body)?.let { garminRemoteCopyOrNull(it.remoteActivityId, true) },
             )
@@ -185,11 +244,10 @@ internal class GarminConnectApiConnector(
         }
     }
 
-    private suspend fun interpretSuccess(
+    private fun interpretSuccess(
         body: String,
         response: Response,
-        cookieHeader: String,
-        csrf: String?,
+        provisionalRemoteId: String,
     ): ConnectorResult<RemoteCopy> {
         val state = parseGarminImportState(body)
         if (state != null && state.isFinal) {
@@ -197,59 +255,95 @@ internal class GarminConnectApiConnector(
                 state.duplicate -> ConnectorResult.Duplicate(garminRemoteCopyOrNull(state.remoteActivityId, true))
                 state.success -> garminRemoteCopyOrNull(state.remoteActivityId, false)
                     ?.let { ConnectorResult.Success(it) }
-                    ?: ConnectorResult.RetryableFailure("GARMIN_ACTIVITY_ID_MISSING", "Garmin 未返回活动 ID")
-                else -> ConnectorResult.RequiresUserAction(
-                    PlatformWebConfigs.get(platform).uploadUrl,
-                    "Garmin 拒绝导入该文件，请在网页中确认后重试",
+                    ?: garminAcceptedProcessingResult(null, provisionalRemoteId)
+                else -> garminImportRejectedFailure(
+                    garminImportFailureSummary(body)?.let { summary ->
+                        garminSafeResponseDetail(summary, "text/plain").removePrefix("text=")
+                    },
                 )
             }
         }
         val location = response.header("location") ?: response.header("Location")
         val statusUrl = location?.let { garminStatusApiUrl(it, "garmin.cn") }
-        if (statusUrl != null) return pollStatus(statusUrl, cookieHeader, csrf)
-        return ConnectorResult.RetryableFailure("GARMIN_PROCESSING", "Garmin 仍在处理上传，稍后会自动重试")
+        val acceptedId = state?.uploadId?.toString()?.takeIf { it.isNotBlank() } ?: provisionalRemoteId
+        return garminAcceptedProcessingResult(statusUrl, acceptedId)
     }
 
     private suspend fun pollStatus(
         statusUrl: String,
-        cookieHeader: String,
-        csrf: String?,
+        continuationToken: String,
     ): ConnectorResult<RemoteCopy> {
+        var lastFailureSummary: String? = null
         repeat(GARMIN_POLL_MAX_TRIES) {
             delay(GARMIN_POLL_INTERVAL_MS)
-            val req = buildGcApiRequest(statusUrl, cookieHeader, csrf, null)
-            var authExpired = false
-            var forbidden = false
-            val state = runCatching {
-                execute(req).use { resp ->
-                    if (isGarminLoginResponse(resp.code, resp.header("Location"))) {
-                        authExpired = true
-                        return@use null
+            val polled: ConnectorResult<GarminImportState?> = runCatching {
+                executeGcApiWithSessionRecovery(
+                    operation = "POLL",
+                    requestFactory = { cookie, csrf -> buildGcApiRequest(statusUrl, cookie, csrf, null) },
+                ) { resp ->
+                    when {
+                        isGarminLoginResponse(resp.code, resp.header("Location")) -> requiresLogin("POLL")
+                        resp.code == 403 -> garminForbiddenFailure()
+                        else -> {
+                            val body = runCatching { resp.body?.string() }.getOrNull().orEmpty()
+                            val state = garminPollImportState(resp.code, body)
+                            if (state?.isFinal == true && !state.success && !state.duplicate) {
+                                lastFailureSummary = garminImportFailureSummary(body)?.let { summary ->
+                                    garminSafeResponseDetail(summary, "text/plain").removePrefix("text=")
+                                }
+                            }
+                            if (resp.code !in 200..299) {
+                                GarminAuthDiagnostics.record(
+                                    GarminAuthDiagnostics.Event(
+                                        timestampEpochMs = System.currentTimeMillis(),
+                                        operation = "POLL",
+                                        phase = "RESPONSE_DETAIL",
+                                        outcome = "HTTP_${resp.code}",
+                                        httpCode = resp.code,
+                                        detail = state?.let {
+                                            val stateSummary = "IMPORT_RESULT final=${it.isFinal} success=${it.success} " +
+                                                "duplicate=${it.duplicate} hasActivity=${!it.remoteActivityId.isNullOrBlank()}"
+                                            lastFailureSummary?.let { failure -> "$stateSummary failure=$failure" }
+                                                ?: stateSummary
+                                        } ?: garminSafeResponseDetail(body, resp.header("Content-Type")),
+                                    ),
+                                )
+                            }
+                            ConnectorResult.Success(state)
+                        }
                     }
-                    if (resp.code == 403) {
-                        forbidden = true
-                        return@use null
+                }
+            }.getOrElse { ConnectorResult.Success(null) }
+            when (polled) {
+                is ConnectorResult.Success -> {
+                    val state = polled.value
+                    if (state?.isFinal == true) {
+                        return when {
+                            state.duplicate -> garminRemoteCopyOrNull(state.remoteActivityId, true)
+                                ?.let { ConnectorResult.Duplicate(it) }
+                                ?: ConnectorResult.Processing(
+                                    continuationToken,
+                                    GARMIN_REMOTE_POLL_AFTER_MS,
+                                )
+                            state.success -> garminRemoteCopyOrNull(state.remoteActivityId, false)
+                                ?.let { ConnectorResult.Success(it) }
+                                ?: ConnectorResult.Processing(
+                                    continuationToken,
+                                    GARMIN_REMOTE_POLL_AFTER_MS,
+                                )
+                            else -> garminImportRejectedFailure(lastFailureSummary)
+                        }
                     }
-                    if (resp.code !in 200..299) return@use null
-                    parseGarminImportState(resp.body?.string().orEmpty())
                 }
-            }.getOrNull()
-            if (authExpired) return requiresLogin("POLL")
-            if (forbidden) return garminForbiddenFailure()
-            if (state?.isFinal == true) {
-                return when {
-                    state.duplicate -> ConnectorResult.Duplicate(garminRemoteCopyOrNull(state.remoteActivityId, true))
-                    state.success -> garminRemoteCopyOrNull(state.remoteActivityId, false)
-                        ?.let { ConnectorResult.Success(it) }
-                        ?: ConnectorResult.RetryableFailure("GARMIN_ACTIVITY_ID_MISSING", "Garmin 未返回活动 ID")
-                    else -> ConnectorResult.RequiresUserAction(
-                        PlatformWebConfigs.get(platform).uploadUrl,
-                        "Garmin 拒绝导入该文件，请在网页中确认后重试",
-                    )
-                }
+                is ConnectorResult.RequiresLogin -> return polled
+                is ConnectorResult.RetryableFailure -> return polled
+                else -> return ConnectorResult.RetryableFailure(
+                    "GARMIN_POLL_INVALID_STATE",
+                    "Garmin 上传状态返回了无法识别的结果",
+                )
             }
         }
-        return ConnectorResult.RetryableFailure("GARMIN_PROCESSING", "Garmin 处理超时，稍后会自动重试")
+        return ConnectorResult.Processing(continuationToken, GARMIN_REMOTE_POLL_AFTER_MS)
     }
 
     private suspend fun storeFit(response: Response, displayName: String): ConnectorResult<FitFile> {
@@ -351,33 +445,111 @@ internal class GarminConnectApiConnector(
     }
 
     /**
-     * 包裹业务调用：JWT_WEB 过期、被拒或后台暂时读不到时，先用 SSO 长会话静默换发新 JWT_WEB，
-     * 成功就重试一次原业务；只有 SSO 长会话也失效时才要求用户重新登录。
-     * 照抄 IgpsportApiConnector.withRelogin 骨架——Garmin 没有「账号密码」重登，SSO cookie 即等价的
-     * 「持久化重登凭据」（用户登录一次，CASTGC 长期有效）。
+     * 在单次 gc-api HTTP 请求边界恢复 Garmin 会话。401/登录跳转或 403 都先尝试用 CASTGC
+     * 静默换发 JWT_WEB，再用最新 Cookie/CSRF 原样重试该请求一次。
+     *
+     * 恢复放在 HTTP 请求层而不是整个业务操作层，尤其保证上传状态轮询遇到 403 时只重试
+     * status GET，不会重新提交已经被 Garmin 接收的 FIT POST。
      */
-    private suspend fun <T> withRelogin(
+    private suspend fun <T> executeGcApiWithSessionRecovery(
         operation: String,
-        block: suspend () -> ConnectorResult<T>,
+        requestFactory: (cookieHeader: String, csrf: String?) -> Request,
+        responseHandler: suspend (Response) -> ConnectorResult<T>,
     ): ConnectorResult<T> {
         val jwtBeforeRequest = sessionManager.garminJwtWeb()
-        val first = block()
-        val shouldRefresh = first is ConnectorResult.RequiresLogin ||
-            (first is ConnectorResult.RetryableFailure && first.code == GARMIN_COOKIE_UNREADABLE_CODE)
-        if (!shouldRefresh) return first
-        val refreshState = ssoRefreshMutex.withLock {
-            // 另一个并发请求可能已经完成续登，避免重复跑一遍 CAS 链。
-            val latestJwt = sessionManager.garminJwtWeb()
-            if (!latestJwt.isNullOrBlank() && latestJwt != jwtBeforeRequest) {
-                SessionState.AUTHENTICATED
-            } else {
-                refreshJwtWebViaSso(operation)
+        var refreshAlreadyAttempted = false
+        var cookie = sessionCookie(operation)
+        if (cookie == null) {
+            val missing = cookieMissingResult(operation)
+            if (missing !is ConnectorResult.RetryableFailure || missing.code != GARMIN_COOKIE_UNREADABLE_CODE) {
+                return missing
             }
+            val refreshed = refreshSessionOnce(operation, "COOKIE_MISSING", jwtBeforeRequest, null)
+            refreshAlreadyAttempted = true
+            if (refreshed.state != SessionState.AUTHENTICATED) return missing
+            cookie = sessionCookie(operation) ?: return cookieMissingResult(operation)
         }
-        if (refreshState == SessionState.AUTHENTICATED) {
-            return block()
-        }
-        return first
+
+        val firstResponse = execute(requestFactory(cookie, sessionManager.garminCsrf()))
+        val recovered = recoverGarminResponseOnce(
+            firstResponse = firstResponse,
+            responseCode = { it.code },
+            responseLocation = { it.header("Location") },
+            closeFirstResponse = Response::close,
+            refreshSession = { reason ->
+                if (refreshAlreadyAttempted) {
+                    SessionState.EXPIRED
+                } else {
+                    refreshAlreadyAttempted = true
+                    refreshSessionOnce(
+                        operation = operation,
+                        reason = reason.name,
+                        jwtBeforeRequest = jwtBeforeRequest,
+                        httpCode = firstResponse.code,
+                    ).state
+                }
+            },
+            retryRequest = {
+                val retryCookie = sessionCookie(operation)
+                    ?: throw IllegalStateException("Garmin 会话续期后未读取到 Cookie")
+                execute(requestFactory(retryCookie, sessionManager.garminCsrf())).also { retry ->
+                    GarminAuthDiagnostics.record(
+                        GarminAuthDiagnostics.Event(
+                            timestampEpochMs = System.currentTimeMillis(),
+                            operation = operation,
+                            phase = "SESSION_RETRY",
+                            outcome = if (retry.isSuccessful) {
+                                GarminAuthDiagnostics.OUTCOME_OK
+                            } else {
+                                "HTTP_${retry.code}"
+                            },
+                            httpCode = retry.code,
+                            locationHost = retry.header("Location")?.let { location ->
+                                runCatching { java.net.URI(location).host }.getOrNull()
+                            },
+                        ),
+                    )
+                }
+            },
+        )
+        return recovered.response.use { responseHandler(it) }
+    }
+
+    private suspend fun refreshSessionOnce(
+        operation: String,
+        reason: String,
+        jwtBeforeRequest: String?,
+        httpCode: Int?,
+    ): GarminSessionRefreshOutcome {
+        GarminAuthDiagnostics.record(
+            GarminAuthDiagnostics.Event(
+                timestampEpochMs = System.currentTimeMillis(),
+                operation = operation,
+                phase = "SESSION_REFRESH_TRIGGER",
+                outcome = reason,
+                httpCode = httpCode,
+            ),
+        )
+        val outcome = refreshGarminSessionOnce(
+            mutex = ssoRefreshMutex,
+            jwtBeforeRequest = jwtBeforeRequest,
+            currentJwt = sessionManager::garminJwtWeb,
+            refresh = { refreshJwtWebViaSso(operation) },
+        )
+        GarminAuthDiagnostics.record(
+            GarminAuthDiagnostics.Event(
+                timestampEpochMs = System.currentTimeMillis(),
+                operation = operation,
+                phase = "SESSION_REFRESH_RESULT",
+                outcome = when {
+                    outcome.reusedExistingRefresh -> "REUSED"
+                    outcome.state == SessionState.AUTHENTICATED -> GarminAuthDiagnostics.OUTCOME_OK
+                    else -> "FAILED"
+                },
+                httpCode = httpCode,
+            ),
+        )
+        return outcome
     }
 
     /**
@@ -533,6 +705,71 @@ internal class GarminConnectApiConnector(
     }
 }
 
+internal enum class GarminSessionRefreshReason {
+    AUTH_REQUIRED,
+    FORBIDDEN,
+}
+
+internal fun garminSessionRefreshReason(code: Int, location: String?): GarminSessionRefreshReason? = when {
+    code == 403 -> GarminSessionRefreshReason.FORBIDDEN
+    isGarminLoginResponse(code, location) -> GarminSessionRefreshReason.AUTH_REQUIRED
+    else -> null
+}
+
+internal data class GarminRecoveredResponse<T>(
+    val response: T,
+    val reason: GarminSessionRefreshReason?,
+    val refreshState: SessionState?,
+    val retried: Boolean,
+)
+
+/**
+ * 对一个已经完成的 HTTP 请求最多做一次会话恢复，并且只重放传入的同一个请求工厂。
+ * 刷新失败时保留首个响应给调用方分类；刷新成功才关闭首响应并执行一次重试。
+ */
+internal suspend fun <T> recoverGarminResponseOnce(
+    firstResponse: T,
+    responseCode: (T) -> Int,
+    responseLocation: (T) -> String?,
+    closeFirstResponse: (T) -> Unit,
+    refreshSession: suspend (GarminSessionRefreshReason) -> SessionState,
+    retryRequest: suspend () -> T,
+): GarminRecoveredResponse<T> {
+    val reason = garminSessionRefreshReason(responseCode(firstResponse), responseLocation(firstResponse))
+        ?: return GarminRecoveredResponse(firstResponse, null, null, retried = false)
+    val refreshState = try {
+        refreshSession(reason)
+    } catch (error: Throwable) {
+        closeFirstResponse(firstResponse)
+        throw error
+    }
+    if (refreshState != SessionState.AUTHENTICATED) {
+        return GarminRecoveredResponse(firstResponse, reason, refreshState, retried = false)
+    }
+    closeFirstResponse(firstResponse)
+    return GarminRecoveredResponse(retryRequest(), reason, refreshState, retried = true)
+}
+
+internal data class GarminSessionRefreshOutcome(
+    val state: SessionState,
+    val reusedExistingRefresh: Boolean,
+)
+
+/** 同一批并发 403 只允许一个请求执行 CAS，其余请求检测到 JWT 已轮换后直接复用。 */
+internal suspend fun refreshGarminSessionOnce(
+    mutex: Mutex,
+    jwtBeforeRequest: String?,
+    currentJwt: () -> String?,
+    refresh: suspend () -> SessionState,
+): GarminSessionRefreshOutcome = mutex.withLock {
+    val latestJwt = currentJwt()
+    if (!latestJwt.isNullOrBlank() && latestJwt != jwtBeforeRequest) {
+        GarminSessionRefreshOutcome(SessionState.AUTHENTICATED, reusedExistingRefresh = true)
+    } else {
+        GarminSessionRefreshOutcome(refresh(), reusedExistingRefresh = false)
+    }
+}
+
 internal fun garminRemoteCopyOrNull(remoteActivityId: String?, duplicate: Boolean): RemoteCopy? {
     val id = remoteActivityId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     return RemoteCopy(
@@ -651,6 +888,61 @@ internal fun mergeGarminCookieHeader(currentHeader: String?, setCookieHeaders: L
         if (deleted) cookies.remove(name.lowercase()) else cookies[name.lowercase()] = "$name=$value"
     }
     return cookies.values.joinToString("; ").takeIf { it.isNotBlank() }
+}
+
+/**
+ * 只输出排查协议所需的响应形态和 Garmin 错误字段。所有值都做凭据/URL 脱敏，
+ * 不保存原始响应正文，避免诊断日志意外带出 Cookie、JWT 或 status token。
+ */
+internal fun garminSafeResponseDetail(body: String, contentType: String?): String {
+    val trimmed = body.trim()
+    if (trimmed.isEmpty()) return "EMPTY type=${contentType?.substringBefore(';') ?: "unknown"}"
+    val allowedKeys = setOf("code", "error", "errorcode", "errormessage", "message", "status")
+    val root = runCatching { org.json.JSONObject(trimmed) }.getOrNull()
+    val fields = runCatching {
+        requireNotNull(root)
+        root.keys().asSequence()
+            .filter { it.lowercase() in allowedKeys }
+            .take(4)
+            .map { key -> "$key=${root.opt(key)}" }
+            .toList()
+    }.getOrDefault(emptyList())
+    val source = if (fields.isNotEmpty()) {
+        fields.joinToString(",")
+    } else {
+        when {
+            trimmed.startsWith("<", ignoreCase = true) ->
+                Regex("<title[^>]*>(.*?)</title>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+                    .find(trimmed)?.groupValues?.getOrNull(1)?.let { "html=$it" } ?: "HTML"
+            root != null -> "JSON_KEYS=" + root.keys().asSequence().take(8).joinToString(",")
+            trimmed.startsWith("{") || trimmed.startsWith("[") -> "JSON_UNRECOGNIZED"
+            else -> "text=$trimmed"
+        }
+    }
+    return source
+        .replace(Regex("(?i)(JWT_WEB|CASTGC|authorization|bearer|cookie|ticket|token)\\s*[=:]\\s*[^,\\s}\"<]+")) {
+            "${it.groupValues[1]}=[redacted]"
+        }
+        .replace(Regex("https?://[^\\s,}\"<]+")) { match -> match.value.substringBefore('?') }
+        .replace(Regex("\\s+"), " ")
+        .take(180)
+}
+
+/**
+ * 中国站 gc-api 代理已在真机观察到以 HTTP 500 返回合法 `detailedImportResult`。
+ * 5xx 在没有业务结果时仍按“处理中”继续轮询；有业务结果时必须以正文为准，避免反复上传。
+ */
+internal fun garminPollImportState(httpCode: Int, body: String): GarminImportState? =
+    if (httpCode in 200..299 || httpCode == 409 || httpCode >= 500) {
+        parseGarminImportState(body)
+    } else {
+        null
+    }
+
+/** Garmin 私有导入接口使用稳定的纯 ASCII 文件名，文件内容哈希仍用于服务端去重。 */
+internal fun garminUploadFileName(sha256: String): String {
+    val safeHash = sha256.lowercase().filter { it in '0'..'9' || it in 'a'..'f' }.take(16)
+    return "FitSync_${safeHash.ifBlank { "activity" }}.fit"
 }
 
 /** 从 Connect 最终 HTML/内嵌配置中提取上传所需的 CSRF。 */

@@ -42,9 +42,9 @@ class DeliveryPlannerTest {
     }
 
     @Test
-    fun manualLocalImport_matchesActivitiesOriginallyImportedFromCloudPlatforms() {
+    fun localImportSource_matchesActivitiesOriginallyImportedFromCloudPlatforms() {
         assertThat(
-            matchesManualSyncSource(
+            matchesActivitySource(
                 sourcePlatform = Platform.LOCAL_IMPORT,
                 hasSourceVariant = false,
                 hasSourceCopy = false,
@@ -53,23 +53,23 @@ class DeliveryPlannerTest {
     }
 
     @Test
-    fun manualCloudSource_requiresMatchingVariantOrPlatformCopy() {
+    fun cloudSource_requiresMatchingVariantOrPlatformCopy() {
         assertThat(
-            matchesManualSyncSource(
+            matchesActivitySource(
                 sourcePlatform = Platform.STRAVA,
                 hasSourceVariant = false,
                 hasSourceCopy = false,
             ),
         ).isFalse()
         assertThat(
-            matchesManualSyncSource(
+            matchesActivitySource(
                 sourcePlatform = Platform.STRAVA,
                 hasSourceVariant = true,
                 hasSourceCopy = false,
             ),
         ).isTrue()
         assertThat(
-            matchesManualSyncSource(
+            matchesActivitySource(
                 sourcePlatform = Platform.STRAVA,
                 hasSourceVariant = false,
                 hasSourceCopy = true,

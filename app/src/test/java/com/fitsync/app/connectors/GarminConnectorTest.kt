@@ -1,6 +1,14 @@
 package com.fitsync.app.connectors
 
+import com.fitsync.app.domain.model.SessionState
+import com.fitsync.app.fit.FitCrc
 import com.google.common.truth.Truth.assertThat
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
 class GarminConnectorTest {
@@ -53,6 +61,183 @@ class GarminConnectorTest {
         assertThat(isGarminLoginResponse(302, "/signin/")).isTrue()
         assertThat(isGarminLoginResponse(403, null)).isFalse()
         assertThat(isGarminLoginResponse(503, null)).isFalse()
+    }
+
+    @Test
+    fun forbiddenResponse_refreshesSessionAndRetriesExactRequestOnce() = runTest {
+        val first = FakeGarminHttpResponse(403, requestName = "LIST")
+        var refreshCalls = 0
+        val retriedRequests = mutableListOf<String>()
+
+        val recovered = recoverGarminResponseOnce(
+            firstResponse = first,
+            responseCode = { it.code },
+            responseLocation = { it.location },
+            closeFirstResponse = { it.closed = true },
+            refreshSession = {
+                refreshCalls++
+                SessionState.AUTHENTICATED
+            },
+            retryRequest = {
+                retriedRequests += "LIST"
+                FakeGarminHttpResponse(200, requestName = "LIST")
+            },
+        )
+
+        assertThat(recovered.reason).isEqualTo(GarminSessionRefreshReason.FORBIDDEN)
+        assertThat(recovered.response.code).isEqualTo(200)
+        assertThat(recovered.retried).isTrue()
+        assertThat(first.closed).isTrue()
+        assertThat(refreshCalls).isEqualTo(1)
+        assertThat(retriedRequests).containsExactly("LIST")
+    }
+
+    @Test
+    fun forbiddenResponse_refreshFailureKeepsOriginalRetryableResponse() = runTest {
+        val first = FakeGarminHttpResponse(403, requestName = "DOWNLOAD")
+        var retryCalls = 0
+
+        val recovered = recoverGarminResponseOnce(
+            firstResponse = first,
+            responseCode = { it.code },
+            responseLocation = { it.location },
+            closeFirstResponse = { it.closed = true },
+            refreshSession = { SessionState.EXPIRED },
+            retryRequest = {
+                retryCalls++
+                FakeGarminHttpResponse(200, requestName = "DOWNLOAD")
+            },
+        )
+
+        assertThat(recovered.response).isSameInstanceAs(first)
+        assertThat(recovered.refreshState).isEqualTo(SessionState.EXPIRED)
+        assertThat(recovered.retried).isFalse()
+        assertThat(first.closed).isFalse()
+        assertThat(retryCalls).isEqualTo(0)
+    }
+
+    @Test
+    fun forbiddenResponse_secondForbiddenDoesNotLoop() = runTest {
+        var refreshCalls = 0
+        var retryCalls = 0
+
+        val recovered = recoverGarminResponseOnce(
+            firstResponse = FakeGarminHttpResponse(403, requestName = "UPLOAD"),
+            responseCode = { it.code },
+            responseLocation = { it.location },
+            closeFirstResponse = { it.closed = true },
+            refreshSession = {
+                refreshCalls++
+                SessionState.AUTHENTICATED
+            },
+            retryRequest = {
+                retryCalls++
+                FakeGarminHttpResponse(403, requestName = "UPLOAD")
+            },
+        )
+
+        assertThat(recovered.response.code).isEqualTo(403)
+        assertThat(recovered.retried).isTrue()
+        assertThat(refreshCalls).isEqualTo(1)
+        assertThat(retryCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun nonAuthFailures_doNotRefreshSession() = runTest {
+        for (code in listOf(429, 500, 503)) {
+            var refreshCalls = 0
+            var retryCalls = 0
+            val recovered = recoverGarminResponseOnce(
+                firstResponse = FakeGarminHttpResponse(code, requestName = "LIST"),
+                responseCode = { it.code },
+                responseLocation = { it.location },
+                closeFirstResponse = { it.closed = true },
+                refreshSession = {
+                    refreshCalls++
+                    SessionState.AUTHENTICATED
+                },
+                retryRequest = {
+                    retryCalls++
+                    FakeGarminHttpResponse(200, requestName = "LIST")
+                },
+            )
+
+            assertThat(recovered.response.code).isEqualTo(code)
+            assertThat(recovered.reason).isNull()
+            assertThat(refreshCalls).isEqualTo(0)
+            assertThat(retryCalls).isEqualTo(0)
+        }
+    }
+
+    @Test
+    fun loginRedirect_refreshFailureKeepsDefinitiveAuthResponse() = runTest {
+        val first = FakeGarminHttpResponse(
+            code = 302,
+            location = "https://sso.garmin.cn/portal/sso/zh-CN/sign-in",
+            requestName = "LIST",
+        )
+
+        val recovered = recoverGarminResponseOnce(
+            firstResponse = first,
+            responseCode = { it.code },
+            responseLocation = { it.location },
+            closeFirstResponse = { it.closed = true },
+            refreshSession = { SessionState.EXPIRED },
+            retryRequest = { FakeGarminHttpResponse(200, requestName = "LIST") },
+        )
+
+        assertThat(recovered.reason).isEqualTo(GarminSessionRefreshReason.AUTH_REQUIRED)
+        assertThat(recovered.response).isSameInstanceAs(first)
+        assertThat(isGarminLoginResponse(recovered.response.code, recovered.response.location)).isTrue()
+    }
+
+    @Test
+    fun concurrentForbiddenResponses_shareSingleSessionRefresh() = runTest {
+        val mutex = Mutex()
+        val refreshCalls = AtomicInteger(0)
+        var currentJwt = "old-jwt"
+
+        val outcomes = List(6) {
+            async {
+                refreshGarminSessionOnce(
+                    mutex = mutex,
+                    jwtBeforeRequest = "old-jwt",
+                    currentJwt = { currentJwt },
+                    refresh = {
+                        refreshCalls.incrementAndGet()
+                        delay(10)
+                        currentJwt = "new-jwt"
+                        SessionState.AUTHENTICATED
+                    },
+                )
+            }
+        }.awaitAll()
+
+        assertThat(refreshCalls.get()).isEqualTo(1)
+        assertThat(outcomes.count { it.reusedExistingRefresh }).isEqualTo(5)
+        assertThat(outcomes.map { it.state }).containsExactlyElementsIn(
+            List(6) { SessionState.AUTHENTICATED },
+        )
+    }
+
+    @Test
+    fun pollForbidden_retriesOnlyThePollRequest() = runTest {
+        val requestLog = mutableListOf("POLL")
+
+        recoverGarminResponseOnce(
+            firstResponse = FakeGarminHttpResponse(403, requestName = "POLL"),
+            responseCode = { it.code },
+            responseLocation = { it.location },
+            closeFirstResponse = { it.closed = true },
+            refreshSession = { SessionState.AUTHENTICATED },
+            retryRequest = {
+                requestLog += "POLL"
+                FakeGarminHttpResponse(200, requestName = "POLL")
+            },
+        )
+
+        assertThat(requestLog).containsExactly("POLL", "POLL").inOrder()
+        assertThat(requestLog).doesNotContain("UPLOAD")
     }
 
     @Test
@@ -143,6 +328,21 @@ class GarminConnectorTest {
         assertThat(state?.isFinal).isTrue()
         assertThat(state?.success).isFalse()
         assertThat(state?.duplicate).isFalse()
+        assertThat(
+            garminImportFailureSummary(
+                """{"detailedImportResult":{"successes":[],"failures":[{"messages":[{"code":403,"content":"Upload consent is required"}]}]}}""",
+            ),
+        ).isEqualTo("code=403 message=Upload consent is required")
+    }
+
+    @Test
+    fun finalImportRejection_isPermanentFileFailureNotAccountAction() {
+        val result = garminImportRejectedFailure("code=500 message=processing failed")
+
+        assertThat(result.code).isEqualTo("GARMIN_IMPORT_REJECTED")
+        assertThat(result.message).isEqualTo(
+            "Garmin 拒绝导入该文件：code=500 message=processing failed",
+        )
     }
 
     @Test
@@ -179,7 +379,13 @@ class GarminConnectorTest {
                 "https://connect.garmin.cn/gc-api/activity-service/activity/status/123/abc?upload=7",
                 domain = "garmin.cn",
             ),
-        ).isEqualTo("https://connectapi.garmin.cn/activity-service/activity/status/123/abc?upload=7")
+        ).isEqualTo("https://connect.garmin.cn/gc-api/activity-service/activity/status/123/abc?upload=7")
+        assertThat(
+            garminStatusApiUrl(
+                "https://connectapi.garmin.cn/activity-service/activity/status/123/abc?upload=7",
+                domain = "garmin.cn",
+            ),
+        ).isEqualTo("https://connect.garmin.cn/gc-api/activity-service/activity/status/123/abc?upload=7")
         assertThat(garminStatusApiUrl("https://connectapi.garmin.cn/activity/status/123")).isNull()
         assertThat(garminStatusApiUrl("https://example.org/activity/status/123/abc")).isNull()
         assertThat(garminStatusApiUrl("http://connectapi.garmin.com/activity/status/123")).isNull()
@@ -221,6 +427,77 @@ class GarminConnectorTest {
             "https://sso.garmin.cn/portal/sso/zh-CN/sign-in?clientId=GarminConnect&service=",
         )
         assertThat(direct).contains("https%3A%2F%2Fconnect.garmin.cn%2Fmodern%2F")
+    }
+
+    @Test
+    fun safeResponseDetail_keepsErrorButRedactsCredentialsAndUrlQuery() {
+        val detail = garminSafeResponseDetail(
+            """{"message":"request token=secret failed at https://example.org/path?ticket=abc","code":500}""",
+            "application/json",
+        )
+
+        assertThat(detail).contains("code=500")
+        assertThat(detail).contains("token=[redacted]")
+        assertThat(detail).contains("https://example.org/path")
+        assertThat(detail).doesNotContain("secret")
+        assertThat(detail).doesNotContain("ticket=abc")
+    }
+
+    @Test
+    fun pollHttp500_stillParsesGarminDetailedImportResult() {
+        val state = garminPollImportState(
+            500,
+            """{"detailedImportResult":{"successes":[{"internalId":23626050000}],"failures":[]}}""",
+        )
+
+        assertThat(state?.isFinal).isTrue()
+        assertThat(state?.success).isTrue()
+        assertThat(state?.remoteActivityId).isEqualTo("23626050000")
+    }
+
+    @Test
+    fun pollOrdinaryClientError_doesNotTrustBusinessBody() {
+        val state = garminPollImportState(
+            400,
+            """{"detailedImportResult":{"successes":[{"internalId":23626050000}],"failures":[]}}""",
+        )
+
+        assertThat(state).isNull()
+    }
+
+    @Test
+    fun uploadFileName_isStableAsciiFitName() {
+        assertThat(garminUploadFileName("0222A3C439D47B72-not-hex"))
+            .isEqualTo("FitSync_0222a3c439d47b72.fit")
+        assertThat(garminUploadFileName(""))
+            .isEqualTo("FitSync_activity.fit")
+    }
+
+    @Test
+    fun prepareFitBytes_repairsFileCrcWithoutChangingPayload() {
+        val bytes = ByteArray(16)
+        bytes[0] = 14
+        bytes[1] = 0x20
+        ".FIT".toByteArray(Charsets.US_ASCII).copyInto(bytes, 8)
+        val headerCrc = FitCrc.compute(bytes, 0, 12)
+        bytes[12] = (headerCrc and 0xFF).toByte()
+        bytes[13] = ((headerCrc ushr 8) and 0xFF).toByte()
+        bytes[14] = 0x34
+        bytes[15] = 0x12
+
+        val prepared = requireNotNull(prepareGarminFitBytes(bytes))
+
+        assertThat(prepared.fileCrcRepaired).isTrue()
+        assertThat(prepared.headerCrcRepaired).isFalse()
+        assertThat(prepared.bytes.copyOfRange(0, 14)).isEqualTo(bytes.copyOfRange(0, 14))
+        assertThat(FitCrc.readUInt16Le(prepared.bytes, 14))
+            .isEqualTo(FitCrc.compute(prepared.bytes, 0, 14))
+    }
+
+    @Test
+    fun fitCrc_matchesPublishedCrc16IbmCheckValue() {
+        assertThat(FitCrc.compute("123456789".toByteArray(Charsets.US_ASCII)))
+            .isEqualTo(0xBB3D)
     }
 
     @Test
@@ -340,3 +617,10 @@ class GarminConnectorTest {
         assertThat(extractCookieValueFromSetCookie(emptyList(), "CASTGC")).isNull()
     }
 }
+
+private data class FakeGarminHttpResponse(
+    val code: Int,
+    val location: String? = null,
+    val requestName: String,
+    var closed: Boolean = false,
+)

@@ -212,6 +212,7 @@ class StravaConnector(
     ): ConnectorResult<RemoteCopy> {
         val file = java.io.File(sourceVariant.localFilePath)
         if (!file.isFile) return ConnectorResult.PermanentFailure("NO_FILE", "原始 FIT 已被清理，无法上传")
+        if (file.length() <= 0L) return ConnectorResult.PermanentFailure("FILE_EMPTY", "本地 FIT 文件为空")
         val sha256 = FitFileStore.sha256Of(file)
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("file", file.name, file.asRequestBody(FIT_MEDIA_TYPE))
@@ -222,7 +223,7 @@ class StravaConnector(
                 if (activity.sportType == SportType.INDOOR_CYCLING) addFormDataPart("trainer", "true")
             }
             .build()
-        return when (val api = executeApi { token ->
+        return when (val api = executeApi(acceptErrorResponse = true) { token ->
             Request.Builder().url("$API_BASE/uploads").header("Authorization", "Bearer $token")
                 .post(body).build()
         }) {
@@ -233,7 +234,7 @@ class StravaConnector(
     }
 
     override suspend fun checkUpload(remoteUploadId: String): ConnectorResult<RemoteCopy> =
-        when (val api = executeApi { token ->
+        when (val api = executeApi(acceptErrorResponse = true) { token ->
             Request.Builder().url("$API_BASE/uploads/$remoteUploadId")
                 .header("Authorization", "Bearer $token").build()
         }) {
@@ -301,14 +302,17 @@ class StravaConnector(
         val error = root.optString("error")
         val status = root.optString("status")
         if (error.contains("duplicate", ignoreCase = true) || status.contains("duplicate", ignoreCase = true)) {
-            val activityId = root.optLong("activity_id").takeIf { it > 0 }?.toString()
+            val activityId = stravaActivityId(root)
+                ?: parseStravaDuplicateActivityId(error)
+                ?: parseStravaDuplicateActivityId(status)
             return ConnectorResult.Duplicate(
                 activityId?.let { RemoteCopy(it, "$WEB_BASE/activities/$it", duplicate = true) },
             )
         }
         if (!response.isSuccessful) {
             return when {
-                response.code == 403 -> ConnectorResult.RequiresLogin(OAUTH_URL, "Strava 缺少上传权限，请重新授权")
+                response.code == 401 || response.code == 403 ->
+                    ConnectorResult.RequiresLogin(OAUTH_URL, "Strava 缺少上传权限，请重新授权")
                 response.code == 408 || response.code == 429 || response.code >= 500 ->
                     ConnectorResult.RetryableFailure(response.code.toString(), "Strava 上传暂时失败")
                 else -> ConnectorResult.PermanentFailure(
@@ -317,10 +321,10 @@ class StravaConnector(
                 )
             }
         }
-        val activityId = root.optLong("activity_id").takeIf { it > 0 }?.toString()
+        val activityId = stravaActivityId(root)
         if (activityId != null) return ConnectorResult.Success(RemoteCopy(activityId, "$WEB_BASE/activities/$activityId"))
         if (error.isNotBlank()) return ConnectorResult.PermanentFailure("UPLOAD_FAILED", error)
-        val uploadId = root.optLong("id").takeIf { it > 0 }?.toString() ?: fallbackUploadId
+        val uploadId = stravaUploadId(root) ?: fallbackUploadId
         return if (uploadId != null) {
             ConnectorResult.Processing(uploadId, POLL_AFTER_MS)
         } else {
@@ -328,22 +332,28 @@ class StravaConnector(
         }
     }
 
-    private suspend fun executeApi(build: (String) -> Request): ApiResponse {
+    private suspend fun executeApi(
+        acceptErrorResponse: Boolean = false,
+        build: (String) -> Request,
+    ): ApiResponse {
         val initialToken = oauth.accessToken() ?: return ApiResponse.Unauthorized
         val first = execute(build(initialToken)) ?: return ApiResponse.Failure(null, "NETWORK")
-        if (first.code != 401) return classify(first)
+        if (first.code != 401) return classify(first, acceptErrorResponse)
         first.close()
         val refreshed = oauth.accessToken(failedToken = initialToken) ?: return ApiResponse.Unauthorized
-        return classify(execute(build(refreshed)) ?: return ApiResponse.Failure(null, "NETWORK"))
+        return classify(
+            execute(build(refreshed)) ?: return ApiResponse.Failure(null, "NETWORK"),
+            acceptErrorResponse,
+        )
     }
 
     private suspend fun execute(request: Request): Response? = withContext(Dispatchers.IO) {
         runCatching { client.newCall(request).execute() }.getOrNull()
     }
 
-    private fun classify(response: Response): ApiResponse = when {
-        response.isSuccessful -> ApiResponse.Success(response)
+    private fun classify(response: Response, acceptErrorResponse: Boolean): ApiResponse = when {
         response.code == 401 -> response.use { ApiResponse.Unauthorized }
+        response.isSuccessful || acceptErrorResponse -> ApiResponse.Success(response)
         else -> {
             val code = response.code
             response.close()
@@ -407,3 +417,18 @@ class StravaConnector(
         }
     }
 }
+
+internal fun stravaActivityId(root: JSONObject): String? =
+    root.optString("activity_id").trim().takeIf { it.matches(Regex("[1-9]\\d*")) }
+        ?: root.optLong("activity_id").takeIf { it > 0L }?.toString()
+
+internal fun stravaUploadId(root: JSONObject): String? =
+    root.optString("id_str").trim().takeIf { it.matches(Regex("[1-9]\\d*")) }
+        ?: root.optString("id").trim().takeIf { it.matches(Regex("[1-9]\\d*")) }
+        ?: root.optLong("id").takeIf { it > 0L }?.toString()
+
+internal fun parseStravaDuplicateActivityId(message: String): String? =
+    Regex("(?i)(?:activity\\s+|activities/)([1-9]\\d*)")
+        .find(message)
+        ?.groupValues
+        ?.getOrNull(1)

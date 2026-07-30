@@ -122,7 +122,7 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
                 }
                 val hasSourceCopy = sourceAccountId != null &&
                     copies[activity.id].orEmpty().any { it.platformAccountId == sourceAccountId }
-                val comesFromSource = matchesManualSyncSource(
+                val comesFromSource = matchesActivitySource(
                     sourcePlatform = sourcePlatform,
                     hasSourceVariant = hasSourceVariant,
                     hasSourceCopy = hasSourceCopy,
@@ -176,6 +176,11 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
     ): Int {
         val rule = db.syncRuleDao().getAll().firstOrNull { it.id == ruleId } ?: return 0
         if (!isDestinationReadyForPlanning(rule.destinationAccountId, allowedDestinationAccountIds)) return 0
+        val sourceAccountId = if (rule.sourcePlatform == Platform.LOCAL_IMPORT) {
+            null
+        } else {
+            db.platformAccountDao().getByPlatform(rule.sourcePlatform)?.id
+        }
         var count = 0
         var beforeTime = Long.MAX_VALUE
         var beforeId = Long.MAX_VALUE
@@ -184,10 +189,23 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
             if (page.isEmpty()) break
             val variants = db.activityVariantDao().findByCanonicalIds(page.map { it.id })
                 .groupBy { it.canonicalActivityId }
+            val copies = if (sourceAccountId == null) {
+                emptyMap()
+            } else {
+                db.platformCopyDao().findByCanonicalIds(page.map { it.id })
+                    .groupBy { it.canonicalActivityId }
+            }
             val sourceIds = page.filter { activity ->
-                variants[activity.id].orEmpty().any {
+                val hasSourceVariant = variants[activity.id].orEmpty().any {
                     (it.sourcePlatform ?: Platform.LOCAL_IMPORT) == rule.sourcePlatform
                 }
+                val hasSourceCopy = sourceAccountId != null &&
+                    copies[activity.id].orEmpty().any { it.platformAccountId == sourceAccountId }
+                matchesActivitySource(
+                    sourcePlatform = rule.sourcePlatform,
+                    hasSourceVariant = hasSourceVariant,
+                    hasSourceCopy = hasSourceCopy,
+                )
             }.map { it.id }
             count += planForActivities(
                 canonicalActivityIds = sourceIds,
@@ -266,9 +284,9 @@ internal fun isRuleBacklogPlanningAllowed(
 
 /**
  * “本机导入”表示已经进入 FitSync 本地活动库的全部活动，不受原始平台标签限制。
- * 云平台来源仍需存在对应的平台原始文件或平台副本。
+ * 云平台来源仍需存在对应的平台原始文件或平台副本。手动同步与自动规则补扫必须共用该语义。
  */
-internal fun matchesManualSyncSource(
+internal fun matchesActivitySource(
     sourcePlatform: Platform,
     hasSourceVariant: Boolean,
     hasSourceCopy: Boolean,

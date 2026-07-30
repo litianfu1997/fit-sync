@@ -1,5 +1,7 @@
 package com.fitsync.app.connectors
 
+import com.fitsync.app.domain.model.Platform
+import com.fitsync.app.fit.FitCrc
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
@@ -32,6 +34,20 @@ data class GarminImportState(
  */
 internal fun garminUploadUrl(domain: String): String =
     "https://connect.garmin.cn/gc-api/upload-service/upload"
+
+/**
+ * Garmin 的 2xx 只代表导入已受理：有状态地址时持久化该地址继续轮询；没有时改由目标列表确认。
+ * 两种分支都返回 Processing，确保 Worker 不会重新 POST 同一个 FIT。
+ */
+internal fun garminAcceptedProcessingResult(
+    statusUrl: String?,
+    provisionalRemoteId: String,
+): ConnectorResult.Processing = ConnectorResult.Processing(
+    encodeAsyncUploadConfirmationToken(Platform.GARMIN, statusUrl ?: provisionalRemoteId),
+    ASYNC_UPLOAD_CONFIRM_POLL_MS,
+)
+
+internal const val GARMIN_REMOTE_POLL_AFTER_MS = 30_000L
 
 /**
  * 解析上传（或轮询）返回的 `detailedImportResult`。
@@ -89,6 +105,80 @@ internal fun parseGarminImportState(jsonText: String): GarminImportState? {
     )
 }
 
+/** 提取 Garmin 明确返回的首条导入失败原因；只读取错误 code/content/message，不读取凭据字段。 */
+internal fun garminImportFailureSummary(jsonText: String): String? {
+    val detail = runCatching { JSONObject(jsonText).optJSONObject("detailedImportResult") }.getOrNull()
+        ?: return null
+    val failures = detail.optJSONArray("failures") ?: return null
+    val failure = failures.optJSONObject(0) ?: return null
+    val messages = failure.optJSONArray("messages")
+    val message = messages?.optJSONObject(0)
+    if (message != null) {
+        val parts = buildList {
+            message.opt("code")?.toString()?.takeIf { it.isNotBlank() && it != "null" }
+                ?.let { add("code=$it") }
+            sequenceOf("content", "message", "errorMessage")
+                .mapNotNull { key -> message.optString(key).takeIf { it.isNotBlank() } }
+                .firstOrNull()
+                ?.let { add("message=$it") }
+        }
+        if (parts.isNotEmpty()) return parts.joinToString(" ")
+        return "MESSAGE_KEYS=" + message.keys().asSequence().take(8).joinToString(",")
+    }
+    return "FAILURE_KEYS=" + failure.keys().asSequence().take(8).joinToString(",")
+}
+
+/** Garmin 已完成处理但拒绝了当前 FIT：这是文件级结果，不能据此把整个账号标记为待处理。 */
+internal fun garminImportRejectedFailure(summary: String? = null): ConnectorResult.PermanentFailure =
+    ConnectorResult.PermanentFailure(
+        code = "GARMIN_IMPORT_REJECTED",
+        message = summary?.takeIf { it.isNotBlank() }
+            ?.let { "Garmin 拒绝导入该文件：$it" }
+            ?: "Garmin 拒绝导入该文件",
+    )
+
+internal data class GarminPreparedFitBytes(
+    val bytes: ByteArray,
+    val fileCrcRepaired: Boolean,
+    val headerCrcRepaired: Boolean,
+)
+
+/**
+ * 为 Garmin 导入修复 FIT 的 Header CRC（若原文件声明了 CRC）和文件尾 CRC。
+ * 只接受结构完整、长度与 Header 声明一致的 FIT；修复发生在上传副本，不会改写本地原件。
+ */
+internal fun prepareGarminFitBytes(source: ByteArray): GarminPreparedFitBytes? {
+    if (source.size < 14 || String(source, 8, 4, Charsets.US_ASCII) != ".FIT") return null
+    val headerSize = source[0].toInt() and 0xFF
+    if (headerSize !in setOf(12, 14)) return null
+    val dataSize = FitCrc.readUInt32Le(source, 4)
+    val contentSize = headerSize.toLong() + dataSize
+    val totalSize = contentSize + 2L
+    if (contentSize > Int.MAX_VALUE || totalSize != source.size.toLong()) return null
+
+    val repaired = source.copyOf()
+    var headerRepaired = false
+    if (headerSize == 14) {
+        val storedHeaderCrc = FitCrc.readUInt16Le(repaired, 12)
+        val actualHeaderCrc = FitCrc.compute(repaired, 0, 12)
+        if (storedHeaderCrc != 0 && storedHeaderCrc != actualHeaderCrc) {
+            repaired[12] = (actualHeaderCrc and 0xFF).toByte()
+            repaired[13] = ((actualHeaderCrc ushr 8) and 0xFF).toByte()
+            headerRepaired = true
+        }
+    }
+
+    val fileCrcOffset = contentSize.toInt()
+    val storedFileCrc = FitCrc.readUInt16Le(repaired, fileCrcOffset)
+    val actualFileCrc = FitCrc.compute(repaired, 0, fileCrcOffset)
+    val fileRepaired = storedFileCrc != actualFileCrc
+    if (fileRepaired) {
+        repaired[fileCrcOffset] = (actualFileCrc and 0xFF).toByte()
+        repaired[fileCrcOffset + 1] = ((actualFileCrc ushr 8) and 0xFF).toByte()
+    }
+    return GarminPreparedFitBytes(repaired, fileRepaired, headerRepaired)
+}
+
 private fun readInternalId(item: JSONObject): String? {
     val asLong = item.optLong("internalId", -1L)
     if (asLong >= 0) return asLong.toString()
@@ -100,8 +190,9 @@ private fun readInternalId(item: JSONObject): String? {
  * 规范化「上传状态轮询」URL。
  *
  * Garmin 网页端在上传后可能返回一个待轮询的 status 链接，形如
- * `…/activity-service/activity/status/{id}/{token}`。中国站有时经由
- * `connect.garmin.cn/gc-api/…` 代理，这里统一改写为直连 `connectapi.garmin.{cn|com}`。
+ * `…/activity-service/activity/status/{id}/{token}`。中国站上传响应虽然返回
+ * `connectapi.garmin.cn`，但 JWT_WEB 网页会话直连该域会得到 403；必须与上传请求一致，
+ * 经 `connect.garmin.cn/gc-api/…` 同源代理并携带 DI-Backend。国际站仍保留直连形式。
  *
  * 只接受 https 且 host 属于 garmin 的来源；路径不匹配 `{id}/{token}` 两段形态时返回 null，
  * 以免把任意链接当成轮询地址去 GET。
@@ -121,7 +212,11 @@ internal fun garminStatusApiUrl(rawUrl: String, domain: String = "garmin.com"): 
 
     val tld = if (domain.equals("garmin.cn", ignoreCase = true) || host.endsWith(".garmin.cn")) "cn" else "com"
     return buildString {
-        append("https://connectapi.garmin.").append(tld)
+        if (tld == "cn") {
+            append("https://connect.garmin.cn/gc-api")
+        } else {
+            append("https://connectapi.garmin.com")
+        }
         append("/activity-service/activity/status/")
         append(match.groupValues[1]).append('/').append(match.groupValues[2])
         url.query?.takeIf { it.isNotEmpty() }?.let { append('?').append(it) }

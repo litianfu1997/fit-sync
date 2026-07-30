@@ -208,9 +208,15 @@ internal class CorosApiConnector(
     /** STS 凭证 → 打 zip → OSS V1 签名 PUT → multipart import。 */
     private suspend fun uploadViaOss(file: File, uploadName: String): ConnectorResult<RemoteCopy> = withRelogin {
         // 1) 申请 OSS STS 临时凭证（固定 sign，不走 apiRequest，不 inject accesstoken）
-        val sts = fetchOssSts() ?: return@withRelogin ConnectorResult.PermanentFailure(
-            "COROS_STS_UNAVAILABLE", "COROS 未返回上传凭证（接口可能已变更）",
-        )
+        val sts = when (val result = fetchOssSts()) {
+            is ConnectorResult.Success -> result.value
+            is ConnectorResult.RetryableFailure -> return@withRelogin result
+            is ConnectorResult.PermanentFailure -> return@withRelogin result
+            else -> return@withRelogin ConnectorResult.PermanentFailure(
+                "COROS_STS_INVALID_STATE",
+                "COROS 上传凭证返回了无法识别的状态",
+            )
+        }
         // 2) md5 用原始 FIT 的、size 用 zip 的；objectKey = fit_zip/{userId}/{fitMd5}.zip
         val fitMd5 = md5Hex(file)
         val userId = sessionManager.externalUserId(platform)
@@ -261,16 +267,36 @@ internal class CorosApiConnector(
         }
     }
 
-    /** `GET faq.coros.com/openapi/oss/sts`，返回解码后的 STS 凭证；失败 null。 */
-    private suspend fun fetchOssSts(): CorosStsCredentials? = runCatching {
+    /** `GET faq.coros.com/openapi/oss/sts`，区分临时网络失败与永久协议错误。 */
+    private suspend fun fetchOssSts(): ConnectorResult<CorosStsCredentials> = runCatching {
         val url = "$OSS_STS_URL?bucket=$OSS_BUCKET&service=$OSS_SERVICE_QS&app_id=$OSS_APP_ID&sign=$OSS_SIGN&v=2"
         execute(
             Request.Builder().url(url).get()
                 .header("Accept", "application/json, text/plain, */*")
                 .header("User-Agent", USER_AGENT)
                 .build(),
-        ).use { resp -> if (!resp.isSuccessful) null else parseCorosSts(resp.body?.string().orEmpty()) }
-    }.getOrDefault(null)
+        ).use { resp ->
+            when {
+                resp.code == 408 || resp.code == 429 || resp.code >= 500 ->
+                    ConnectorResult.RetryableFailure(
+                        resp.code.toString(),
+                        "COROS 上传凭证暂时不可用（HTTP ${resp.code}）",
+                    )
+                !resp.isSuccessful -> ConnectorResult.PermanentFailure(
+                    resp.code.toString(),
+                    "COROS 上传凭证请求失败（HTTP ${resp.code}）",
+                )
+                else -> parseCorosSts(resp.body?.string().orEmpty())
+                    ?.let { ConnectorResult.Success(it) }
+                    ?: ConnectorResult.PermanentFailure(
+                        "COROS_STS_INVALID_RESPONSE",
+                        "COROS 未返回有效上传凭证（接口可能已变更）",
+                    )
+            }
+        }
+    }.getOrElse {
+        ConnectorResult.RetryableFailure("NETWORK", it.message ?: "COROS 上传凭证请求失败")
+    }
 
     /**
      * 业务请求 401 → 用持久化的账号密码静默重登并重试一次；重登失败则原样上报 RequiresLogin

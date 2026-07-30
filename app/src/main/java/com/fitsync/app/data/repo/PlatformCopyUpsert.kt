@@ -3,7 +3,7 @@ package com.fitsync.app.data.repo
 import com.fitsync.app.data.db.entity.PlatformCopyEntity
 
 /**
- * PlatformCopy 对齐计划：上传可能先写合成 remoteId，后续 list 真实 ID 需覆盖同一行。
+ * PlatformCopy 对齐计划：兼容历史版本留下的临时 remoteId；后续 list 的真实 ID 必须覆盖同一行。
  */
 sealed class PlatformCopyUpsertPlan {
     data class Update(val entity: PlatformCopyEntity) : PlatformCopyUpsertPlan()

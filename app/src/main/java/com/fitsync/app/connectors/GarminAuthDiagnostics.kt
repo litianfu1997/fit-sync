@@ -74,7 +74,8 @@ object GarminAuthDiagnostics {
         val msg = "${event.operation}/${event.phase} outcome=${event.outcome}" +
             " code=${event.httpCode ?: "-"} src=${event.cookieSource.ifBlank { "-" }}" +
             " setCookieJwt=${event.setCookieHasJwtWeb} loc=${event.locationHost ?: "-"}" +
-            " hadAccount=${event.hadPersistedAccount}"
+            " hadAccount=${event.hadPersistedAccount}" +
+            (event.detail?.let { " detail=$it" } ?: "")
         if (event.outcome == OUTCOME_REQUIRES_LOGIN || event.outcome == OUTCOME_PERMANENT_FAIL) {
             Log.w(TAG, msg)
         } else {
@@ -85,7 +86,8 @@ object GarminAuthDiagnostics {
     /**
      * 单条诊断事件。各字段均可选（按 phase 选填）。
      *
-     * - [phase]：RESPONSE（OkHttp 响应）/ COOKIE_SELECT（cookie 三级回退）/ COOKIE_MISSING / DECISION。
+     * - [phase]：RESPONSE（OkHttp 响应）/ COOKIE_SELECT（cookie 三级回退）/ COOKIE_MISSING / DECISION，
+     *   以及 SESSION_REFRESH_TRIGGER / SESSION_REFRESH_RESULT / SESSION_RETRY（403/登录失效自动续期链）。
      * - [cookieSource]：COOKIE_SELECT 用，LIVE/STORED/JWT/NONE。
      * - [setCookieHasJwtWeb]：RESPONSE 用，回答「服务端是否轮换 JWT_WEB」。
      * - [outcome]：结果标签，如 OK / HTTP_FAIL / RETRYABLE / REQUIRES_LOGIN / PERMANENT_FAIL。
@@ -100,6 +102,8 @@ object GarminAuthDiagnostics {
         val locationHost: String? = null,
         val setCookieHasJwtWeb: Boolean = false,
         val hadPersistedAccount: Boolean = false,
+        /** 已脱敏的协议摘要，不允许放入 Cookie、JWT、URL 查询参数或原始响应正文。 */
+        val detail: String? = null,
     ) {
         fun toJson(): JSONObject = JSONObject().apply {
             put("ts", timestampEpochMs)
@@ -111,6 +115,7 @@ object GarminAuthDiagnostics {
             locationHost?.let { put("loc", it) }
             put("setJwt", setCookieHasJwtWeb)
             put("hadAcct", hadPersistedAccount)
+            detail?.let { put("detail", it) }
         }
 
         companion object {
@@ -125,6 +130,7 @@ object GarminAuthDiagnostics {
                     locationHost = o.optString("loc").takeIf { it.isNotBlank() },
                     setCookieHasJwtWeb = o.optBoolean("setJwt"),
                     hadPersistedAccount = o.optBoolean("hadAcct"),
+                    detail = o.optString("detail").takeIf { it.isNotBlank() },
                 )
             }.getOrNull()
         }

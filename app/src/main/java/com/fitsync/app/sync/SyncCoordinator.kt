@@ -11,6 +11,7 @@ import com.fitsync.app.connectors.PlatformConnector
 import com.fitsync.app.connectors.PlatformCapabilityRegistry
 import com.fitsync.app.connectors.RemoteActivitySummary
 import com.fitsync.app.connectors.SyncCursor
+import com.fitsync.app.connectors.parseAsyncUploadConfirmationToken
 import com.fitsync.app.data.db.FitSyncDatabase
 import com.fitsync.app.data.db.entity.CanonicalActivityEntity
 import com.fitsync.app.data.db.entity.ActivityVariantEntity
@@ -40,6 +41,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlin.math.min
+import kotlin.math.abs
 import kotlin.math.pow
 
 class SyncCoordinator(
@@ -188,7 +190,11 @@ class SyncCoordinator(
                     }
                 }
         }
-        val deliveryResult = processDeliveryQueue(readyDestinationAccountIds)
+        val deliveryResult = includeUnreadyDestinationRetry(
+            result = processDeliveryQueue(readyDestinationAccountIds),
+            destinationAccountIds = destinationAccountIds,
+            readyDestinationAccountIds = readyDestinationAccountIds,
+        )
         runCatching { storageJanitor?.run() }
         val checkedAccountIds = accountResults.mapTo(hashSetOf()) { it.accountId }
         val actionRequiredAccounts = db.platformAccountDao().getAll().count { account ->
@@ -224,7 +230,11 @@ class SyncCoordinator(
         val readyDestinationAccountIds = accountResults
             .filter { it.pull.completedNormally }
             .mapTo(mutableSetOf()) { it.accountId }
-        val deliveryResult = processDeliveryQueue(readyDestinationAccountIds)
+        val deliveryResult = includeUnreadyDestinationRetry(
+            result = processDeliveryQueue(readyDestinationAccountIds),
+            destinationAccountIds = destinationAccountIds,
+            readyDestinationAccountIds = readyDestinationAccountIds,
+        )
         runCatching { storageJanitor?.run() }
         val refreshedAccounts = db.platformAccountDao().getAll().associateBy { it.id }
         SyncRunSummary(
@@ -656,6 +666,27 @@ class SyncCoordinator(
         return DeliverySchedule(true, (next - now).coerceAtLeast(0))
     }
 
+    private suspend fun includeUnreadyDestinationRetry(
+        result: DeliveryQueueResult,
+        destinationAccountIds: Set<Long>,
+        readyDestinationAccountIds: Set<Long>,
+    ): DeliveryQueueResult {
+        val unreadyAccountIds = destinationAccountIds - readyDestinationAccountIds
+        if (unreadyAccountIds.isEmpty()) return result
+        val activeDestinationIds = db.deliveryJobDao().findActiveDestinationAccountIds().toSet()
+        val retryableAccountIds = db.platformAccountDao().getAll()
+            .filterTo(hashSetOf()) { account ->
+                account.id in unreadyAccountIds &&
+                    !account.needsUserAction &&
+                    (account.status == AccountStatus.ACTIVE || account.status == AccountStatus.EXPERIMENTAL)
+            }
+            .mapTo(hashSetOf()) { it.id }
+        val hasUnreadyActiveJobs = retryableAccountIds.any { it in activeDestinationIds }
+        return result.copy(
+            schedule = withUnreadyDestinationRetry(result.schedule, hasUnreadyActiveJobs),
+        )
+    }
+
     /**
      * 目标端必须覆盖所有待投递活动；开启“包含历史”时还要覆盖本地最早活动。
      * 返回值会在 [pullAccount] 中与默认增量窗口取更早者，不会缩短已有窗口。
@@ -795,6 +826,7 @@ class SyncCoordinator(
             when (val pageResult = globalNetworkSemaphore.withPermit { connector.listActivities(since, cursor) }) {
                 is ConnectorResult.Success -> {
                     var abortAccount = false
+                    reconcilePendingUploadCopies(account, pageResult.value.items)
                     val remoteIds = pageResult.value.items.map { it.remoteActivityId }
                     val existingRemoteIds = if (remoteIds.isEmpty()) emptySet() else {
                         (
@@ -928,6 +960,52 @@ class SyncCoordinator(
         )
     }
 
+    /**
+     * 上传已受理但目标端原文件尚未可下载时，用真实列表项高置信确认任务。
+     * 只接受唯一的一对一匹配，并写入列表返回的真实 remoteActivityId；绝不生成合成 ID。
+     */
+    private suspend fun reconcilePendingUploadCopies(
+        account: PlatformAccountEntity,
+        remotes: List<RemoteActivitySummary>,
+    ) {
+        if (remotes.isEmpty()) return
+        val candidates = mutableListOf<PendingUploadMatchCandidate>()
+        for (job in db.deliveryJobDao().findByDestinationAccount(account.id)) {
+            if (job.status != DeliveryJobStatus.WAITING_REMOTE_PROCESS) continue
+            val remoteUploadId = job.remoteUploadId ?: continue
+            val activity = db.canonicalActivityDao().getById(job.canonicalActivityId) ?: continue
+            val variant = db.activityVariantDao().getById(job.sourceVariantId) ?: continue
+            val confirmationMarker = parseAsyncUploadConfirmationToken(remoteUploadId)
+                ?.takeIf { it.platform == account.platform }
+                ?.provisionalRemoteId
+            candidates += PendingUploadMatchCandidate(
+                jobId = job.id,
+                canonicalActivityId = job.canonicalActivityId,
+                sourceVariantId = job.sourceVariantId,
+                sourceFileSha256 = variant.fileSha256,
+                startTimeEpochMs = activity.startTimeEpochMs,
+                distanceMeters = activity.distanceMeters,
+                title = activity.title,
+                confirmationMarker = confirmationMarker,
+            )
+        }
+        val matches = findHighConfidencePendingUploadMatches(remotes, candidates)
+        if (matches.isEmpty()) return
+        mutationGate.withLock {
+            matches.forEach { match ->
+                upsertPlatformCopy(
+                    canonicalId = match.candidate.canonicalActivityId,
+                    accountId = account.id,
+                    remoteActivityId = match.remote.remoteActivityId,
+                    remoteUrl = match.remote.metadata["remote_url"],
+                    fileSha256 = match.candidate.sourceFileSha256,
+                    sourceVariantId = match.candidate.sourceVariantId,
+                    createdBySync = true,
+                )
+            }
+        }
+    }
+
     private suspend fun downloadAndImport(
         accountId: Long,
         platform: Platform,
@@ -1016,11 +1094,7 @@ class SyncCoordinator(
         )
     }
 
-    /**
-     * 写入或对齐 PlatformCopy。
-     * 上传路径可能先写入合成 remoteId（如 COROS md5 / iGP ossId），
-     * 后续 list 拉到真实 ID 时需覆盖同一 (canonical, account) 行，避免重复下载循环。
-     */
+    /** 写入或对齐 PlatformCopy；只保存平台列表或上传响应返回的真实活动 ID。 */
     internal suspend fun upsertPlatformCopy(
         canonicalId: Long,
         accountId: Long,
@@ -1132,6 +1206,7 @@ internal const val MAX_PULL_PAGES = 500
 internal const val MAX_DELIVERY_BATCHES_PER_WORKER = 50
 internal const val DELIVERY_DRAIN_BUDGET_MS = 8L * 60 * 1000
 internal const val TARGET_PREFETCH_TOLERANCE_MS = 10L * 60 * 1000
+internal const val UNREADY_DESTINATION_RETRY_MS = 15L * 60 * 1000
 
 data class SyncRunSummary(
     val pulledActivities: Int = 0,
@@ -1145,7 +1220,7 @@ data class SyncRunSummary(
     val failedAccounts: Int = 0,
 )
 
-private data class DeliverySchedule(val hasMore: Boolean, val delayMs: Long?)
+internal data class DeliverySchedule(val hasMore: Boolean, val delayMs: Long?)
 
 private data class DeliveryQueueResult(
     val completed: Int,
@@ -1192,6 +1267,16 @@ internal fun shouldContinueDeliveryDrain(
     completedBatches < MAX_DELIVERY_BATCHES_PER_WORKER &&
     elapsedMs < DELIVERY_DRAIN_BUDGET_MS
 
+internal fun withUnreadyDestinationRetry(
+    schedule: DeliverySchedule,
+    hasUnreadyActiveJobs: Boolean,
+): DeliverySchedule {
+    if (!hasUnreadyActiveJobs) return schedule
+    val retryDelay = schedule.delayMs?.let { minOf(it, UNREADY_DESTINATION_RETRY_MS) }
+        ?: UNREADY_DESTINATION_RETRY_MS
+    return DeliverySchedule(hasMore = true, delayMs = retryDelay)
+}
+
 internal fun earlierEpoch(current: Long?, candidate: Long?): Long? = when {
     current == null -> candidate
     candidate == null -> current
@@ -1201,6 +1286,80 @@ internal fun earlierEpoch(current: Long?, candidate: Long?): Long? = when {
 internal fun targetPrefetchSince(activityStartEpochMs: Long): Long =
     (activityStartEpochMs - TARGET_PREFETCH_TOLERANCE_MS).coerceAtLeast(0L)
 
+internal data class PendingUploadMatchCandidate(
+    val jobId: Long,
+    val canonicalActivityId: Long,
+    val sourceVariantId: Long,
+    val sourceFileSha256: String,
+    val startTimeEpochMs: Long,
+    val distanceMeters: Double?,
+    val title: String?,
+    val confirmationMarker: String?,
+)
+
+internal data class PendingUploadRemoteMatch(
+    val remote: RemoteActivitySummary,
+    val candidate: PendingUploadMatchCandidate,
+)
+
+internal fun findHighConfidencePendingUploadMatches(
+    remotes: List<RemoteActivitySummary>,
+    candidates: List<PendingUploadMatchCandidate>,
+): List<PendingUploadRemoteMatch> {
+    val edges = remotes.flatMap { remote ->
+        candidates.mapNotNull { candidate ->
+            if (isHighConfidencePendingUploadMatch(remote, candidate)) {
+                PendingUploadRemoteMatch(remote, candidate)
+            } else {
+                null
+            }
+        }
+    }
+    val remoteCounts = edges.groupingBy { it.remote.remoteActivityId }.eachCount()
+    val candidateCounts = edges.groupingBy { it.candidate.jobId }.eachCount()
+    return edges.filter {
+        remoteCounts[it.remote.remoteActivityId] == 1 && candidateCounts[it.candidate.jobId] == 1
+    }
+}
+
+private fun isHighConfidencePendingUploadMatch(
+    remote: RemoteActivitySummary,
+    candidate: PendingUploadMatchCandidate,
+): Boolean {
+    val externalId = remote.metadata["external_id"]
+    if (externalId == "fitsync-${candidate.sourceFileSha256}.fit") return true
+
+    val marker = candidate.confirmationMarker?.takeIf { it.length >= 8 }
+    if (marker != null) {
+        val remoteMarkers = buildList {
+            remote.downloadUrl?.let(::add)
+            addAll(remote.metadata.values)
+        }
+        if (remoteMarkers.any { it.contains(marker, ignoreCase = true) }) return true
+    }
+
+    val remoteStart = remote.startTimeEpochMs ?: return false
+    if (abs(remoteStart - candidate.startTimeEpochMs) > PENDING_UPLOAD_START_TOLERANCE_MS) return false
+    val distanceMatches = candidate.distanceMeters?.takeIf { it > 0.0 }?.let { localDistance ->
+        remote.distanceMeters?.takeIf { it > 0.0 }?.let { remoteDistance ->
+            abs(localDistance - remoteDistance) <= maxOf(
+                PENDING_UPLOAD_DISTANCE_TOLERANCE_METERS,
+                localDistance * PENDING_UPLOAD_DISTANCE_TOLERANCE_RATIO,
+            )
+        }
+    } == true
+    val titleMatches = normalizePendingUploadTitle(candidate.title)?.let { localTitle ->
+        normalizePendingUploadTitle(remote.name) == localTitle
+    } == true
+    return distanceMatches || titleMatches
+}
+
+private fun normalizePendingUploadTitle(value: String?): String? = value
+    ?.trim()
+    ?.lowercase()
+    ?.replace(Regex("\\s+"), " ")
+    ?.takeIf { it.length >= 3 }
+
 internal fun canCompareTargetInBackground(capabilities: ConnectorCapabilities): Boolean =
     capabilities.listActivitiesMode == ConnectorExecution.BACKGROUND &&
         capabilities.downloadFitMode == ConnectorExecution.BACKGROUND
@@ -1209,6 +1368,10 @@ internal val PERMANENT_REMOTE_SKIP_CODES = setOf(
     "NO_ORIGINAL_FILE",
     "UNSUPPORTED_ORIGINAL_FORMAT",
 )
+
+internal const val PENDING_UPLOAD_START_TOLERANCE_MS = 2 * 60_000L
+internal const val PENDING_UPLOAD_DISTANCE_TOLERANCE_METERS = 100.0
+internal const val PENDING_UPLOAD_DISTANCE_TOLERANCE_RATIO = 0.005
 
 internal fun shouldAbortPullAfterItemResult(result: ConnectorResult<*>): Boolean = when (result) {
     is ConnectorResult.Success -> false

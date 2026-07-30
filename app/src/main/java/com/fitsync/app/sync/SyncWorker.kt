@@ -113,7 +113,8 @@ object SyncScheduler {
     fun enqueueDeliveryNow(context: Context) {
         WorkManager.getInstance(context).enqueueUniqueWork(
             DELIVERY_NAME,
-            ExistingWorkPolicy.APPEND_OR_REPLACE,
+            // 用户显式重试必须越过已有的退避/延迟续跑；本次 Worker 结束后会按剩余任务重新排期。
+            ExistingWorkPolicy.REPLACE,
             oneTimeRequest(force = false, deliveryOnly = true, expedited = true),
         )
     }

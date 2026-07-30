@@ -8,7 +8,9 @@ object FitCrc {
         var crc = n
         repeat(4) {
             crc = if (crc and 1 != 0) {
-                0x0CC1 xor (crc shr 1)
+                // FIT 使用反射形式 CRC-16/IBM，多项式为 0xA001。
+                // 旧值 0x0CC1 会生成完全不同的查找表，把合法 Garmin/COROS FIT 误判为 CRC 损坏。
+                0xA001 xor (crc shr 1)
             } else {
                 crc shr 1
             }

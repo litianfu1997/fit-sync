@@ -76,7 +76,7 @@ interface PlatformConnector {
 }
 
 /**
- * iGPSPORT/COROS 的提交接口只表示“已进入异步解析”，并不代表活动已创建成功。
+ * 部分平台的提交接口只表示“已受理/进入异步解析”，并不代表活动已创建成功。
  * token 持久化在 DeliveryJob.remoteUploadId，后续 Worker 会先重拉目标活动列表；若列表仍未出现，
  * [pendingAsyncUploadConfirmation] 继续等待，超时后才明确失败，避免写入伪造的 PlatformCopy。
  */

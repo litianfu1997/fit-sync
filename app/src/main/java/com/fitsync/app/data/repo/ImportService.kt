@@ -537,7 +537,7 @@ class ImportService(
     )
 
     private companion object {
-        const val CURRENT_PARSER_VERSION = 5
+        const val CURRENT_PARSER_VERSION = 6
         val PARSER_DISPATCHER = Dispatchers.Default.limitedParallelism(2)
 
         // 标题回填闸门：仅对 fitParserVersion < 此值的历史数据回填 displayTitle。

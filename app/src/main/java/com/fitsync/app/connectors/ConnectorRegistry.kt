@@ -59,7 +59,7 @@ class ConnectorRegistry(
     private val connectors: Map<Platform, PlatformConnector> = listOf(
         OnelapConnector(db, fileStore, sessionManager, httpClient),
         XingzheConnector(db, fileStore, sessionManager, httpClient),
-        // Garmin 走 Connect API 后台直连上传；读取仍维持网页/分享路径。
+        // Garmin 中国站复用 WebView 会话，经 gc-api 同源代理完成后台列表、下载与上传。
         GarminConnectApiConnector(db, fileStore, sessionManager, garminHttpClient),
         IgpsportApiConnector(db, fileStore, sessionManager, httpClient),
         CorosApiConnector(db, fileStore, sessionManager, httpClient),
@@ -124,11 +124,7 @@ private class OnelapConnector(
             .toRequestBody(JSON)
         return runCatching {
             executeAuthorized(request("$baseUrl/api/otm/ride_record/list").post(body).build()).use { response ->
-                when {
-                    response.isSuccessful -> SessionState.AUTHENTICATED
-                    response.code == 401 || response.code == 403 -> SessionState.EXPIRED
-                    else -> SessionState.NEEDS_USER_ACTION
-                }
+                activityListSessionState(response.code, response.body?.string().orEmpty())
             }
         }.getOrDefault(SessionState.NEEDS_USER_ACTION)
     }
@@ -243,6 +239,9 @@ private class OnelapConnector(
     ): ConnectorResult<RemoteCopy> {
         val file = fileForVariant(sourceVariant)
             ?: return ConnectorResult.PermanentFailure("FILE_MISSING", "本地 FIT 文件不存在")
+        if (file.length() <= 0L) {
+            return ConnectorResult.PermanentFailure("FILE_EMPTY", "本地 FIT 文件为空")
+        }
         val multipart = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("jilu", file.name, file.asRequestBody(FIT))
             .build()
@@ -250,13 +249,13 @@ private class OnelapConnector(
             executeAuthorized(request("$baseUrl/api/otm/ride_record/upload/fit").post(multipart).build()).use { response ->
                 if (!response.isSuccessful) return@use failure(response, PlatformWebConfigs.get(platform).loginUrl)
                 val text = response.body?.string().orEmpty()
-                val root = JSONObject(text.ifBlank { "{}" })
-                val remoteId = JsonPlatformParser.firstString(root, "id", "record_id", "ride_record_id", "jilu_id")
-                    ?: "onelap-${activity.id}-${System.currentTimeMillis()}"
-                ConnectorResult.Success(RemoteCopy(remoteId))
+                onelapAcceptedUploadResult(text, sourceVariant.fileSha256)
             }
         }.getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "迈金 FIT 上传失败") }
     }
+
+    override suspend fun checkUpload(remoteUploadId: String): ConnectorResult<RemoteCopy> =
+        pendingAsyncUploadConfirmation(remoteUploadId, platform)
 
     private suspend fun executeAuthorized(original: Request): Response {
         val first = execute(original)
@@ -317,11 +316,7 @@ private class XingzheConnector(
         if (!sessionManager.hasSession(platform)) return SessionState.NOT_CONNECTED
         return runCatching {
             execute(request("$baseUrl/api/v1/pgworkout/?limit=1&offset=0").get().build()).use { response ->
-                when {
-                    response.isSuccessful -> SessionState.AUTHENTICATED
-                    response.code == 401 || response.code == 403 -> SessionState.EXPIRED
-                    else -> SessionState.NEEDS_USER_ACTION
-                }
+                activityListSessionState(response.code, response.body?.string().orEmpty())
             }
         }.getOrDefault(SessionState.NEEDS_USER_ACTION)
     }
@@ -374,6 +369,9 @@ private class XingzheConnector(
         val config = PlatformWebConfigs.get(platform)
         val file = fileForVariant(sourceVariant)
             ?: return ConnectorResult.PermanentFailure("FILE_MISSING", "本地 FIT 文件不存在")
+        if (file.length() <= 0L) {
+            return ConnectorResult.PermanentFailure("FILE_EMPTY", "本地 FIT 文件为空")
+        }
         if (file.length() > 30L * 1024 * 1024) {
             return ConnectorResult.PermanentFailure("FILE_TOO_LARGE", "行者限制 FIT 文件不超过 30 MB")
         }
@@ -395,35 +393,22 @@ private class XingzheConnector(
         return runCatching {
             execute(request("$baseUrl/api/v1/fit/upload/").post(multipart).build()).use { response ->
                 val text = response.body?.string().orEmpty()
-                val json = runCatching { JSONObject(text) }.getOrDefault(JSONObject())
-                val code = json.optInt("code", response.code)
-                if (code == 9006) {
-                    val id = Regex("\\d+").find(json.optString("msg"))?.value
-                    return@use ConnectorResult.Duplicate(
-                        id?.let { RemoteCopy(it, "$baseUrl/workouts/$it", duplicate = true) },
-                    )
-                }
-                if (!response.isSuccessful || code != 0) {
-                    if (response.code == 401 || response.code == 403 ||
-                        json.optString("detail").contains("Authentication", ignoreCase = true)
-                    ) return@use ConnectorResult.RequiresLogin(config.loginUrl)
-                    if (response.code >= 500) {
-                        return@use ConnectorResult.RetryableFailure(code.toString(), "行者上传暂时失败")
-                    }
-                    return@use ConnectorResult.RequiresUserAction(
-                        config.uploadUrl,
-                        "行者网页校验发生变化，请在网页中完成上传",
-                    )
-                }
-                val data = json.optJSONObject("data") ?: json
-                val id = JsonPlatformParser.firstString(data, "workout_id", "id")
-                    ?: return@use ConnectorResult.RequiresUserAction(config.uploadUrl, "未取得行者活动 ID，请确认上传结果")
-                ConnectorResult.Success(RemoteCopy(id, "$baseUrl/workouts/$id"))
+                xingzheUploadResult(
+                    httpCode = response.code,
+                    responseBody = text,
+                    provisionalRemoteId = sourceVariant.fileSha256,
+                    loginUrl = config.loginUrl,
+                    uploadUrl = config.uploadUrl,
+                    baseUrl = baseUrl,
+                )
             }
         }.getOrElse {
-            ConnectorResult.RequiresUserAction(config.uploadUrl, it.message ?: "请在行者网页中完成上传")
+            ConnectorResult.RetryableFailure("NETWORK", it.message ?: "行者上传请求失败，请稍后重试")
         }
     }
+
+    override suspend fun checkUpload(remoteUploadId: String): ConnectorResult<RemoteCopy> =
+        pendingAsyncUploadConfirmation(remoteUploadId, platform)
 
     private fun xingzheSport(sportType: SportType): String = when (sportType) {
         SportType.RUNNING -> "1"
@@ -442,6 +427,69 @@ internal fun shouldContinueXingzhePagination(
     eligibleItemCount: Int,
     pageSize: Int = 50,
 ): Boolean = rawItemCount >= pageSize && eligibleItemCount > 0
+
+internal fun activityListSessionState(httpCode: Int, responseBody: String): SessionState {
+    if (httpCode == 401 || httpCode == 403) return SessionState.EXPIRED
+    if (httpCode !in 200..299) return SessionState.NEEDS_USER_ACTION
+    val root = runCatching {
+        if (responseBody.trimStart().startsWith("[")) JSONArray(responseBody) else JSONObject(responseBody)
+    }.getOrNull() ?: return SessionState.NEEDS_USER_ACTION
+    return if (JsonPlatformParser.activities(root) != null) {
+        SessionState.AUTHENTICATED
+    } else {
+        SessionState.NEEDS_USER_ACTION
+    }
+}
+
+internal fun onelapAcceptedUploadResult(
+    responseBody: String,
+    provisionalRemoteId: String,
+): ConnectorResult<RemoteCopy> {
+    val root = JSONObject(responseBody.ifBlank { "{}" })
+    val remoteId = JsonPlatformParser.firstString(root, "id", "record_id", "ride_record_id", "jilu_id")
+    return remoteId?.let { ConnectorResult.Success(RemoteCopy(it)) }
+        ?: ConnectorResult.Processing(
+            encodeAsyncUploadConfirmationToken(Platform.ONELAP, provisionalRemoteId),
+            ASYNC_UPLOAD_CONFIRM_POLL_MS,
+        )
+}
+
+internal fun xingzheUploadResult(
+    httpCode: Int,
+    responseBody: String,
+    provisionalRemoteId: String,
+    loginUrl: String,
+    uploadUrl: String,
+    baseUrl: String = "https://www.imxingzhe.com",
+): ConnectorResult<RemoteCopy> {
+    val json = runCatching { JSONObject(responseBody) }.getOrDefault(JSONObject())
+    val code = json.optInt("code", httpCode)
+    if (code == 9006) {
+        val id = Regex("\\d+").find(json.optString("msg"))?.value
+        return ConnectorResult.Duplicate(
+            id?.let { RemoteCopy(it, "$baseUrl/workouts/$it", duplicate = true) },
+        )
+    }
+    if (httpCode !in 200..299 || code != 0) {
+        if (httpCode == 401 || httpCode == 403 ||
+            json.optString("detail").contains("Authentication", ignoreCase = true)
+        ) return ConnectorResult.RequiresLogin(loginUrl)
+        if (httpCode == 408 || httpCode == 429 || httpCode >= 500) {
+            return ConnectorResult.RetryableFailure(code.toString(), "行者上传暂时失败")
+        }
+        return ConnectorResult.RequiresUserAction(
+            uploadUrl,
+            "行者网页校验发生变化，请在网页中完成上传",
+        )
+    }
+    val data = json.optJSONObject("data") ?: json
+    val id = JsonPlatformParser.firstString(data, "workout_id", "id")
+    return id?.let { ConnectorResult.Success(RemoteCopy(it, "$baseUrl/workouts/$it")) }
+        ?: ConnectorResult.Processing(
+            encodeAsyncUploadConfirmationToken(Platform.XINGZHE, provisionalRemoteId),
+            ASYNC_UPLOAD_CONFIRM_POLL_MS,
+        )
+}
 
 internal object JsonPlatformParser {
     fun activities(root: Any): List<RemoteActivitySummary>? {
