@@ -1,6 +1,5 @@
 package com.fitsync.app.ui.screens
 
-import android.os.Trace
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -59,6 +58,7 @@ import com.fitsync.app.data.db.dao.ActivityListItem
 import com.fitsync.app.data.db.dao.ActivityListQuery
 import com.fitsync.app.domain.model.DedupStatus
 import com.fitsync.app.domain.model.SportType
+import com.fitsync.app.performance.PerformanceTrace
 import com.fitsync.app.ui.components.AppTopBar
 import com.fitsync.app.ui.components.EmptyState
 import com.fitsync.app.ui.components.StatusPill
@@ -97,11 +97,8 @@ fun ActivitiesScreen(
         debouncedQuery = query.trim()
     }
     LaunchedEffect(Unit) {
-        Trace.beginSection("FitSync:activity_list_first_frame")
-        try {
+        PerformanceTrace.section("FitSync:activity_list_first_frame") {
             withFrameNanos { }
-        } finally {
-            Trace.endSection()
         }
     }
     val listQuery = remember(debouncedQuery, filter, timeSort) {

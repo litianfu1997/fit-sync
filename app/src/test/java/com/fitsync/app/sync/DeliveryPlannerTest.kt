@@ -1,6 +1,8 @@
 package com.fitsync.app.sync
 
+import com.fitsync.app.data.db.entity.ActivityVariantEntity
 import com.fitsync.app.data.db.entity.SyncRuleEntity
+import com.fitsync.app.domain.model.CollectorType
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.DedupStatus
 import com.google.common.truth.Truth.assertThat
@@ -32,6 +34,7 @@ class DeliveryPlannerTest {
         val second = DeliveryPlanner.idempotencyKey("abc123", 7)
         assertThat(first).isEqualTo(second)
         assertThat(first).hasLength(64)
+        assertThat(first).isEqualTo("d14499ca04fff22d4f79df58ee67a5b7fe57d0d605dd95a1dcd4695c10bfcf39")
     }
 
     @Test
@@ -98,4 +101,37 @@ class DeliveryPlannerTest {
         assertThat(isRuleBacklogPlanningAllowed(rule, setOf(7))).isTrue()
         assertThat(isRuleBacklogPlanningAllowed(rule, setOf(8))).isFalse()
     }
+
+    @Test
+    fun deliveryVariant_prefersPrimaryVariantEvenWhenItsQualityIsLower() {
+        val lowQualityPrimary = variant(id = 2, qualityScore = 10)
+        val highQualityAlternative = variant(id = 3, qualityScore = 95)
+
+        assertThat(
+            selectDeliveryVariant(
+                primaryVariantId = lowQualityPrimary.id,
+                variants = listOf(highQualityAlternative, lowQualityPrimary),
+            ),
+        ).isEqualTo(lowQualityPrimary)
+    }
+
+    @Test
+    fun deliveryVariant_fallsBackToHighestQualityAndHandlesEmptyInput() {
+        val lowQuality = variant(id = 2, qualityScore = null)
+        val highQuality = variant(id = 3, qualityScore = 95)
+
+        assertThat(selectDeliveryVariant(primaryVariantId = 99, variants = listOf(lowQuality, highQuality)))
+            .isEqualTo(highQuality)
+        assertThat(selectDeliveryVariant(primaryVariantId = null, emptyList())).isNull()
+    }
+
+    private fun variant(id: Long, qualityScore: Int?): ActivityVariantEntity = ActivityVariantEntity(
+        id = id,
+        canonicalActivityId = 1,
+        collectorType = CollectorType.CLOUD,
+        localFilePath = "activity-$id.fit",
+        fileSha256 = "sha-$id",
+        fileSize = 1,
+        qualityScore = qualityScore,
+    )
 }

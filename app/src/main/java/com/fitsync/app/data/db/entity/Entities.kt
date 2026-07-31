@@ -136,6 +136,7 @@ data class RemoteActivitySkipEntity(
         Index(value = ["canonicalActivityId", "destinationAccountId"], unique = true),
         Index(value = ["idempotencyKey"], unique = true),
         Index(value = ["status", "nextRetryAtEpochMs", "createdAtEpochMs"]),
+        Index(value = ["destinationAccountId", "status", "nextRetryAtEpochMs", "createdAtEpochMs"]),
         Index(value = ["sourceVariantId"]),
     ],
 )

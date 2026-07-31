@@ -2,8 +2,12 @@ package com.fitsync.app.sync
 
 import com.fitsync.app.connectors.PlatformCapabilityRegistry
 import com.fitsync.app.data.db.FitSyncDatabase
+import com.fitsync.app.data.db.entity.ActivityVariantEntity
+import com.fitsync.app.data.db.entity.CanonicalActivityEntity
 import com.fitsync.app.data.db.entity.DeliveryJobEntity
+import com.fitsync.app.data.db.entity.PlatformAccountEntity
 import com.fitsync.app.data.db.entity.SyncRuleEntity
+import com.fitsync.app.domain.model.ConnectorExecution
 import com.fitsync.app.domain.model.DedupStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SportType
@@ -20,61 +24,41 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
     ): Int {
         if (canonicalActivityIds.isEmpty()) return 0
         val activities = db.canonicalActivityDao().getByIds(canonicalActivityIds)
-            .filter { isDeliveryPlanningAllowed(it.dedupStatus) }
         if (activities.isEmpty()) return 0
-        val variants = db.activityVariantDao().findByCanonicalIds(activities.map { it.id })
-            .groupBy { it.canonicalActivityId }
         val rules = db.syncRuleDao().getEnabled().filter { rule ->
             rule.sourcePlatform == sourcePlatform &&
                 isDestinationReadyForPlanning(rule.destinationAccountId, allowedDestinationAccountIds)
         }
         if (rules.isEmpty()) return 0
-        val accounts = db.platformAccountDao().getAll().associateBy { it.id }
-        val existingCopies = db.platformCopyDao().findByCanonicalIds(activities.map { it.id })
-            .mapTo(hashSetOf()) { it.canonicalActivityId to it.platformAccountId }
+
+        val accountsById = db.platformAccountDao().getAll().associateBy { it.id }
+        val targets = resolveRuleTargets(rules, accountsById)
+        if (targets.isEmpty()) return 0
+
+        val candidates = loadPlanningCandidates(activities)
         val jobs = buildList {
-            activities.forEach activityLoop@ { activity ->
-                val candidates = variants[activity.id].orEmpty()
-                val variant = candidates.firstOrNull { it.id == activity.primaryVariantId }
-                    ?: candidates.maxByOrNull { it.qualityScore ?: 0 }
-                    ?: return@activityLoop
-                rules.forEach ruleLoop@ { rule ->
-                    if (!isActivityEligibleForRule(activity.startTimeEpochMs, rule)) return@ruleLoop
-                    val destination = accounts[rule.destinationAccountId] ?: return@ruleLoop
-                    if (destination.platform == sourcePlatform) return@ruleLoop
-                    if ((activity.id to destination.id) in existingCopies) return@ruleLoop
-                    add(
-                        DeliveryJobEntity(
-                            canonicalActivityId = activity.id,
-                            destinationAccountId = destination.id,
-                            sourceVariantId = variant.id,
-                            idempotencyKey = idempotencyKey(variant.fileSha256, destination.id),
-                            executionMode = PlatformCapabilityRegistry.capabilities(destination.platform).uploadFitMode,
-                            requestedByRuleId = rule.id,
-                        ),
-                    )
+            candidates.forEach { candidate ->
+                targets.forEach targetLoop@ { target ->
+                    if (!isActivityEligibleForRule(candidate.activity.startTimeEpochMs, target.rule)) {
+                        return@targetLoop
+                    }
+                    candidate.createJob(target)?.let(::add)
                 }
             }
         }
-        return if (jobs.isEmpty()) 0 else db.deliveryJobDao().insertAll(jobs).count { it > 0 }
+        return insertJobs(jobs)
     }
 
     suspend fun enqueueManual(canonicalActivityId: Long, destinationAccountId: Long): Long {
-        val activity = db.canonicalActivityDao().getById(canonicalActivityId) ?: return -1
-        if (!isDeliveryPlanningAllowed(activity.dedupStatus)) return -1
         val destination = db.platformAccountDao().getById(destinationAccountId) ?: return -1
+        val activity = db.canonicalActivityDao().getById(canonicalActivityId) ?: return -1
         if (db.platformCopyDao().findByCanonicalAndAccount(canonicalActivityId, destinationAccountId) != null) {
             return 0
         }
-        val variant = activity.primaryVariantId?.let { db.activityVariantDao().getById(it) }
-            ?: db.activityVariantDao().findByCanonical(canonicalActivityId).maxByOrNull { it.qualityScore ?: 0 }
-            ?: return -1
+        val candidate = loadPlanningCandidates(listOf(activity)).singleOrNull() ?: return -1
         return db.deliveryJobDao().insert(
-            DeliveryJobEntity(
-                canonicalActivityId = canonicalActivityId,
-                destinationAccountId = destinationAccountId,
-                sourceVariantId = variant.id,
-                idempotencyKey = idempotencyKey(variant.fileSha256, destinationAccountId),
+            candidate.createJob(
+                destinationAccountId = destination.id,
                 executionMode = PlatformCapabilityRegistry.capabilities(destination.platform).uploadFitMode,
             ),
         )
@@ -91,13 +75,11 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
         fromEpochMs: Long,
     ): Int {
         if (sportTypes.isEmpty()) return 0
-        val destination = db.platformAccountDao().getById(destinationAccountId) ?: return 0
+        val accounts = db.platformAccountDao().getAll()
+        val destination = accounts.firstOrNull { it.id == destinationAccountId } ?: return 0
         if (destination.platform == sourcePlatform) return 0
-        val sourceAccountId = if (sourcePlatform == Platform.LOCAL_IMPORT) {
-            null
-        } else {
-            db.platformAccountDao().getByPlatform(sourcePlatform)?.id
-        }
+        val sourceAccountId = accounts.firstOrNull { it.platform == sourcePlatform }?.id
+        val executionMode = PlatformCapabilityRegistry.capabilities(destination.platform).uploadFitMode
 
         var count = 0
         var beforeTime = Long.MAX_VALUE
@@ -106,32 +88,19 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
         while (!reachedHistoryStart) {
             val page = db.canonicalActivityDao().getPageAfter(beforeTime, beforeId, HISTORY_PAGE_SIZE)
             if (page.isEmpty()) break
-            val variants = db.activityVariantDao().findByCanonicalIds(page.map { it.id })
-                .groupBy { it.canonicalActivityId }
-            val copies = db.platformCopyDao().findByCanonicalIds(page.map { it.id })
-                .groupBy { it.canonicalActivityId }
-            val matchingIds = buildList {
-                for (activity in page) {
-                if (activity.startTimeEpochMs < fromEpochMs) {
-                    reachedHistoryStart = true
-                    break
+            val activitiesInWindow = page.takeWhile { it.startTimeEpochMs >= fromEpochMs }
+            reachedHistoryStart = activitiesInWindow.size < page.size
+            val jobs = loadPlanningCandidates(activitiesInWindow).mapNotNull { candidate ->
+                if (candidate.activity.sportType !in sportTypes ||
+                    !candidate.matchesSource(sourcePlatform, sourceAccountId) ||
+                    destinationAccountId in candidate.copiedAccountIds
+                ) {
+                    return@mapNotNull null
                 }
-                if (activity.sportType !in sportTypes) continue
-                val hasSourceVariant = variants[activity.id].orEmpty().any { variant ->
-                    (variant.sourcePlatform ?: Platform.LOCAL_IMPORT) == sourcePlatform
-                }
-                val hasSourceCopy = sourceAccountId != null &&
-                    copies[activity.id].orEmpty().any { it.platformAccountId == sourceAccountId }
-                val comesFromSource = matchesActivitySource(
-                    sourcePlatform = sourcePlatform,
-                    hasSourceVariant = hasSourceVariant,
-                    hasSourceCopy = hasSourceCopy,
-                )
-                if (!comesFromSource) continue
-                add(activity.id)
-                }
+                candidate.createJob(destinationAccountId, executionMode)
             }
-            count += enqueueManualBatch(matchingIds, destinationAccountId, destination.platform)
+            count += insertJobs(jobs)
+
             val last = page.last()
             beforeTime = last.startTimeEpochMs
             beforeId = last.id
@@ -165,53 +134,48 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
     }
 
     /**
-     * 补扫规则当前应投递但尚未建任务的活动。
-     *
-     * 目标端临时不可用时，来源活动仍可能已经拉入本地；恢复后必须补扫，否则这些活动不会再作为
-     * “本轮新导入”出现。未开启 includeHistory 的规则仍由 [isActivityEligibleForRule] 限制为规则创建后的活动。
+     * 一次分页扫描补齐全部规则的积压任务，避免每条规则重复遍历完整活动库。
+     * 未开启 includeHistory 的规则仍由 [isActivityEligibleForRule] 限制为规则创建后的活动。
      */
-    suspend fun planRuleBacklog(
-        ruleId: Long,
+    suspend fun planRuleBacklogs(
+        rules: List<SyncRuleEntity>,
         allowedDestinationAccountIds: Set<Long>? = null,
     ): Int {
-        val rule = db.syncRuleDao().getAll().firstOrNull { it.id == ruleId } ?: return 0
-        if (!isDestinationReadyForPlanning(rule.destinationAccountId, allowedDestinationAccountIds)) return 0
-        val sourceAccountId = if (rule.sourcePlatform == Platform.LOCAL_IMPORT) {
-            null
-        } else {
-            db.platformAccountDao().getByPlatform(rule.sourcePlatform)?.id
-        }
+        if (rules.isEmpty()) return 0
+        val accounts = db.platformAccountDao().getAll()
+        val accountsById = accounts.associateBy { it.id }
+        val targets = resolveRuleTargets(
+            rules = rules.filter { rule ->
+                rule.enabled &&
+                    isDestinationReadyForPlanning(rule.destinationAccountId, allowedDestinationAccountIds)
+            },
+            accountsById = accountsById,
+        )
+        if (targets.isEmpty()) return 0
+        val sourceAccountIds = accounts.associate { it.platform to it.id }
+
         var count = 0
         var beforeTime = Long.MAX_VALUE
         var beforeId = Long.MAX_VALUE
         while (true) {
             val page = db.canonicalActivityDao().getPageAfter(beforeTime, beforeId, HISTORY_PAGE_SIZE)
             if (page.isEmpty()) break
-            val variants = db.activityVariantDao().findByCanonicalIds(page.map { it.id })
-                .groupBy { it.canonicalActivityId }
-            val copies = if (sourceAccountId == null) {
-                emptyMap()
-            } else {
-                db.platformCopyDao().findByCanonicalIds(page.map { it.id })
-                    .groupBy { it.canonicalActivityId }
-            }
-            val sourceIds = page.filter { activity ->
-                val hasSourceVariant = variants[activity.id].orEmpty().any {
-                    (it.sourcePlatform ?: Platform.LOCAL_IMPORT) == rule.sourcePlatform
+            val candidates = loadPlanningCandidates(page)
+            val jobs = buildList {
+                candidates.forEach { candidate ->
+                    targets.forEach targetLoop@ { target ->
+                        val rule = target.rule
+                        if (!isActivityEligibleForRule(candidate.activity.startTimeEpochMs, rule) ||
+                            !candidate.matchesSource(rule.sourcePlatform, sourceAccountIds[rule.sourcePlatform])
+                        ) {
+                            return@targetLoop
+                        }
+                        candidate.createJob(target)?.let(::add)
+                    }
                 }
-                val hasSourceCopy = sourceAccountId != null &&
-                    copies[activity.id].orEmpty().any { it.platformAccountId == sourceAccountId }
-                matchesActivitySource(
-                    sourcePlatform = rule.sourcePlatform,
-                    hasSourceVariant = hasSourceVariant,
-                    hasSourceCopy = hasSourceCopy,
-                )
-            }.map { it.id }
-            count += planForActivities(
-                canonicalActivityIds = sourceIds,
-                sourcePlatform = rule.sourcePlatform,
-                allowedDestinationAccountIds = setOf(rule.destinationAccountId),
-            )
+            }
+            count += insertJobs(jobs)
+
             val last = page.last()
             beforeTime = last.startTimeEpochMs
             beforeId = last.id
@@ -220,47 +184,112 @@ class DeliveryPlanner(private val db: FitSyncDatabase) {
         return count
     }
 
-    private suspend fun enqueueManualBatch(
-        canonicalActivityIds: List<Long>,
-        destinationAccountId: Long,
-        destinationPlatform: Platform,
-    ): Int {
-        if (canonicalActivityIds.isEmpty()) return 0
-        val activities = db.canonicalActivityDao().getByIds(canonicalActivityIds)
-            .filter { isDeliveryPlanningAllowed(it.dedupStatus) }
-        val variants = db.activityVariantDao().findByCanonicalIds(activities.map { it.id })
+    private suspend fun loadPlanningCandidates(
+        activities: List<CanonicalActivityEntity>,
+    ): List<PlanningCandidate> {
+        val eligibleActivities = activities.filter { isDeliveryPlanningAllowed(it.dedupStatus) }
+        if (eligibleActivities.isEmpty()) return emptyList()
+        val activityIds = eligibleActivities.map { it.id }
+        val variantsByCanonical = db.activityVariantDao().findByCanonicalIds(activityIds)
             .groupBy { it.canonicalActivityId }
-        val copied = db.platformCopyDao().findByCanonicalIds(activities.map { it.id })
-            .filter { it.platformAccountId == destinationAccountId }
-            .mapTo(hashSetOf()) { it.canonicalActivityId }
-        val mode = PlatformCapabilityRegistry.capabilities(destinationPlatform).uploadFitMode
-        val jobs = activities.mapNotNull { activity ->
-            if (activity.id in copied) return@mapNotNull null
-            val candidates = variants[activity.id].orEmpty()
-            val variant = candidates.firstOrNull { it.id == activity.primaryVariantId }
-                ?: candidates.maxByOrNull { it.qualityScore ?: 0 }
+        val copiesByCanonical = db.platformCopyDao().findByCanonicalIds(activityIds)
+            .groupBy { it.canonicalActivityId }
+
+        return eligibleActivities.mapNotNull { activity ->
+            val variants = variantsByCanonical[activity.id].orEmpty()
+            val selectedVariant = selectDeliveryVariant(activity.primaryVariantId, variants)
                 ?: return@mapNotNull null
-            DeliveryJobEntity(
-                canonicalActivityId = activity.id,
-                destinationAccountId = destinationAccountId,
-                sourceVariantId = variant.id,
-                idempotencyKey = idempotencyKey(variant.fileSha256, destinationAccountId),
-                executionMode = mode,
+            PlanningCandidate(
+                activity = activity,
+                sourceVariant = selectedVariant,
+                sourcePlatforms = variants.mapTo(mutableSetOf()) {
+                    it.sourcePlatform ?: Platform.LOCAL_IMPORT
+                },
+                copiedAccountIds = copiesByCanonical[activity.id].orEmpty()
+                    .mapTo(mutableSetOf()) { it.platformAccountId },
             )
         }
-        return if (jobs.isEmpty()) 0 else db.deliveryJobDao().insertAll(jobs).count { it > 0 }
     }
+
+    private fun resolveRuleTargets(
+        rules: List<SyncRuleEntity>,
+        accountsById: Map<Long, PlatformAccountEntity>,
+    ): List<RuleTarget> = rules.mapNotNull { rule ->
+        val destination = accountsById[rule.destinationAccountId] ?: return@mapNotNull null
+        if (destination.platform == rule.sourcePlatform) return@mapNotNull null
+        RuleTarget(
+            rule = rule,
+            executionMode = PlatformCapabilityRegistry.capabilities(destination.platform).uploadFitMode,
+        )
+    }
+
+    private suspend fun insertJobs(jobs: List<DeliveryJobEntity>): Int =
+        if (jobs.isEmpty()) 0 else db.deliveryJobDao().insertAll(jobs).count { it > 0 }
+
+    private data class PlanningCandidate(
+        val activity: CanonicalActivityEntity,
+        val sourceVariant: ActivityVariantEntity,
+        val sourcePlatforms: Set<Platform>,
+        val copiedAccountIds: Set<Long>,
+    ) {
+        fun matchesSource(sourcePlatform: Platform, sourceAccountId: Long?): Boolean =
+            matchesActivitySource(
+                sourcePlatform = sourcePlatform,
+                hasSourceVariant = sourcePlatform in sourcePlatforms,
+                hasSourceCopy = sourceAccountId != null && sourceAccountId in copiedAccountIds,
+            )
+
+        fun createJob(target: RuleTarget): DeliveryJobEntity? {
+            if (target.rule.destinationAccountId in copiedAccountIds) return null
+            return createJob(
+                destinationAccountId = target.rule.destinationAccountId,
+                executionMode = target.executionMode,
+                requestedByRuleId = target.rule.id,
+            )
+        }
+
+        fun createJob(
+            destinationAccountId: Long,
+            executionMode: ConnectorExecution,
+            requestedByRuleId: Long? = null,
+        ): DeliveryJobEntity = DeliveryJobEntity(
+            canonicalActivityId = activity.id,
+            destinationAccountId = destinationAccountId,
+            sourceVariantId = sourceVariant.id,
+            idempotencyKey = idempotencyKey(sourceVariant.fileSha256, destinationAccountId),
+            executionMode = executionMode,
+            requestedByRuleId = requestedByRuleId,
+        )
+    }
+
+    private data class RuleTarget(
+        val rule: SyncRuleEntity,
+        val executionMode: ConnectorExecution,
+    )
 
     companion object {
         private const val HISTORY_PAGE_SIZE = 100
+        private const val LOWER_HEX = "0123456789abcdef"
 
         fun idempotencyKey(fileSha256: String, destinationAccountId: Long): String {
-            val raw = "$fileSha256:$destinationAccountId".toByteArray()
-            return MessageDigest.getInstance("SHA-256").digest(raw)
-                .joinToString("") { "%02x".format(it) }
+            val digest = MessageDigest.getInstance("SHA-256")
+                .digest("$fileSha256:$destinationAccountId".toByteArray(Charsets.UTF_8))
+            val encoded = CharArray(digest.size * 2)
+            digest.forEachIndexed { index, byte ->
+                val value = byte.toInt() and 0xFF
+                encoded[index * 2] = LOWER_HEX[value ushr 4]
+                encoded[index * 2 + 1] = LOWER_HEX[value and 0x0F]
+            }
+            return String(encoded)
         }
     }
 }
+
+internal fun selectDeliveryVariant(
+    primaryVariantId: Long?,
+    variants: List<ActivityVariantEntity>,
+): ActivityVariantEntity? = variants.firstOrNull { it.id == primaryVariantId }
+    ?: variants.maxByOrNull { it.qualityScore ?: 0 }
 
 internal fun isActivityEligibleForRule(activityStartTimeEpochMs: Long, rule: SyncRuleEntity): Boolean =
     rule.includeHistory || activityStartTimeEpochMs >= rule.createdAtEpochMs

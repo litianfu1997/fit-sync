@@ -38,7 +38,7 @@ import com.fitsync.app.domain.model.FitStoragePolicy
         ImportJobEntity::class,
         AppSettingsEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 @TypeConverters(Converters::class)
@@ -65,7 +65,14 @@ abstract class FitSyncDatabase : RoomDatabase() {
 
         private fun build(context: Context): FitSyncDatabase {
             return Room.databaseBuilder(context, FitSyncDatabase::class.java, "fitsync.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(
+                    MIGRATION_1_2,
+                    MIGRATION_2_3,
+                    MIGRATION_3_4,
+                    MIGRATION_4_5,
+                    MIGRATION_5_6,
+                    MIGRATION_6_7,
+                )
                 .addCallback(
                     object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
@@ -238,6 +245,16 @@ abstract class FitSyncDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_import_job_createdAtEpochMs " +
                         "ON import_job(createdAtEpochMs)",
+                )
+            }
+        }
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS " +
+                        "index_delivery_job_destinationAccountId_status_nextRetryAtEpochMs_createdAtEpochMs " +
+                        "ON delivery_job(destinationAccountId, status, nextRetryAtEpochMs, createdAtEpochMs)",
                 )
             }
         }

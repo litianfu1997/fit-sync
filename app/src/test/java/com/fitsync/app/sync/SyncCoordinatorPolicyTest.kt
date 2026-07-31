@@ -1,7 +1,9 @@
 package com.fitsync.app.sync
 
 import com.fitsync.app.connectors.ConnectorCapabilities
+import com.fitsync.app.connectors.ConnectorResult
 import com.fitsync.app.connectors.RemoteActivitySummary
+import com.fitsync.app.connectors.RemoteCopy
 import com.fitsync.app.domain.model.ConnectorExecution
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
@@ -97,6 +99,17 @@ class SyncCoordinatorPolicyTest {
         assertThat(inFlightByAccount[7L]).isEqualTo(10)
         assertThat(tryReserveOnelapUploadSlot(inFlightByAccount, 7L)).isFalse()
         assertThat(tryReserveOnelapUploadSlot(inFlightByAccount, 8L)).isTrue()
+    }
+
+    @Test
+    fun uploadResult_rejectsBlankRemoteIdButKeepsConfirmedCopy() {
+        val missingId = validateUploadResult(ConnectorResult.Success(RemoteCopy(remoteActivityId = " ")))
+        val confirmed = ConnectorResult.Success(RemoteCopy(remoteActivityId = "remote-1"))
+
+        assertThat(missingId).isEqualTo(
+            ConnectorResult.RetryableFailure("REMOTE_ID_MISSING", "平台未返回活动 ID，稍后会自动重试"),
+        )
+        assertThat(validateUploadResult(confirmed)).isSameInstanceAs(confirmed)
     }
 
     @Test

@@ -221,6 +221,9 @@ interface ActivityVariantDao {
     @Query("SELECT * FROM activity_variant WHERE id = :id")
     suspend fun getById(id: Long): ActivityVariantEntity?
 
+    @Query("SELECT * FROM activity_variant WHERE id IN (:ids)")
+    suspend fun getByIds(ids: List<Long>): List<ActivityVariantEntity>
+
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(entity: ActivityVariantEntity): Long
 

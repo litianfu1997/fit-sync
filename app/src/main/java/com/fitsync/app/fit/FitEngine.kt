@@ -657,10 +657,12 @@ internal class TrackPointSampler(
         val start = first ?: return emptyList()
         val end = last ?: return emptyList()
         if (start.index == end.index) return listOf(start.point)
-        return buildList {
-            add(start)
-            addAll(middle.sortedBy { it.index })
-            add(end)
-        }.distinctBy { it.index }.sortedBy { it.index }.map { it.point }
+        // 首点、蓄水池中间点和尾点的索引天然唯一；原来的 distinctBy + 二次排序只会增加分配。
+        middle.sortBy { it.index }
+        return buildList(middle.size + 2) {
+            add(start.point)
+            middle.forEach { add(it.point) }
+            add(end.point)
+        }
     }
 }

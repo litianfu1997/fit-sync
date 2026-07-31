@@ -23,10 +23,12 @@ import com.fitsync.app.domain.model.ValidationStatus
 import com.fitsync.app.fit.FitEngine
 import com.fitsync.app.fit.FitParseResult
 import com.fitsync.app.fit.LatLng
+import com.fitsync.app.performance.PerformanceTrace
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.withContext
 
 class ImportService(
@@ -172,8 +174,7 @@ class ImportService(
                 ) ?: return ImportOutcome.Failed(jobId, "导入任务丢失"),
             )
 
-            Trace.beginSection("FitSync:import_commit")
-            val outcome = try {
+            val outcome = PerformanceTrace.section("FitSync:import_commit") {
                 mutationGate.withLock {
                     db.withTransaction {
             // 并发准备相同 SHA 时，进入事务后必须再次检查唯一性。
@@ -326,8 +327,6 @@ class ImportService(
             )
                     }
                 }
-            } finally {
-                Trace.endSection()
             }
             if (outcome is ImportOutcome.DuplicateFile) {
                 val existingPath = db.activityVariantDao().getById(outcome.variantId)?.localFilePath
@@ -538,6 +537,8 @@ class ImportService(
 
     private companion object {
         const val CURRENT_PARSER_VERSION = 6
+
+        @OptIn(ExperimentalCoroutinesApi::class)
         val PARSER_DISPATCHER = Dispatchers.Default.limitedParallelism(2)
 
         // 标题回填闸门：仅对 fitParserVersion < 此值的历史数据回填 displayTitle。

@@ -19,6 +19,8 @@ class FitEngineTest {
         assertThat(points.first()).isEqualTo(LatLng(0.0, -0.0))
         assertThat(points.last()).isEqualTo(LatLng(199.0, -199.0))
         assertThat(points.map { it.lat }).isInOrder()
+        assertThat(points).containsNoDuplicates()
+        assertThat(sampler.points()).isEqualTo(points)
     }
 
     @Test

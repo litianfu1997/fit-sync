@@ -1,6 +1,5 @@
 package com.fitsync.app.sync
 
-import android.os.Trace
 import android.os.SystemClock
 import androidx.room.withTransaction
 import com.fitsync.app.connectors.ConnectorRegistry
@@ -10,6 +9,7 @@ import com.fitsync.app.connectors.FitFile
 import com.fitsync.app.connectors.PlatformConnector
 import com.fitsync.app.connectors.PlatformCapabilityRegistry
 import com.fitsync.app.connectors.RemoteActivitySummary
+import com.fitsync.app.connectors.RemoteCopy
 import com.fitsync.app.connectors.SyncCursor
 import com.fitsync.app.connectors.parseAsyncUploadConfirmationToken
 import com.fitsync.app.data.db.FitSyncDatabase
@@ -32,6 +32,7 @@ import com.fitsync.app.domain.model.ConnectorExecution
 import com.fitsync.app.domain.model.DeliveryJobStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.notification.SyncNotificationManager
+import com.fitsync.app.performance.PerformanceTrace
 import com.fitsync.app.web.PlatformWebConfigs
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.async
@@ -141,15 +142,13 @@ class SyncCoordinator(
         val mayPullSources = manualSelection == null || manualSelection.destinationAccountId in readyDestinationAccountIds
         if (manualSelection == null && readyDestinationAccountIds.isNotEmpty()) {
             queued += mutationGate.withLock {
-                enabledRules
-                    .filter { isRuleBacklogPlanningAllowed(it, readyDestinationAccountIds) }
-                    .sumOf { rule ->
-                        // 所有规则都要补扫：目标端上轮不可用时，来源活动可能已拉取但尚未创建投递任务。
-                        planner.planRuleBacklog(
-                            ruleId = rule.id,
-                            allowedDestinationAccountIds = readyDestinationAccountIds,
-                        )
-                    }
+                // 一次扫描补齐所有规则：目标端上轮不可用时，来源活动可能已拉取但尚未创建投递任务。
+                planner.planRuleBacklogs(
+                    rules = enabledRules.filter {
+                        isRuleBacklogPlanningAllowed(it, readyDestinationAccountIds)
+                    },
+                    allowedDestinationAccountIds = readyDestinationAccountIds,
+                )
             }
         }
         val sourceResults = if (mayPullSources) {
@@ -291,122 +290,138 @@ class SyncCoordinator(
         db.deliveryJobDao().resetStaleUploading(now)
         val preparedJobs = mutationGate.withLock {
             db.withTransaction {
-                val onelapInFlightByAccount = mutableMapOf<Long, Int>()
-                db.platformAccountDao().getAll()
-                    .filter { it.platform == Platform.ONELAP }
-                    .forEach { account ->
-                        // 目标列表已经匹配到真实活动的任务不再占批次名额，即使其状态尚未在本轮转为成功。
-                        onelapInFlightByAccount[account.id] =
-                            db.deliveryJobDao().countUnconfirmedUploads(account.id)
-                    }
                 val runnableJobs = if (allowedDestinationAccountIds == null) {
                     db.deliveryJobDao().findRunnable(now)
                 } else {
                     db.deliveryJobDao().findRunnableForAccounts(now, allowedDestinationAccountIds.toList())
                 }
-                runnableJobs.mapNotNull { candidateJob ->
-                val currentJob = db.deliveryJobDao().getById(candidateJob.id) ?: return@mapNotNull null
-                val account = db.platformAccountDao().getById(currentJob.destinationAccountId)
-                val activity = db.canonicalActivityDao().getById(currentJob.canonicalActivityId)
-                val sourceVariant = db.activityVariantDao().getById(currentJob.sourceVariantId)
-                val connector = account?.let { connectors.get(it.platform) }
-                if (account == null || activity == null || connector == null ||
-                    sourceVariant == null || sourceVariant.canonicalActivityId != currentJob.canonicalActivityId
-                ) {
-                    db.deliveryJobDao().update(
-                        currentJob.copy(
-                            status = DeliveryJobStatus.DISABLED,
-                            errorMessage = "目标账号、本地活动或任务指定的 FIT 副本已不存在",
-                            updatedAtEpochMs = now,
-                        ),
-                    )
-                    return@mapNotNull null
-                }
-                val existingCopy = db.platformCopyDao().findByCanonicalAndAccount(
-                    currentJob.canonicalActivityId,
-                    currentJob.destinationAccountId,
-                )
-                if (existingCopy != null) {
-                    val submittedByCurrentJob = !currentJob.remoteUploadId.isNullOrBlank()
-                    if (submittedByCurrentJob && !existingCopy.createdBySync) {
-                        upsertPlatformCopy(
-                            canonicalId = currentJob.canonicalActivityId,
-                            accountId = currentJob.destinationAccountId,
-                            remoteActivityId = existingCopy.remoteActivityId,
-                            remoteUrl = existingCopy.remoteUrl,
-                            fileSha256 = existingCopy.fileSha256,
-                            sourceVariantId = existingCopy.sourceVariantId ?: currentJob.sourceVariantId,
-                            createdBySync = true,
+                if (runnableJobs.isEmpty()) return@withTransaction emptyList()
+
+                val accountsById = db.platformAccountDao().getAll().associateBy { it.id }
+                val canonicalIds = runnableJobs.map { it.canonicalActivityId }.distinct()
+                val activitiesById = db.canonicalActivityDao().getByIds(canonicalIds).associateBy { it.id }
+                val variantsById = db.activityVariantDao()
+                    .getByIds(runnableJobs.map { it.sourceVariantId }.distinct())
+                    .associateBy { it.id }
+                val copiesByActivityAndAccount = db.platformCopyDao().findByCanonicalIds(canonicalIds)
+                    .associateBy { it.canonicalActivityId to it.platformAccountId }
+                val onelapInFlightByAccount = mutableMapOf<Long, Int>()
+                val runnableDestinationIds = runnableJobs.mapTo(hashSetOf()) { it.destinationAccountId }
+                accountsById.values
+                    .filter { account ->
+                        account.platform == Platform.ONELAP &&
+                            account.id in runnableDestinationIds
+                    }
+                    .forEach { account ->
+                        // 目标列表已经匹配到真实活动的任务不再占批次名额，即使其状态尚未在本轮转为成功。
+                        onelapInFlightByAccount[account.id] =
+                            db.deliveryJobDao().countUnconfirmedUploads(account.id)
+                    }
+                val uploadModesByAccount = mutableMapOf<Long, ConnectorExecution>()
+
+                runnableJobs.mapNotNull { currentJob ->
+                    val account = accountsById[currentJob.destinationAccountId]
+                    val activity = activitiesById[currentJob.canonicalActivityId]
+                    val sourceVariant = variantsById[currentJob.sourceVariantId]
+                    val connector = account?.let { connectors.get(it.platform) }
+                    if (account == null || activity == null || connector == null ||
+                        sourceVariant == null || sourceVariant.canonicalActivityId != currentJob.canonicalActivityId
+                    ) {
+                        db.deliveryJobDao().update(
+                            currentJob.copy(
+                                status = DeliveryJobStatus.DISABLED,
+                                errorMessage = "目标账号、本地活动或任务指定的 FIT 副本已不存在",
+                                updatedAtEpochMs = now,
+                            ),
                         )
+                        return@mapNotNull null
+                    }
+                    val existingCopy = copiesByActivityAndAccount[
+                        currentJob.canonicalActivityId to currentJob.destinationAccountId
+                    ]
+                    if (existingCopy != null) {
+                        val submittedByCurrentJob = !currentJob.remoteUploadId.isNullOrBlank()
+                        if (submittedByCurrentJob && !existingCopy.createdBySync) {
+                            upsertPlatformCopy(
+                                canonicalId = currentJob.canonicalActivityId,
+                                accountId = currentJob.destinationAccountId,
+                                remoteActivityId = existingCopy.remoteActivityId,
+                                remoteUrl = existingCopy.remoteUrl,
+                                fileSha256 = existingCopy.fileSha256,
+                                sourceVariantId = existingCopy.sourceVariantId ?: currentJob.sourceVariantId,
+                                createdBySync = true,
+                            )
+                        }
+                        db.deliveryJobDao().update(
+                            currentJob.copy(
+                                status = if (submittedByCurrentJob) {
+                                    DeliveryJobStatus.SUCCEEDED
+                                } else {
+                                    DeliveryJobStatus.DUPLICATE_REMOTE
+                                },
+                                nextRetryAtEpochMs = null,
+                                remoteUploadId = null,
+                                remoteActivityId = existingCopy.remoteActivityId,
+                                userActionUrl = null,
+                                errorCode = null,
+                                errorMessage = null,
+                                updatedAtEpochMs = now,
+                            ),
+                        )
+                        completed++
+                        return@mapNotNull null
+                    }
+                    val currentMode = uploadModesByAccount.getOrPut(account.id) {
+                        connector.detectCapabilities().uploadFitMode
+                    }
+                    if (currentMode != ConnectorExecution.BACKGROUND) {
+                        db.deliveryJobDao().update(
+                            currentJob.copy(
+                                executionMode = currentMode,
+                                updatedAtEpochMs = now,
+                            ),
+                        )
+                        waitForUser(
+                            currentJob.id,
+                            account.platform,
+                            PlatformWebConfigs.get(account.platform).uploadUrl,
+                            "${account.platform.displayName} 不支持后台上传，请在网页中完成 FIT 导入",
+                            "FOREGROUND_UPLOAD_REQUIRED",
+                        )
+                        return@mapNotNull null
+                    }
+                    val polling = !currentJob.remoteUploadId.isNullOrBlank()
+                    if (account.platform == Platform.ONELAP && !polling &&
+                        !tryReserveOnelapUploadSlot(onelapInFlightByAccount, account.id)
+                    ) {
+                        // 迈金提交接口不返回真实活动 ID。当前批次尚未在目标列表确认完时，
+                        // 每个账号最多保留 10 条待确认上传，满批后延后到下一次目标列表确认。
+                        db.deliveryJobDao().update(
+                            currentJob.copy(
+                                status = DeliveryJobStatus.PENDING,
+                                nextRetryAtEpochMs = now + ONELAP_BATCH_CONFIRM_DELAY_MS,
+                                errorCode = null,
+                                errorMessage = null,
+                                updatedAtEpochMs = now,
+                            ),
+                        )
+                        return@mapNotNull null
                     }
                     db.deliveryJobDao().update(
                         currentJob.copy(
-                            status = if (submittedByCurrentJob) {
-                                DeliveryJobStatus.SUCCEEDED
-                            } else {
-                                DeliveryJobStatus.DUPLICATE_REMOTE
-                            },
-                            nextRetryAtEpochMs = null,
-                            remoteUploadId = null,
-                            remoteActivityId = existingCopy.remoteActivityId,
-                            userActionUrl = null,
-                            errorCode = null,
-                            errorMessage = null,
-                            updatedAtEpochMs = now,
-                        ),
-                    )
-                    completed++
-                    return@mapNotNull null
-                }
-                val currentMode = connector.detectCapabilities().uploadFitMode
-                if (currentMode != ConnectorExecution.BACKGROUND) {
-                    db.deliveryJobDao().update(
-                        currentJob.copy(
+                            status = DeliveryJobStatus.UPLOADING,
                             executionMode = currentMode,
                             updatedAtEpochMs = now,
                         ),
                     )
-                    waitForUser(
-                        currentJob.id,
-                        account.platform,
-                        PlatformWebConfigs.get(account.platform).uploadUrl,
-                        "${account.platform.displayName} 不支持后台上传，请在网页中完成 FIT 导入",
-                        "FOREGROUND_UPLOAD_REQUIRED",
+                    PreparedDelivery(
+                        job = currentJob.copy(executionMode = currentMode),
+                        accountId = account.id,
+                        activity = activity,
+                        sourceVariant = sourceVariant,
+                        connector = connector,
+                        polling = polling,
                     )
-                    return@mapNotNull null
-                }
-                val polling = !currentJob.remoteUploadId.isNullOrBlank()
-                if (account.platform == Platform.ONELAP && !polling &&
-                    !tryReserveOnelapUploadSlot(onelapInFlightByAccount, account.id)
-                ) {
-                    // 迈金提交接口不返回真实活动 ID。当前批次尚未在目标列表确认完时，
-                    // 每个账号最多保留 10 条待确认上传，满批后延后到下一次目标列表确认。
-                    db.deliveryJobDao().update(
-                        currentJob.copy(
-                            status = DeliveryJobStatus.PENDING,
-                            nextRetryAtEpochMs = now + ONELAP_BATCH_CONFIRM_DELAY_MS,
-                            errorCode = null,
-                            errorMessage = null,
-                            updatedAtEpochMs = now,
-                        ),
-                    )
-                    return@mapNotNull null
-                }
-                db.deliveryJobDao().update(
-                    currentJob.copy(
-                        status = DeliveryJobStatus.UPLOADING,
-                        executionMode = currentMode,
-                        updatedAtEpochMs = now,
-                    ),
-                )
-                PreparedDelivery(
-                    job = currentJob.copy(executionMode = currentMode),
-                    accountId = account.id,
-                    activity = activity,
-                    sourceVariant = sourceVariant,
-                    connector = connector,
-                    polling = polling,
-                )
                 }
             }
         }
@@ -418,25 +433,7 @@ class SyncCoordinator(
                 async {
                     requireNotNull(uploadSemaphores[prepared.accountId]).withPermit {
                         globalNetworkSemaphore.withPermit {
-            // 任何 connector 异常（DB/IO/解析）都转可重试失败，避免 job 永久卡在 UPLOADING。
-                            Trace.beginSection("FitSync:upload")
-            val result = runCatching {
-                if (prepared.polling) {
-                    prepared.connector.checkUpload(requireNotNull(prepared.job.remoteUploadId))
-                } else {
-                    prepared.connector.uploadFit(prepared.activity, prepared.sourceVariant)
-                }
-            }
-                .getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "上传过程发生异常") }
-                .let { uploadResult ->
-                    if (uploadResult is ConnectorResult.Success && uploadResult.value.remoteActivityId.isBlank()) {
-                        ConnectorResult.RetryableFailure("REMOTE_ID_MISSING", "平台未返回活动 ID，稍后会自动重试")
-                    } else {
-                        uploadResult
-                    }
-                }
-                            Trace.endSection()
-                            prepared to result
+                            prepared to executePreparedDelivery(prepared)
                         }
                     }
                 }
@@ -643,6 +640,22 @@ class SyncCoordinator(
         val polling: Boolean,
     )
 
+    /** 统一上传与异步确认入口，保证异常映射和 Trace 生命周期保持一致。 */
+    private suspend fun executePreparedDelivery(
+        prepared: PreparedDelivery,
+    ): ConnectorResult<RemoteCopy> = PerformanceTrace.section("FitSync:upload") {
+            // 任何 connector 异常（DB/IO/解析）都转可重试失败，避免 job 永久卡在 UPLOADING。
+            runCatching {
+                if (prepared.polling) {
+                    prepared.connector.checkUpload(requireNotNull(prepared.job.remoteUploadId))
+                } else {
+                    prepared.connector.uploadFit(prepared.activity, prepared.sourceVariant)
+                }
+            }
+                .getOrElse { ConnectorResult.RetryableFailure(null, it.message ?: "上传过程发生异常") }
+                .let(::validateUploadResult)
+    }
+
     /**
      * DAO 每批仍限制 20 条以控制并发与内存，但同一个前台 Worker 会连续取下一批；
      * 到达时间/批次数预算后才交给 WorkManager 持久化续跑，不再要求用户重复点击。
@@ -815,11 +828,8 @@ class SyncCoordinator(
             }
             return PullAccountResult(completedNormally = backgroundComparisonAvailable)
         }
-        Trace.beginSection("FitSync:pull_${account.platform.name}")
-        return try {
+        return PerformanceTrace.section("FitSync:pull_${account.platform.name}") {
             pullAccount(account.id, historyDays, force, sinceEpochMsOverride)
-        } finally {
-            Trace.endSection()
         }
     }
 
@@ -867,11 +877,8 @@ class SyncCoordinator(
                             async {
                                 accountDownloadSemaphore.withPermit {
                                     globalNetworkSemaphore.withPermit {
-                                        Trace.beginSection("FitSync:download_import")
-                                        try {
+                                        PerformanceTrace.section("FitSync:download_import") {
                                             remote to downloadAndImport(account.id, account.platform, connector, remote)
-                                        } finally {
-                                            Trace.endSection()
                                         }
                                     }
                                 }
@@ -1324,6 +1331,13 @@ internal fun tryReserveOnelapUploadSlot(
     inFlightByAccount[accountId] = current + 1
     return true
 }
+
+internal fun validateUploadResult(result: ConnectorResult<RemoteCopy>): ConnectorResult<RemoteCopy> =
+    if (result is ConnectorResult.Success && result.value.remoteActivityId.isBlank()) {
+        ConnectorResult.RetryableFailure("REMOTE_ID_MISSING", "平台未返回活动 ID，稍后会自动重试")
+    } else {
+        result
+    }
 
 internal data class PendingUploadMatchCandidate(
     val jobId: Long,
