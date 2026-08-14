@@ -47,13 +47,15 @@ class PlatformCapabilityRegistryTest {
     }
 
     @Test
-    fun strava_supportsExperimentalBackgroundReadAndWrite() {
+    fun strava_usesBackgroundWebsiteReadAndWriteWithoutApi() {
         val capabilities = PlatformCapabilityRegistry.capabilities(Platform.STRAVA)
 
         assertThat(capabilities.listActivitiesMode).isEqualTo(ConnectorExecution.BACKGROUND)
         assertThat(capabilities.downloadFitMode).isEqualTo(ConnectorExecution.BACKGROUND)
         assertThat(capabilities.uploadFitMode).isEqualTo(ConnectorExecution.BACKGROUND)
-        assertThat(capabilities.supportsIdempotencyKey).isTrue()
+        assertThat(capabilities.supportsIncrementalCursor).isTrue()
+        assertThat(capabilities.supportsBulkHistory).isTrue()
+        assertThat(capabilities.supportsIdempotencyKey).isFalse()
         assertThat(capabilities.experimental).isTrue()
     }
 

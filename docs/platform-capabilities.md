@@ -9,7 +9,7 @@
 | Garmin Connect 中国站 | 已实现：`gc-api/activitylist-service` | 已实现：`gc-api/download-service/files/activity/{id}/fit`、`gc-api/upload-service/upload` | 登录有效时后台双向同步；JWT_WEB/CSRF 失效先静默续期，SSO 也失效才要求重新登录（实验性） |
 | COROS 高驰 | 已实现：`activity/query` + `activity/detail/download` | 已实现：OSS 直传 + `activity/fit/import` | 账号密码 API 登录，后台 list→download→upload（实验性，仅中国站） |
 | iGPSPORT | 已实现：`web-analyze/activity/queryMyActivity` + OSS 公共读直链 | 已实现：OSS 直传 + `uploadByOss` | 账号密码 API 登录，后台 list→download→upload（实验性） |
-| Strava | 官方 `/athlete/activities` + 网页 `/activities/{id}/export_original` | 官方 `/uploads` + 状态轮询 | OAuth 有效时列表/上传后台执行；网页 Cookie 有效时原文件后台下载（读取侧实验性） |
+| Strava | 网页 `/athlete/training_activities` + `/activities/{id}/export_original` | 网页 `/upload/files` + `/upload/progress.json` | WebView 登录一次后后台双向同步；不使用 API（实验性） |
 
 ## 运行时能力
 
@@ -30,7 +30,7 @@
 - 目标平台始终先拉取、再生成或执行投递任务，避免本地缺少 `PlatformCopy` 时重复上传远端已有活动。
 - 只有平台返回真实活动 ID，或目标列表出现唯一高置信匹配（精确文件标识，或唯一的时间 + 距离/标题匹配）后，才写入 `PlatformCopy`；不会把 ossId、MD5、upload ID 等临时值伪装成活动 ID。
 - 迈金、行者和 Garmin 在“请求已受理但没有活动 ID”时进入带 30 分钟超时的确认状态；iGPSPORT、COROS 也使用同一确认机制。Garmin 有状态地址时继续轮询真实状态接口，期间不会重新 POST FIT。
-- Strava 使用官方 upload ID 轮询；重复响应即使只在错误文本中包含原活动 ID，也会提取真实 ID 并记录远端副本。
+- Strava 从官网“我的活动”分页读取真实活动 ID，并下载 `export_original`；上传页读取 CSRF token，以 `files[]` 自动提交单个 FIT，再用网页进度接口轮询。只有取得真实活动 ID 或明确重复活动时才记录远端副本。
 - 单次 Worker 会连续排空可立即执行的任务；遇到平台处理等待或网络退避会持久化续跑。目标平台临时拉取失败且仍有活跃任务时，15 分钟后继续尝试，即使自动同步开关已关闭也不会让已提交任务静默搁置。
 
 ## 后台同步与系统限制
@@ -43,13 +43,13 @@
 
 ## Strava 同步说明
 
-- 账号：每位用户自行创建 Strava 开发者应用，在 FitSync 中录入 Client ID / Client Secret。开发者后台的 Callback Domain 填 `localhost`，固定回调 URI 为 `com.fitsync.app://localhost/strava/oauth`。
-- OAuth：请求 `read,activity:read_all,activity:write`，access token 到期前 5 分钟自动刷新；refresh token 轮换时原子保存最新值。OAuth 失效只要求重新授权。
-- 读取：活动列表使用官方 API；原始文件使用 Strava 网页已提供的 `export_original` 路由和 WebView Cookie。支持 FIT/FIT.GZ；TCX、GPX 与未知格式不转换，并写入永久跳过记录，避免周期同步反复失败。
-- 会话隔离：网页 Cookie 失效时账号仍保持可上传，已有规则和 Strava 上传任务不删除；用户重新登录网页后恢复来源拉取。
-- 下载安全：初始请求固定 `https://www.strava.com`，最多跟随 3 次 HTTPS 跳转；跨域跳转不携带 Cookie 或 OAuth 头；压缩前后各限制 50 MB；HTML/JSON 错误页不会进入 FIT 导入。
-- 上传：官方 Upload API 使用稳定的 `external_id=fitsync-{sha256}.fit`。任务保存 upload ID，App 或 Worker 中断后只恢复轮询，不会重新 POST 文件；兼容官方 `id_str` 64 位标识与错误文本中的重复活动 ID。
-- 边界：`export_original` 是未公开网页能力，整体连接标记为实验性。接口变化时降级为打开活动页，让用户点“导出原来的活动”，不会用 streams 重建或伪造 FIT。
+- 账号：只在 FitSync WebView 中登录 Strava，不再配置开发者应用、Client ID、Client Secret 或 OAuth。
+- 读取：携带 WebView Cookie 请求 `/athlete/training_activities?page={n}&per_page=20`，按开始时间窗口分页；再从 `/activities/{id}/export_original` 下载原始文件。支持 FIT/FIT.GZ，TCX、GPX 与未知格式记录为不可自动导入，避免周期同步反复失败。
+- 上传：同步任务先读取 `https://www.strava.com/upload/select` 的 CSRF token，再以 multipart `files[]` 自动 POST 到 `/upload/files`，用户不需要选择文件或点击保存。
+- 限制：遵循网页当前规则，单文件不超过 25 MB；FitSync 每个投递任务提供一个 FIT。
+- 确认：DeliveryJob 保存网页 upload ID，并轮询 `/upload/progress.json`；处理成功后从 `activity.id` 写入 PlatformCopy。重复活动提取原活动 ID；页面结构或响应变化时明确失败，不会静默标记成功。
+- 会话：登录态只保留在 WebView Cookie 中；Cookie 失效后重新登录即可，不使用 access token 或 refresh token。
+- 安全：原始文件最多跟随 3 次 HTTPS 跳转，压缩前后各限制 50 MB；HTML/JSON 登录页不会进入 FIT 导入。
 
 ## Garmin 同步说明
 

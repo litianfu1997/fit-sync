@@ -61,7 +61,7 @@ object PlatformWebConfigs {
         Platform.STRAVA -> PlatformWebConfig(
             platform,
             loginUrl = "https://www.strava.com/login",
-            uploadUrl = "https://www.strava.com/dashboard",
+            uploadUrl = "https://www.strava.com/upload/select",
             allowedDomainSuffixes = setOf("strava.com"),
             origins = setOf("https://www.strava.com"),
         )

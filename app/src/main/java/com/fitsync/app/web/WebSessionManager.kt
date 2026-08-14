@@ -79,6 +79,15 @@ class WebSessionManager(
             .header("X-Requested-With", "XMLHttpRequest")
     }
 
+    /** 将后台网页请求返回的 Set-Cookie 同步回 WebView CookieStore，支持会话轮换。 */
+    fun captureResponseCookies(platform: Platform, url: String, setCookieHeaders: List<String>) {
+        val host = runCatching { java.net.URI(url).host }.getOrNull()
+        if (setCookieHeaders.isEmpty() || !PlatformWebConfigs.isAllowed(platform, host)) return
+        setCookieHeaders.forEach { header -> cookies.setCookie(url, header) }
+        rememberWebViewUrl(platform, url)
+        cookies.flush()
+    }
+
     fun saveOnelapTokens(token: String?, refreshToken: String?, userId: String?) {
         secureStore.put(key(Platform.ONELAP, "token"), token)
         secureStore.put(key(Platform.ONELAP, "refresh_token"), refreshToken)
@@ -89,59 +98,9 @@ class WebSessionManager(
     fun refreshToken(platform: Platform): String? = secureStore.get(key(platform, "refresh_token"))
     fun externalUserId(platform: Platform): String? = secureStore.get(key(platform, "uid"))
 
-    fun saveStravaCredentials(clientId: String, clientSecret: String) {
-        secureStore.putAll(
-            mapOf(
-                key(Platform.STRAVA, "client_id") to clientId,
-                key(Platform.STRAVA, "client_secret") to clientSecret,
-            ),
-        )
-    }
-
-    fun stravaClientId(): String? = secureStore.get(key(Platform.STRAVA, "client_id"))
-    fun stravaClientSecret(): String? = secureStore.get(key(Platform.STRAVA, "client_secret"))
-
-    fun saveStravaTokens(
-        accessToken: String,
-        refreshToken: String,
-        expiresAtEpochSeconds: Long,
-        scope: String,
-        athleteId: String?,
-        displayName: String?,
-    ) {
-        secureStore.putAll(
-            mapOf(
-                key(Platform.STRAVA, "token") to accessToken,
-                key(Platform.STRAVA, "refresh_token") to refreshToken,
-                key(Platform.STRAVA, "expires_at") to expiresAtEpochSeconds.toString(),
-                key(Platform.STRAVA, "scope") to scope,
-                key(Platform.STRAVA, "uid") to athleteId,
-                key(Platform.STRAVA, "display_name") to displayName,
-            ),
-        )
-    }
-
-    fun stravaExpiresAtEpochSeconds(): Long? =
-        secureStore.get(key(Platform.STRAVA, "expires_at"))?.toLongOrNull()
-
-    fun stravaScope(): String? = secureStore.get(key(Platform.STRAVA, "scope"))
-    fun stravaDisplayName(): String? = secureStore.get(key(Platform.STRAVA, "display_name"))
-
-    fun saveStravaOAuthState(state: String, createdAtEpochMs: Long) {
-        secureStore.putAll(
-            mapOf(
-                key(Platform.STRAVA, "oauth_state") to state,
-                key(Platform.STRAVA, "oauth_state_created_at") to createdAtEpochMs.toString(),
-            ),
-        )
-    }
-
-    fun consumeStravaOAuthState(): Pair<String, Long>? {
-        val state = secureStore.get(key(Platform.STRAVA, "oauth_state")) ?: return null
-        val createdAt = secureStore.get(key(Platform.STRAVA, "oauth_state_created_at"))?.toLongOrNull()
-        secureStore.remove(key(Platform.STRAVA, "oauth_state"))
-        secureStore.remove(key(Platform.STRAVA, "oauth_state_created_at"))
-        return createdAt?.let { state to it }
+    /** 升级到纯网页登录模式后，删除旧版遗留的 Strava API 密钥和 OAuth token。 */
+    fun clearLegacyStravaApiCredentials() {
+        STRAVA_LEGACY_API_FIELDS.forEach { field -> secureStore.remove(key(Platform.STRAVA, field)) }
     }
 
     /**
@@ -286,6 +245,18 @@ class WebSessionManager(
     private fun key(platform: Platform, field: String) = "${platform.name}:$field"
 
     companion object {
+        private val STRAVA_LEGACY_API_FIELDS = listOf(
+            "client_id",
+            "client_secret",
+            "token",
+            "refresh_token",
+            "expires_at",
+            "scope",
+            "uid",
+            "display_name",
+            "oauth_state",
+            "oauth_state_created_at",
+        )
         private val GARMIN_EXTRA_COOKIE_URLS = listOf(
             "https://connect.garmin.cn/",
             "https://connect.garmin.cn/modern/",

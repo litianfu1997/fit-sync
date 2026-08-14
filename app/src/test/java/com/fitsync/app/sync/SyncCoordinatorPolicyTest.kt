@@ -133,6 +133,19 @@ class SyncCoordinatorPolicyTest {
     }
 
     @Test
+    fun backgroundDestination_allowsUploadOnlyWebsiteConnector() {
+        val uploadOnly = ConnectorCapabilities(
+            listActivitiesMode = ConnectorExecution.UNSUPPORTED,
+            downloadFitMode = ConnectorExecution.UNSUPPORTED,
+            uploadFitMode = ConnectorExecution.BACKGROUND,
+        )
+        val manualUpload = uploadOnly.copy(uploadFitMode = ConnectorExecution.FOREGROUND_WEB)
+
+        assertThat(canPrepareDestinationInBackground(uploadOnly)).isTrue()
+        assertThat(canPrepareDestinationInBackground(manualUpload)).isFalse()
+    }
+
+    @Test
     fun pendingUpload_exactRemoteMarkerConfirmsWithoutDownloadingOriginal() {
         val candidate = pendingCandidate(
             jobId = 1,

@@ -62,12 +62,12 @@ object PlatformCapabilityRegistry {
         )
         Platform.STRAVA -> ConnectorCapabilities(
             shareImportSupported = true,
+            // 不走开发者 API：复用 WebView 登录 Cookie，读取网页活动列表、导出原文件并提交 FIT。
             listActivitiesMode = ConnectorExecution.BACKGROUND,
             downloadFitMode = ConnectorExecution.BACKGROUND,
             uploadFitMode = ConnectorExecution.BACKGROUND,
             supportsIncrementalCursor = true,
             supportsBulkHistory = true,
-            supportsIdempotencyKey = true,
             experimental = true,
         )
         Platform.UNKNOWN -> ConnectorCapabilities(

@@ -10,7 +10,6 @@ import com.fitsync.app.domain.model.SessionState
 import com.fitsync.app.domain.model.SportType
 import com.fitsync.app.web.PlatformWebConfigs
 import com.fitsync.app.web.WebSessionManager
-import com.fitsync.app.strava.StravaOAuthService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -45,7 +44,6 @@ class ConnectorRegistry(
     db: FitSyncDatabase,
     fileStore: FitFileStore,
     sessionManager: WebSessionManager,
-    stravaOAuthService: StravaOAuthService,
 ) {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -55,11 +53,6 @@ class ConnectorRegistry(
         .build()
 
     private val garminHttpClient = GarminConnectApiConnector.httpClient()
-    private val stravaHttpClient = httpClient.newBuilder()
-        .followRedirects(false)
-        .followSslRedirects(false)
-        .build()
-
     private val connectors: Map<Platform, PlatformConnector> = listOf(
         OnelapConnector(db, fileStore, sessionManager, httpClient),
         XingzheConnector(db, fileStore, sessionManager, httpClient),
@@ -67,7 +60,7 @@ class ConnectorRegistry(
         GarminConnectApiConnector(db, fileStore, sessionManager, garminHttpClient),
         IgpsportApiConnector(db, fileStore, sessionManager, httpClient),
         CorosApiConnector(db, fileStore, sessionManager, httpClient),
-        StravaConnector(db, fileStore, sessionManager, stravaOAuthService, stravaHttpClient),
+        StravaWebConnector(sessionManager, fileStore, httpClient),
     ).associateBy { it.platform }
 
     fun get(platform: Platform): PlatformConnector? = connectors[platform]

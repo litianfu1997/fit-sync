@@ -68,6 +68,14 @@ class PlatformWebConfigsTest {
     }
 
     @Test
+    fun stravaWebEntry_usesOfficialFileUploadPage() {
+        val config = PlatformWebConfigs.get(Platform.STRAVA)
+
+        assertThat(config.uploadUrl).isEqualTo("https://www.strava.com/upload/select")
+        assertThat(PlatformWebConfigs.isAllowed(Platform.STRAVA, URI(config.uploadUrl).host)).isTrue()
+    }
+
+    @Test
     fun aliyunCaptchaHosts_areAllowed() {
         // 阿里云验证码（AliyunCaptcha）滑块通过这些第三方域加载，必须放行，否则 iframe 被当跳转拦截。
         assertThat(PlatformWebConfigs.isAllowed(Platform.ONELAP, "g.alicdn.com")).isTrue()

@@ -58,8 +58,6 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.fitsync.app.FitSyncApp
-import com.fitsync.app.connectors.ConnectorResult
-import com.fitsync.app.connectors.RemoteActivitySummary
 import com.fitsync.app.domain.model.DeliveryJobStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SessionState
@@ -102,7 +100,7 @@ class PlatformWebActivity : ComponentActivity() {
         val config = PlatformWebConfigs.get(platform)
         initialUrl = intent.getStringExtra(EXTRA_URL) ?: config.loginUrl
         if (platform == Platform.STRAVA) {
-            statusText = "请登录 Strava 网页后点“验证并保存登录”；若 Google 登录被 WebView 拒绝，请改用 Strava 邮箱密码。也可以返回并保持仅上传状态。"
+            statusText = "请登录 Strava 网页后点“验证并保存登录”；若 Google 登录被 WebView 拒绝，请改用 Strava 邮箱密码。"
         }
 
         setContent {
@@ -578,7 +576,7 @@ class PlatformWebActivity : ComponentActivity() {
         }.getOrElse { error ->
             callback.onReceiveValue(null)
             fileCallback = null
-            statusText = error.message ?: "无法授权 Garmin 读取 FIT 文件"
+            statusText = error.message ?: "无法授权 ${platform.displayName} 网页读取 FIT 文件"
             return
         }
         grantedUploadUri?.takeIf { it != uri }?.let { previous ->
@@ -606,9 +604,9 @@ class PlatformWebActivity : ComponentActivity() {
         fileCallback = null
         uploadFileProvided = true
         statusText = buildString {
-            append("FIT 已交给 Garmin 网页")
+            append("FIT 已交给 ${platform.displayName} 网页")
             if (preparation.recordCount > 0) append("（${preparation.recordCount} 个数据点）")
-            append("；请点击网页中的 Import/导入并等待结果，然后点“核对上传结果”")
+            append("；请完成网页导入并等待结果，然后点“核对上传结果”")
         }
     }
 
@@ -678,7 +676,11 @@ class PlatformWebActivity : ComponentActivity() {
                 if (confirmed) {
                     Toast.makeText(
                         this@PlatformWebActivity,
-                        if (evidence.type == GarminImportEvidenceType.DUPLICATE) "Garmin 已存在该活动" else "Garmin 导入已确认",
+                        if (evidence.type == GarminImportEvidenceType.DUPLICATE) {
+                            "${platform.displayName} 已存在该活动"
+                        } else {
+                            "${platform.displayName} 上传已确认"
+                        },
                         Toast.LENGTH_SHORT,
                     ).show()
                     finish()
@@ -690,7 +692,6 @@ class PlatformWebActivity : ComponentActivity() {
     }
 
     private fun enqueueDownload(url: String, contentDisposition: String?, mimeType: String?) {
-        if (platform == Platform.STRAVA && importStravaOriginal(url, contentDisposition)) return
         if (!PlatformWebConfigs.isAllowed(platform, Uri.parse(url).host)) {
             statusText = "已阻止非平台域名下载"
             return
@@ -704,57 +705,6 @@ class PlatformWebActivity : ComponentActivity() {
         FitSyncApp.instance.webSessionManager.cookieHeader(platform)?.let { request.addRequestHeader("Cookie", it) }
         getSystemService(DownloadManager::class.java).enqueue(request)
         statusText = "已开始下载 $fileName；完成后可分享到本应用"
-    }
-
-    private fun importStravaOriginal(url: String, contentDisposition: String?): Boolean {
-        val activityId = Regex("/activities/(\\d+)").find(url)?.groupValues?.getOrNull(1)
-            ?: return false
-        val app = FitSyncApp.instance
-        val connector = app.connectorRegistry.get(Platform.STRAVA) ?: return false
-        CookieManager.getInstance().flush()
-        statusText = "正在安全下载并导入 Strava 原文件…"
-        lifecycleScope.launch {
-            val account = withContext(Dispatchers.IO) {
-                app.database.platformAccountDao().getByPlatform(Platform.STRAVA)
-            }
-            if (account == null) {
-                statusText = "请先完成 Strava API 授权"
-                return@launch
-            }
-            val downloaded = connector.downloadFit(
-                RemoteActivitySummary(
-                    remoteActivityId = activityId,
-                    startTimeEpochMs = null,
-                    name = contentDisposition?.substringAfter("filename=", "")?.trim('"'),
-                    sportType = null,
-                    distanceMeters = null,
-                ),
-            )
-            val result = if (downloaded is ConnectorResult.Success) {
-                app.syncCoordinator.importRemoteDownloadedFile(
-                    accountId = account.id,
-                    platform = Platform.STRAVA,
-                    remoteActivityId = activityId,
-                    fitFile = downloaded.value,
-                    preferredTitle = null,
-                )
-            } else {
-                downloaded
-            }
-            statusText = when (result) {
-                is ConnectorResult.Success -> {
-                    SyncScheduler.enqueueDeliveryNow(this@PlatformWebActivity)
-                    "Strava 原文件已导入，并已按同步规则加入队列"
-                }
-                is ConnectorResult.RequiresLogin -> result.message
-                is ConnectorResult.RequiresUserAction -> result.message
-                is ConnectorResult.RetryableFailure -> result.message
-                is ConnectorResult.PermanentFailure -> result.message
-                is ConnectorResult.Duplicate<*> -> "该 Strava 活动已导入"
-                is ConnectorResult.Processing -> "Strava 原文件仍在处理中"
-            }
-        }
-        return true
     }
 
     override fun onDestroy() {

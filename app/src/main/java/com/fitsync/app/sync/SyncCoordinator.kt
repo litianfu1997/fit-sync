@@ -793,7 +793,7 @@ class SyncCoordinator(
     ): PullAccountResult {
         val connector = connectors.get(account.platform) ?: return PullAccountResult(completedNormally = false)
         val capabilities = connector.detectCapabilities()
-        val backgroundComparisonAvailable = canCompareTargetInBackground(capabilities)
+        val backgroundDestinationReady = canPrepareDestinationInBackground(capabilities)
         if (account.capabilitySnapshot != capabilities.serialize()) {
             db.platformAccountDao().update(
                 account.copy(
@@ -814,7 +814,7 @@ class SyncCoordinator(
                     )
                 }
             }
-            return PullAccountResult(completedNormally = backgroundComparisonAvailable)
+            return PullAccountResult(completedNormally = backgroundDestinationReady)
         }
         if (capabilities.downloadFitMode != ConnectorExecution.BACKGROUND) {
             markAccountNeedsAction(account.id, false)
@@ -826,7 +826,7 @@ class SyncCoordinator(
                     "请登录 ${account.platform.displayName} 网页以启用原文件拉取",
                 )
             }
-            return PullAccountResult(completedNormally = backgroundComparisonAvailable)
+            return PullAccountResult(completedNormally = backgroundDestinationReady)
         }
         return PerformanceTrace.section("FitSync:pull_${account.platform.name}") {
             pullAccount(account.id, historyDays, force, sinceEpochMsOverride)
@@ -1182,25 +1182,11 @@ class SyncCoordinator(
 
     private suspend fun markAccountNeedsAction(accountId: Long, expired: Boolean) {
         val account = db.platformAccountDao().getById(accountId) ?: return
-        val capabilitySnapshot = when {
-            expired && account.platform == Platform.STRAVA ->
-                ConnectorCapabilities(shareImportSupported = true, experimental = true).serialize()
-            account.platform == Platform.STRAVA -> {
-                val current = ConnectorCapabilities.deserialize(account.capabilitySnapshot)
-                    ?: PlatformCapabilityRegistry.capabilities(Platform.STRAVA)
-                current.copy(downloadFitMode = ConnectorExecution.MANUAL).serialize()
-            }
-            else -> account.capabilitySnapshot
-        }
         db.platformAccountDao().update(
             account.copy(
-                status = when {
-                    expired -> AccountStatus.AUTH_EXPIRED
-                    account.platform == Platform.STRAVA -> AccountStatus.ACTIVE
-                    else -> AccountStatus.NEEDS_USER_ACTION
-                },
+                status = if (expired) AccountStatus.AUTH_EXPIRED else AccountStatus.NEEDS_USER_ACTION,
                 needsUserAction = true,
-                capabilitySnapshot = capabilitySnapshot,
+                capabilitySnapshot = account.capabilitySnapshot,
                 updatedAtEpochMs = System.currentTimeMillis(),
             ),
         )
@@ -1416,6 +1402,14 @@ private fun normalizePendingUploadTitle(value: String?): String? = value
 internal fun canCompareTargetInBackground(capabilities: ConnectorCapabilities): Boolean =
     capabilities.listActivitiesMode == ConnectorExecution.BACKGROUND &&
         capabilities.downloadFitMode == ConnectorExecution.BACKGROUND
+
+/**
+ * 优先通过目标列表比对防重；若平台完全不提供读取能力，但网页上传本身会判重，仍允许后台投递。
+ */
+internal fun canPrepareDestinationInBackground(capabilities: ConnectorCapabilities): Boolean =
+    canCompareTargetInBackground(capabilities) ||
+        capabilities.listActivitiesMode == ConnectorExecution.UNSUPPORTED &&
+        capabilities.uploadFitMode == ConnectorExecution.BACKGROUND
 
 internal val PERMANENT_REMOTE_SKIP_CODES = setOf(
     "NO_ORIGINAL_FILE",

@@ -23,7 +23,6 @@ import com.fitsync.app.sync.MaintenanceScheduler
 import com.fitsync.app.web.GarminUploadFilePreparer
 import com.fitsync.app.web.GarminSilentSessionRefresher
 import com.fitsync.app.web.WebSessionManager
-import com.fitsync.app.strava.StravaOAuthService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -46,7 +45,6 @@ class FitSyncApp : Application(), Configuration.Provider {
     val webSessionManager: WebSessionManager by lazy {
         WebSessionManager(SecureSessionStore(this)).also { it.prepareCookies() }
     }
-    val stravaOAuthService: StravaOAuthService by lazy { StravaOAuthService(webSessionManager) }
     val importService: ImportService by lazy {
         ImportService(
             db = database,
@@ -60,7 +58,6 @@ class FitSyncApp : Application(), Configuration.Provider {
             db = database,
             fileStore = fitFileStore,
             sessionManager = webSessionManager,
-            stravaOAuthService = stravaOAuthService,
         )
     }
     val syncNotificationManager: SyncNotificationManager by lazy {
@@ -106,7 +103,6 @@ class FitSyncApp : Application(), Configuration.Provider {
             db = database,
             connectors = connectorRegistry,
             sessions = webSessionManager,
-            stravaOAuthService = stravaOAuthService,
             notifications = syncNotificationManager,
         )
     }
@@ -127,6 +123,7 @@ class FitSyncApp : Application(), Configuration.Provider {
         try {
             instance = this
             GarminAuthDiagnostics.init(this)
+            applicationScope.launch { webSessionManager.clearLegacyStravaApiCredentials() }
         } finally {
             Trace.endSection()
         }
