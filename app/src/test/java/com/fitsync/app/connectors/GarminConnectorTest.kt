@@ -33,6 +33,9 @@ class GarminConnectorTest {
         assertThat(request.header("Cookie")).isEqualTo("JWT_WEB=current")
         assertThat(request.header("Connect-Csrf-Token")).isEqualTo("csrf-token")
         assertThat(request.header("Origin")).isEqualTo("https://connect.garmin.cn")
+        assertThat(request.header("Sec-Fetch-Dest")).isEqualTo("empty")
+        assertThat(request.header("Sec-Fetch-Mode")).isEqualTo("cors")
+        assertThat(request.header("Sec-Fetch-Site")).isEqualTo("same-origin")
         assertThat(request.method).isEqualTo("GET")
     }
 

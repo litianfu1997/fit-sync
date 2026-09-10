@@ -798,6 +798,10 @@ internal fun buildGarminGcApiRequest(
         .header("Accept", "application/json, text/plain, */*")
         .header("Origin", "https://connect.garmin.cn")
         .header("Referer", "https://connect.garmin.cn/modern/")
+        // Garmin 中国站网关会校验 Fetch Metadata；缺失时即使 JWT_WEB 与 CSRF 有效也返回空正文 403。
+        .header("Sec-Fetch-Dest", "empty")
+        .header("Sec-Fetch-Mode", "cors")
+        .header("Sec-Fetch-Site", "same-origin")
         .header("User-Agent", userAgent)
     return if (body is MultipartBody) builder.post(body).build() else builder.build()
 }
