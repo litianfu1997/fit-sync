@@ -35,6 +35,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -62,8 +64,10 @@ import com.fitsync.app.domain.model.DeliveryJobStatus
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.domain.model.SessionState
 import com.fitsync.app.sync.SyncScheduler
+import com.fitsync.app.ui.theme.FitShape
+import com.fitsync.app.ui.theme.FitSpacing
 import com.fitsync.app.ui.theme.FitSyncTheme
-import com.fitsync.app.ui.components.AppTopBar
+import com.fitsync.app.ui.components.FitTopBar
 import com.fitsync.app.ui.components.PlatformAvatar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -106,29 +110,33 @@ class PlatformWebActivity : ComponentActivity() {
         setContent {
             FitSyncTheme {
                 Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-                    AppTopBar(
+                    FitTopBar(
                         title = platform.displayName,
                         subtitle = when {
                             jobId <= 0 -> "安全网页登录"
                             else -> "网页上传任务"
                         },
-                        navigationIcon = {
-                            IconButton(onClick = { finish() }) {
-                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "关闭")
-                            }
-                        },
-                        actions = { PlatformAvatar(platform, 36.dp) },
+                        onBack = { finish() },
+                        backContentDescription = "关闭",
+                        actions = { PlatformAvatar(platform, 28.dp) },
+                        modifier = Modifier.statusBarsPadding(),
                     )
-                    Card(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = FitSpacing.md, vertical = FitSpacing.sm),
+                        shape = FitShape.control,
+                        color = MaterialTheme.colorScheme.primaryContainer,
                     ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = FitSpacing.md, vertical = FitSpacing.sm),
                             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(FitSpacing.sm),
                         ) {
-                            Icon(Icons.Default.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(FitSpacing.iconSm),
+                            )
                             Text(
                                 text = statusText,
                                 modifier = Modifier.weight(1f),
@@ -220,8 +228,8 @@ class PlatformWebActivity : ComponentActivity() {
                 if (!allowed) {
                     mainFrameLoadFailed = true
                     val destination = uri.host ?: uri.scheme.orEmpty()
+                    // 顶部信息条已同步更新且常驻，无需再弹 Toast 重复反馈。
                     statusText = "已阻止不安全跳转：$destination"
-                    Toast.makeText(this@PlatformWebActivity, statusText, Toast.LENGTH_SHORT).show()
                 }
                 return !allowed
             }
@@ -324,8 +332,8 @@ class PlatformWebActivity : ComponentActivity() {
                                 parent.loadUrl(uri.toString())
                             } else {
                                 val destination = uri?.host ?: uri?.scheme.orEmpty()
+                                // 顶部信息条已同步更新且常驻，无需再弹 Toast 重复反馈。
                                 statusText = "已阻止弹窗跳转：$destination"
-                                Toast.makeText(this@PlatformWebActivity, statusText, Toast.LENGTH_SHORT).show()
                             }
                             view?.destroy()
                             return true
@@ -674,6 +682,7 @@ class PlatformWebActivity : ComponentActivity() {
             withContext(Dispatchers.Main) {
                 uploadConfirmationBusy = false
                 if (confirmed) {
+                    // 有意保留 Toast：紧随其后就会 finish() 本页，Snackbar 没有宿主可以存活。
                     Toast.makeText(
                         this@PlatformWebActivity,
                         if (evidence.type == GarminImportEvidenceType.DUPLICATE) {

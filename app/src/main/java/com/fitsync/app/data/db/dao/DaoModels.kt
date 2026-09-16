@@ -27,6 +27,8 @@ data class ActivityListItem(
     val elapsedSeconds: Int?,
     val distanceMeters: Double?,
     val dedupStatus: DedupStatus,
+    /** 主副本的轨迹采样（JSON），列表里画缩略图用；无 GPS 活动为 null */
+    val trackJson: String? = null,
 )
 
 data class SyncJobListItem(

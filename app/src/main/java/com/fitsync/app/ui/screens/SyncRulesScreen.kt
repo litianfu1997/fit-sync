@@ -1,35 +1,30 @@
 package com.fitsync.app.ui.screens
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.AddLink
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Link
-import androidx.compose.material.icons.filled.Route
+import androidx.compose.material.icons.filled.Rule
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -46,23 +41,29 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fitsync.app.FitSyncApp
-import com.fitsync.app.connectors.PlatformCapabilityRegistry
 import com.fitsync.app.connectors.ConnectorCapabilities
+import com.fitsync.app.connectors.PlatformCapabilityRegistry
 import com.fitsync.app.data.db.entity.PlatformAccountEntity
 import com.fitsync.app.domain.model.AccountStatus
+import com.fitsync.app.domain.model.ConnectorExecution
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.sync.SyncScheduler
-import com.fitsync.app.ui.components.AppTopBar
-import com.fitsync.app.ui.components.EmptyState
+import com.fitsync.app.ui.components.EmptyStateVariant
+import com.fitsync.app.ui.components.FitCard
+import com.fitsync.app.ui.components.FitEmptyState
+import com.fitsync.app.ui.components.FitTopBar
 import com.fitsync.app.ui.components.PlatformAvatar
+import com.fitsync.app.ui.components.PlatformRouteAvatar
 import com.fitsync.app.ui.components.SectionHeader
+import com.fitsync.app.ui.components.SettingsDivider
+import com.fitsync.app.ui.components.StatusPill
 import com.fitsync.app.ui.components.StatusTone
 import com.fitsync.app.ui.components.executionText
+import com.fitsync.app.ui.theme.FitSpacing
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -102,7 +103,7 @@ fun SyncRulesScreen(
                 it.canListActivities && it.canDownloadOriginalFit
             }
         }
-    ).distinct()
+        ).distinct()
     var selectedSource by rememberSaveable { mutableStateOf(Platform.LOCAL_IMPORT) }
     var busyRoute by remember { mutableStateOf<RouteKey?>(null) }
     var historyConfirmation by remember { mutableStateOf<HistoryConfirmation?>(null) }
@@ -144,26 +145,29 @@ fun SyncRulesScreen(
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            AppTopBar(
+            FitTopBar(
                 title = "同步自动化",
                 subtitle = "选择来源，再决定活动去向",
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
+                onBack = onBack,
             )
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp, 8.dp, 16.dp, 28.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
+                contentPadding = PaddingValues(
+                    start = FitSpacing.screenGutter,
+                    top = FitSpacing.sm,
+                    end = FitSpacing.screenGutter,
+                    bottom = FitSpacing.xxl,
+                ),
+                verticalArrangement = Arrangement.spacedBy(FitSpacing.md),
             ) {
                 if (connectedAccounts.isEmpty()) {
                     item {
-                        EmptyState(
+                        FitEmptyState(
                             title = "先连接一个平台",
                             body = "连接账号后，就能把本地导入或平台活动自动发送到其他平台。",
-                            icon = Icons.Default.Link,
+                            variant = EmptyStateVariant.FirstRun,
+                            icon = Icons.Default.AddLink,
+                            steps = listOf("连接平台账号", "选择活动来源", "开启去向并自动补齐"),
                             actionLabel = "去连接平台",
                             onAction = onOpenPlatforms,
                         )
@@ -173,11 +177,11 @@ fun SyncRulesScreen(
                     item {
                         Row(
                             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(FitSpacing.sm),
                         ) {
                             sources.forEach { source ->
                                 FilterChip(
-                                    modifier = Modifier.height(44.dp),
+                                    modifier = Modifier.height(36.dp),
                                     selected = selectedSource == source,
                                     onClick = { selectedSource = source },
                                     label = { Text(source.displayName) },
@@ -197,10 +201,13 @@ fun SyncRulesScreen(
                     }
                     if (destinations.isEmpty()) {
                         item {
-                            EmptyState(
+                            FitEmptyState(
                                 title = "没有可用目标",
                                 body = "再连接一个支持上传 FIT 的平台，即可创建自动同步路径。",
-                                icon = Icons.Default.Route,
+                                variant = EmptyStateVariant.FirstRun,
+                                icon = Icons.Default.Rule,
+                                actionLabel = "管理平台账号",
+                                onAction = onOpenPlatforms,
                             )
                         }
                     } else {
@@ -238,7 +245,7 @@ fun SyncRulesScreen(
         }
         SnackbarHost(
             hostState = snackbarHostState,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(FitSpacing.lg),
         )
     }
 
@@ -265,16 +272,20 @@ fun SyncRulesScreen(
 @Composable
 private fun SourceRouteHeader(source: Platform, enabledCount: Int) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = FitSpacing.xs),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(FitSpacing.md),
     ) {
-        PlatformAvatar(source, 48.dp)
+        PlatformAvatar(source, 36.dp)
         Column(Modifier.weight(1f)) {
             Text("${source.displayName} 的去向", style = MaterialTheme.typography.titleMedium)
-            Text("选择需要自动补齐的平台", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "选择需要自动补齐的平台",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
-        com.fitsync.app.ui.components.StatusPill(
+        StatusPill(
             "$enabledCount 已开启",
             if (enabledCount > 0) StatusTone.SUCCESS else StatusTone.NEUTRAL,
         )
@@ -287,69 +298,65 @@ private fun RouteCard(
     destination: Platform,
     enabled: Boolean,
     includeHistory: Boolean,
-    uploadMode: com.fitsync.app.domain.model.ConnectorExecution,
+    uploadMode: ConnectorExecution,
     busy: Boolean,
     onEnabledChange: (Boolean) -> Unit,
     onHistoryChange: (Boolean) -> Unit,
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+    FitCard(
+        contentPadding = PaddingValues(0.dp),
+        selected = enabled,
+        border = true,
     ) {
-        Column(
+        Row(
             modifier = Modifier.fillMaxWidth()
-                .border(
-                    1.dp,
-                    if (enabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
-                    else MaterialTheme.colorScheme.outlineVariant,
-                    MaterialTheme.shapes.large,
-                )
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(horizontal = FitSpacing.rowPaddingH, vertical = FitSpacing.rowPaddingV),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(FitSpacing.md),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                PlatformAvatar(source, 32.dp)
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowForward,
-                    contentDescription = null,
-                    tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
+            PlatformRouteAvatar(source, destination, 28.dp)
+            Column(Modifier.weight(1f).padding(start = FitSpacing.sm)) {
+                Text(
+                    "${source.displayName} → ${destination.displayName}",
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
                 )
-                PlatformAvatar(destination, 38.dp)
+                Text(
+                    "${executionText(uploadMode)}上传",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (busy) {
+                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            } else {
+                Switch(checked = enabled, onCheckedChange = onEnabledChange)
+            }
+        }
+        if (enabled) {
+            SettingsDivider(startInset = 0.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .padding(horizontal = FitSpacing.rowPaddingH, vertical = FitSpacing.rowPaddingV),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(FitSpacing.md),
+            ) {
+                Icon(
+                    Icons.Default.History,
+                    contentDescription = null,
+                    tint = if (includeHistory) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(FitSpacing.iconMd),
+                )
                 Column(Modifier.weight(1f)) {
-                    Text(destination.displayName, style = MaterialTheme.typography.titleSmall)
+                    Text("补发现有历史", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "${executionText(uploadMode)}上传",
+                        if (includeHistory) "历史活动已加入投递队列" else "默认只同步开启后的新活动",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (busy) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                else Switch(checked = enabled, onCheckedChange = onEnabledChange)
-            }
-            if (enabled) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f))
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Icon(
-                        Icons.Default.History,
-                        contentDescription = null,
-                        tint = if (includeHistory) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Column(Modifier.weight(1f)) {
-                        Text("补发现有历史", style = MaterialTheme.typography.labelLarge)
-                        Text(
-                            if (includeHistory) "历史活动已加入投递队列" else "默认只同步开启后的新活动",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(checked = includeHistory, onCheckedChange = onHistoryChange, enabled = !busy)
-                }
+                Switch(checked = includeHistory, onCheckedChange = onHistoryChange, enabled = !busy)
             }
         }
     }

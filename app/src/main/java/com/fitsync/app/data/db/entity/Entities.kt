@@ -92,6 +92,13 @@ data class ActivityVariantEntity(
     val hasPower: Boolean = false,
     val recordCount: Int? = null,
     val trackSummaryJson: String? = null,
+    /** 详情页曲线采样（ProfileSample 列表的 JSON，见 TrackCodec） */
+    val profileJson: String? = null,
+    /**
+     * 地图用高密度轨迹（微度差分 + zigzag varint + Base64，见 TrackCodec.encodeDenseTrack）。
+     * 不是 JSON；老数据为 null，UI 回退 [trackSummaryJson]（仅 21 点）。
+     */
+    val denseTrackBase64: String? = null,
     @ColumnInfo(defaultValue = "0") val parserVersion: Int = 0,
     val createdAtEpochMs: Long = System.currentTimeMillis(),
 )

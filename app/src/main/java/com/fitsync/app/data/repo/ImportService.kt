@@ -22,7 +22,7 @@ import com.fitsync.app.domain.model.SportType
 import com.fitsync.app.domain.model.ValidationStatus
 import com.fitsync.app.fit.FitEngine
 import com.fitsync.app.fit.FitParseResult
-import com.fitsync.app.fit.LatLng
+import com.fitsync.app.fit.TrackCodec
 import com.fitsync.app.performance.PerformanceTrace
 import org.json.JSONArray
 import org.json.JSONObject
@@ -212,7 +212,7 @@ class ImportService(
             val candidatePairs = candidates.map { c ->
                 val track = variantsByCanonical[c.id]
                     .orEmpty()
-                    .firstNotNullOfOrNull { parseTrack(it.trackSummaryJson) }
+                    .firstNotNullOfOrNull { TrackCodec.decodeTrack(it.trackSummaryJson) }
                     .orEmpty()
                 c to track
             }
@@ -292,7 +292,9 @@ class ImportService(
                     hasCadence = parsed.hasCadence,
                     hasPower = parsed.hasPower,
                     recordCount = parsed.recordCount,
-                    trackSummaryJson = encodeTrack(parsed.trackSample),
+                    trackSummaryJson = TrackCodec.encodeTrack(parsed.trackSample),
+                    denseTrackBase64 = TrackCodec.encodeDenseTrack(parsed.denseTrackSample),
+                    profileJson = TrackCodec.encodeProfile(parsed.profileSamples),
                     parserVersion = CURRENT_PARSER_VERSION,
                 ),
             )
@@ -439,7 +441,9 @@ class ImportService(
                             hasCadence = parsed.hasCadence,
                             hasPower = parsed.hasPower,
                             recordCount = parsed.recordCount,
-                            trackSummaryJson = encodeTrack(parsed.trackSample),
+                            trackSummaryJson = TrackCodec.encodeTrack(parsed.trackSample),
+                            denseTrackBase64 = TrackCodec.encodeDenseTrack(parsed.denseTrackSample),
+                            profileJson = TrackCodec.encodeProfile(parsed.profileSamples),
                             parserVersion = CURRENT_PARSER_VERSION,
                         )
                     },
@@ -497,29 +501,6 @@ class ImportService(
         }
     }
 
-    private fun encodeTrack(points: List<LatLng>): String {
-        val arr = JSONArray()
-        points.forEach { p ->
-            arr.put(JSONObject().put("lat", p.lat).put("lon", p.lon))
-        }
-        return arr.toString()
-    }
-
-    private fun parseTrack(json: String?): List<LatLng> {
-        if (json.isNullOrBlank()) return emptyList()
-        return try {
-            val arr = JSONArray(json)
-            buildList {
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    add(LatLng(o.getDouble("lat"), o.getDouble("lon")))
-                }
-            }
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
-
     private fun CanonicalActivityEntity.withMissingMetricsFrom(parsed: FitParseResult) = copy(
         endTimeEpochMs = endTimeEpochMs ?: parsed.endTimeEpochMs,
         elapsedSeconds = elapsedSeconds ?: parsed.elapsedSeconds,
@@ -536,7 +517,7 @@ class ImportService(
     )
 
     private companion object {
-        const val CURRENT_PARSER_VERSION = 6
+        const val CURRENT_PARSER_VERSION = 8
 
         @OptIn(ExperimentalCoroutinesApi::class)
         val PARSER_DISPATCHER = Dispatchers.Default.limitedParallelism(2)

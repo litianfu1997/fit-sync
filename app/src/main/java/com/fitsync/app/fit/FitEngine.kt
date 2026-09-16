@@ -114,6 +114,8 @@ class FitEngine {
             hasSession = decoded.hasSession,
             recordCount = decoded.recordCount,
             trackSample = decoded.trackSample,
+            denseTrackSample = decoded.denseTrackSample,
+            profileSamples = decoded.profileSamples,
             avgHeartRate = decoded.avgHeartRate,
             avgPower = decoded.avgPower,
             avgCadence = decoded.avgCadence,
@@ -162,6 +164,9 @@ class FitEngine {
         val hasPower: Boolean = false,
         val recordCount: Int = 0,
         val trackSample: List<LatLng> = emptyList(),
+        /** 地图用高密度轨迹；与 [trackSample]（≤21 点）完全独立，保证去重与列表逻辑不受影响。 */
+        val denseTrackSample: List<LatLng> = emptyList(),
+        val profileSamples: List<ProfileSample> = emptyList(),
         val avgHeartRate: Int? = null,
         val avgPower: Int? = null,
         val avgCadence: Int? = null,
@@ -221,6 +226,12 @@ class FitEngine {
         var hasPwr = false
         var recordCount = 0
         val track = TrackPointSampler()
+        // 地图用的高密度轨迹：全量收集，解析完按上限抽稀（与上面的摘要采样互不影响）
+        val denseTrack = ArrayList<LatLng>(1024)
+        // 详情页曲线用的逐点采样（时间戳 / 速度 / 高度），解析完再抽稀
+        val profileTs = ArrayList<Long>()
+        val profileSpeed = ArrayList<Float>()
+        val profileAltitude = ArrayList<Float>()
         var avgHr: Int? = null
         var avgPwr: Int? = null
         var avgCad: Int? = null
@@ -355,7 +366,9 @@ class FitEngine {
                             val la = semicirclesToDegrees(lat.toInt())
                             val lo = semicirclesToDegrees(lon.toInt())
                             if (abs(la) <= 90 && abs(lo) <= 180 && (la != 0.0 || lo != 0.0)) {
-                                track.add(LatLng(la, lo))
+                                val point = LatLng(la, lo)
+                                track.add(point)
+                                denseTrack.add(point)
                             }
                         }
                         if (values[3] != null) hasHr = true
@@ -377,6 +390,12 @@ class FitEngine {
                             if (t != null) {
                                 if (startMs == null) startMs = t
                                 endMs = t
+                                profileTs += t
+                                profileSpeed += recordSpeedMps(values)
+                                profileAltitude += altitude
+                                    ?.takeIf { it in ALTITUDE_MIN_M..ALTITUDE_MAX_M }
+                                    ?.toFloat()
+                                    ?: Float.NaN
                             }
                         }
                     }
@@ -432,6 +451,8 @@ class FitEngine {
             hasPower = hasPwr || avgPwr != null,
             recordCount = recordCount,
             trackSample = sampleTrack(track.points()),
+            denseTrackSample = sampleDenseTrack(denseTrack),
+            profileSamples = sampleProfile(profileTs, profileSpeed, profileAltitude, startSnapshot),
             avgHeartRate = averageHeartRate,
             avgPower = avgPwr,
             avgCadence = avgCad,
@@ -533,6 +554,57 @@ class FitEngine {
         return result
     }
 
+    /**
+     * record.speed(6) / enhanced_speed(73)：scale 1000 → m/s。
+     *
+     * 0 m/s（停车）是有效值，要保留；但 FIT 用 0xFFFF / 0xFFFFFFFF 表示缺测，
+     * 换算出来是 65.5 / 4294967 m/s，超出 30 m/s（108 km/h）的一律当缺测丢掉。
+     */
+    private fun recordSpeedMps(values: FieldValues): Float {
+        val raw = values[73] ?: values[6] ?: return Float.NaN
+        if (raw < 0 || raw > 30_000) return Float.NaN
+        return (raw / 1000.0).toFloat()
+    }
+
+    /** 固定步长抽稀到 [PROFILE_MAX_SAMPLES]，并保证最后一个点不丢。 */
+    private fun sampleProfile(
+        timestamps: List<Long>,
+        speed: List<Float>,
+        altitude: List<Float>,
+        startMs: Long?,
+    ): List<ProfileSample> {
+        if (timestamps.isEmpty() || startMs == null) return emptyList()
+        val step = maxOf(1, (timestamps.size + PROFILE_MAX_SAMPLES - 1) / PROFILE_MAX_SAMPLES)
+        val out = ArrayList<ProfileSample>(minOf(timestamps.size, PROFILE_MAX_SAMPLES + 1))
+        var i = 0
+        while (i < timestamps.size) {
+            out += profileSampleAt(timestamps, speed, altitude, i, startMs)
+            i += step
+        }
+        val lastIndex = timestamps.size - 1
+        val lastSeconds = ((timestamps[lastIndex] - startMs) / 1000L).toInt()
+        if (out.last().seconds != lastSeconds) {
+            out += profileSampleAt(timestamps, speed, altitude, lastIndex, startMs)
+        }
+        return out
+    }
+
+    private fun profileSampleAt(
+        timestamps: List<Long>,
+        speed: List<Float>,
+        altitude: List<Float>,
+        index: Int,
+        startMs: Long,
+    ): ProfileSample {
+        val s = speed[index]
+        val a = altitude[index]
+        return ProfileSample(
+            seconds = ((timestamps[index] - startMs) / 1000L).toInt(),
+            speedMps = if (s.isNaN()) null else s.toDouble(),
+            altitudeMeters = if (a.isNaN()) null else a.toDouble(),
+        )
+    }
+
     companion object {
         /** Record 累计爬升：小于此阈值的抬升视为噪声 */
         internal const val ASCENT_THRESHOLD_M = 3.0
@@ -540,6 +612,28 @@ class FitEngine {
         internal const val ASCENT_MAX_STEP_M = 50.0
         internal const val ALTITUDE_MIN_M = -200.0
         internal const val ALTITUDE_MAX_M = 9000.0
+        /** 详情页曲线最多保留的采样点数：再多也看不出来，纯占存储 */
+        internal const val PROFILE_MAX_SAMPLES = 120
+
+        /**
+         * 地图轨迹最多保留的采样点数：1Hz 记录能无损覆盖约 66 分钟，
+         * 更长的活动按固定步长抽稀；编码后约 4 字节/点，不会让数据库膨胀。
+         */
+        internal const val DENSE_TRACK_MAX_POINTS = 4000
+
+        /**
+         * 地图轨迹抽稀：与 sampleTrack 一样保留首尾的固定步长抽样，但上限高得多。
+         * 独立成第二个采样路径，避免改动 21 点摘要 → 去重评分的历史行为。
+         */
+        internal fun sampleDenseTrack(points: List<LatLng>): List<LatLng> {
+            if (points.size <= DENSE_TRACK_MAX_POINTS) return points
+            val result = ArrayList<LatLng>(DENSE_TRACK_MAX_POINTS)
+            for (i in 0 until DENSE_TRACK_MAX_POINTS) {
+                val idx = (i.toLong() * (points.size - 1) / (DENSE_TRACK_MAX_POINTS - 1)).toInt()
+                result += points[idx]
+            }
+            return result
+        }
 
         /**
          * FIT altitude / enhanced_altitude：scale 5、offset 500 → metres = raw/5 - 500

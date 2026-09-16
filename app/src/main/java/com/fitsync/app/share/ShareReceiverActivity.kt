@@ -8,21 +8,16 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.LaunchedEffect
@@ -32,18 +27,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
 import com.fitsync.app.FitSyncApp
 import com.fitsync.app.data.repo.ImportOutcome
 import com.fitsync.app.domain.model.Platform
 import com.fitsync.app.sync.SyncScheduler
-import com.fitsync.app.ui.components.AppTopBar
+import com.fitsync.app.ui.components.FitCard
+import com.fitsync.app.ui.components.FitTopBar
+import com.fitsync.app.ui.components.IconBadge
+import com.fitsync.app.ui.components.IconBadgeSize
+import com.fitsync.app.ui.components.IconBadgeTone
+import com.fitsync.app.ui.theme.FitSpacing
 import com.fitsync.app.ui.theme.FitSyncTheme
-import com.fitsync.app.ui.theme.FitRed
-import com.fitsync.app.ui.theme.FitTeal
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -87,51 +82,54 @@ class ShareReceiverActivity : ComponentActivity() {
                 }
 
                 Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-                    AppTopBar(title = "导入 FIT", subtitle = "文件只会保存在本机应用沙箱")
+                    FitTopBar(
+                        title = "导入 FIT",
+                        subtitle = "文件只会保存在本机应用沙箱",
+                        modifier = Modifier.statusBarsPadding(),
+                    )
                     Column(
-                        modifier = Modifier.fillMaxSize().padding(20.dp),
+                        modifier = Modifier.fillMaxSize().padding(FitSpacing.lg),
                         verticalArrangement = Arrangement.Center,
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Card(Modifier.fillMaxWidth()) {
+                        FitCard(modifier = Modifier.fillMaxWidth()) {
                             Column(
-                                modifier = Modifier.fillMaxWidth().padding(28.dp),
+                                modifier = Modifier.fillMaxWidth().padding(FitSpacing.xxl),
                                 horizontalAlignment = Alignment.CenterHorizontally,
                             ) {
-                                Box(
-                                    modifier = Modifier.size(72.dp).clip(CircleShape).background(
-                                        when {
-                                            !done -> MaterialTheme.colorScheme.primaryContainer
-                                            successful -> FitTeal.copy(alpha = 0.14f)
-                                            else -> FitRed.copy(alpha = 0.14f)
-                                        },
-                                    ),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    if (!done) CircularProgressIndicator()
-                                    else Icon(
-                                        if (successful) Icons.Default.CheckCircle else Icons.Default.ErrorOutline,
-                                        contentDescription = null,
-                                        tint = if (successful) FitTeal else FitRed,
-                                        modifier = Modifier.size(36.dp),
-                                    )
-                                }
+                                IconBadge(
+                                    if (!done) {
+                                        Icons.Default.FileDownload
+                                    } else if (successful) {
+                                        Icons.Default.CheckCircle
+                                    } else {
+                                        Icons.Default.ErrorOutline
+                                    },
+                                    size = IconBadgeSize.Lg,
+                                    tone = when {
+                                        !done -> IconBadgeTone.Neutral
+                                        successful -> IconBadgeTone.Success
+                                        else -> IconBadgeTone.Error
+                                    },
+                                )
                                 Text(
                                     if (!done) "正在导入" else if (successful) "导入完成" else "部分文件未导入",
-                                    modifier = Modifier.padding(top = 18.dp),
+                                    modifier = Modifier.padding(top = FitSpacing.lg),
                                     style = MaterialTheme.typography.titleLarge,
                                 )
                                 Text(
                                     message,
-                                    modifier = Modifier.padding(top = 8.dp),
+                                    modifier = Modifier.padding(top = FitSpacing.sm),
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     textAlign = TextAlign.Center,
                                 )
                                 if (done) {
-                                    Button(onClick = { finish() }, modifier = Modifier.fillMaxWidth().padding(top = 22.dp)) {
-                                        Icon(Icons.Default.FileDownload, contentDescription = null)
-                                        Text("完成", modifier = Modifier.padding(start = 8.dp))
+                                    Button(
+                                        onClick = { finish() },
+                                        modifier = Modifier.fillMaxWidth().padding(top = FitSpacing.xl),
+                                    ) {
+                                        Text("完成")
                                     }
                                 }
                             }

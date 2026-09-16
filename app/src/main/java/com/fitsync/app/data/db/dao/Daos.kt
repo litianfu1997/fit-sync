@@ -81,7 +81,14 @@ interface CanonicalActivityDao {
 
     @Query(
         """
-        SELECT id, title, sportType, startTimeEpochMs, elapsedSeconds, distanceMeters, dedupStatus
+        SELECT id, title, sportType, startTimeEpochMs, elapsedSeconds, distanceMeters, dedupStatus,
+          COALESCE(
+            (SELECT v.trackSummaryJson FROM activity_variant v
+              WHERE v.id = canonical_activity.primaryVariantId),
+            (SELECT v.trackSummaryJson FROM activity_variant v
+              WHERE v.canonicalActivityId = canonical_activity.id AND v.trackSummaryJson IS NOT NULL
+              ORDER BY v.id LIMIT 1)
+          ) AS trackJson
         FROM canonical_activity
         WHERE (
             :query = ''
@@ -544,6 +551,46 @@ interface DeliveryJobDao {
         now: Long,
         staleBefore: Long = now - 10L * 60 * 1000,
     )
+
+    /**
+     * 收尾「活动其实已经在目标账号上、任务却停在 FAILED」的投递任务。
+     *
+     * Garmin 等平台可能已受理文件、活动也建出来了，异步导入结果却报 500（GARMIN_IMPORT_REJECTED），
+     * 任务就此落在终态。而 FAILED 不在可运行状态集合里，后续拉取即便发现活动已存在于目标平台、
+     * 也只会写 PlatformCopy，永远走不到 `existingCopy` 那条收尾逻辑，首页于是长期挂着这个失败。
+     *
+     * 以 PlatformCopy 为准做一次自愈：只要 (canonicalActivityId, platformAccountId) 已有副本，
+     * 任务目标就已达成。状态记 DUPLICATE_REMOTE 而不是 SUCCEEDED——副本存在只说明活动在平台上，
+     * 没有证据表明它由我们那次上传创建。
+     *
+     * `platform_copy` 在 (canonicalActivityId, platformAccountId) 上有唯一索引，子查询至多命中一行。
+     */
+    @Query(
+        """
+        UPDATE delivery_job
+        SET status = 'DUPLICATE_REMOTE',
+            nextRetryAtEpochMs = NULL,
+            remoteUploadId = NULL,
+            remoteActivityId = (
+                SELECT copy.remoteActivityId FROM platform_copy copy
+                WHERE copy.canonicalActivityId = delivery_job.canonicalActivityId
+                  AND copy.platformAccountId = delivery_job.destinationAccountId
+            ),
+            userActionUrl = NULL,
+            errorCode = NULL,
+            errorMessage = NULL,
+            updatedAtEpochMs = :now
+        WHERE status = 'FAILED'
+          AND EXISTS (
+              SELECT 1 FROM platform_copy copy
+              WHERE copy.canonicalActivityId = delivery_job.canonicalActivityId
+                AND copy.platformAccountId = delivery_job.destinationAccountId
+          )
+        """,
+    )
+    suspend fun resolveFailedJobsWithConfirmedRemote(
+        now: Long = System.currentTimeMillis(),
+    ): Int
 
     @Query("DELETE FROM delivery_job WHERE canonicalActivityId = :canonicalId")
     suspend fun deleteByCanonical(canonicalId: Long)

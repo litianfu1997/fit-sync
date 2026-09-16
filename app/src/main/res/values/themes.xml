@@ -1,4 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.FitSync" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- 冷启动闪屏：深色底与启动图标一致，避免深色模式下的白闪。 -->
+    <style name="Theme.FitSync.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.FitSync</item>
+    </style>
+
+    <!-- 去掉 Light 限定：窗口背景由资源按日夜模式提供，避免启动瞬间白闪。 -->
+    <style name="Theme.FitSync" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
 </resources>

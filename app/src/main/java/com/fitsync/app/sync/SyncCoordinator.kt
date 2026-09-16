@@ -189,6 +189,8 @@ class SyncCoordinator(
                     }
                 }
         }
+        // 拉取阶段已经刷新了 PlatformCopy；据此收尾此前误判为失败的投递任务，再进入投递阶段。
+        resolveFailedJobsWithConfirmedRemote()
         val deliveryResult = includeUnreadyDestinationRetry(
             result = processDeliveryQueue(readyDestinationAccountIds),
             destinationAccountIds = destinationAccountIds,
@@ -229,6 +231,8 @@ class SyncCoordinator(
         val readyDestinationAccountIds = accountResults
             .filter { it.pull.completedNormally }
             .mapTo(mutableSetOf()) { it.accountId }
+        // 续跑批次同样先拉取目标端，再据此收尾误判为失败的任务。
+        resolveFailedJobsWithConfirmedRemote()
         val deliveryResult = includeUnreadyDestinationRetry(
             result = processDeliveryQueue(readyDestinationAccountIds),
             destinationAccountIds = destinationAccountIds,
@@ -244,6 +248,19 @@ class SyncCoordinator(
             actionRequiredAccounts = accountResults.count { refreshedAccounts[it.accountId]?.needsUserAction == true },
             failedAccounts = accountResults.count { !it.pull.completedNormally },
         )
+    }
+
+    /**
+     * 收尾「活动已经在目标账号上、投递任务却停在 FAILED」的任务，返回收尾条数。
+     *
+     * 典型来源：Garmin 已受理文件、活动也建出来了，异步导入结果却报 500，任务被判永久失败。
+     * FAILED 不在可运行状态集合里，所以后续拉取发现活动已存在时也只会写 PlatformCopy，
+     * 走不到 `existingCopy` 那条收尾逻辑，首页会一直挂着这个失败。
+     *
+     * 必须在拉取阶段之后调用，此时 PlatformCopy 才是最新的。
+     */
+    private suspend fun resolveFailedJobsWithConfirmedRemote(): Int = mutationGate.withLock {
+        db.deliveryJobDao().resolveFailedJobsWithConfirmedRemote()
     }
 
     suspend fun onImported(outcome: ImportOutcome, sourcePlatform: Platform): Int = mutationGate.withLock {

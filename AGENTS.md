@@ -6,7 +6,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 FitSync 是一个**纯 Android 应用**（无自建服务器），用于在迈金(ONELAP)、行者(Xingzhe)、Garmin Connect、COROS、iGPSPORT 之间搬运和补齐骑行活动的 FIT 文件。活动中台、去重、同步任务、原始 FIT 全部存放在本机应用沙箱。
 
-技术栈：Kotlin · Jetpack Compose + Material 3 · Room(SQLite) · WorkManager · OkHttp · 自实现的轻量 FIT 解析引擎。单模块工程（`settings.gradle.kts` 只 include `:app`）。
+技术栈：Kotlin · Jetpack Compose + Material 3 · Room(SQLite) · WorkManager · OkHttp · osmdroid(OSM 瓦片，仅详情/全屏地图) · 自实现的轻量 FIT 解析引擎。单模块工程（`settings.gradle.kts` 只 include `:app`）。
 
 ## 构建与测试
 
@@ -14,9 +14,19 @@ FitSync 是一个**纯 Android 应用**（无自建服务器），用于在迈�
 
 ```bash
 export JAVA_HOME="D:/jdk-21"
-export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"   # 或对应的 SDK 路径
 ./gradlew :app:assembleDebug
 ```
+
+**不要覆盖 `ANDROID_HOME`**：本机 shell 已经把它指向了正确位置，覆盖反而会出错。
+
+| 变量 | 值 |
+|---|---|
+| `ANDROID_HOME` | `D:\Android\Sdk`（系统镜像完整） |
+| `ANDROID_AVD_HOME` | `D:\Android\Avd`（可用 AVD：`FitSync_API_34`、`Pixel_8_API_36`） |
+
+> 坑：`$LOCALAPPDATA/Android/Sdk` 下的 `system-images/android-34/google_apis/x86_64/` 是**空目录**（缺 `kernel-ranchu`）。
+> 用它覆盖 `ANDROID_HOME` 不影响 Gradle 构建，但启动模拟器会报 `missing a kernel file`，
+> 跑 `connectedAndroidTest` 时才会暴露。
 
 依赖通过阿里云 maven 镜像解析（见 `settings.gradle.kts`），`repositoriesMode = FAIL_ON_PROJECT_REPOS`，模块级仓库会被拒绝。
 
@@ -27,6 +37,17 @@ export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"   # 或对应的 SDK 路径
 ./gradlew :app:connectedAndroidTest                      # 仪表化测试（需连接设备/模拟器）
 ./gradlew :app:assembleRelease                           # release 需 keystore.properties（见下）
 ```
+
+无真机时先起模拟器，等状态从 `offline` 变 `device` 再跑测试：
+
+```bash
+/d/Android/Sdk/emulator/emulator.exe -avd FitSync_API_34 -no-audio -no-boot-anim &
+/d/Android/Sdk/platform-tools/adb.exe devices            # 确认状态为 device
+/d/Android/Sdk/platform-tools/adb.exe emu kill           # 用完关闭
+```
+
+组件层 UI 测试见 `app/src/androidTest/java/com/fitsync/app/ui/components/FitComponentsTest.kt`
+（只覆盖无状态组件，不依赖数据库）。
 
 测试用 JUnit4 + Google Truth + kotlinx-coroutines-test。Room 迁移测试（`Migration1To2Test`）在 `androidTest` 下。
 
@@ -40,12 +61,12 @@ export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"   # 或对应的 SDK 路径
 
 新增需要被复用的组件时：在 `FitSyncApp.onCreate()` 构造并暴露字段，不要就地 `new`。
 
-### 核心数据模型（Room，version 4）
+### 核心数据模型（Room，version 8）
 
 数据模型围绕「同一骑行的多个来源副本」展开，理解这层关系是修改同步逻辑的前提：
 
 - `CanonicalActivity` — 一条**规范化的真实活动**（去重后的「真相」），承载汇总指标 + `primaryVariantId`；`NEEDS_REVIEW` 时用 `reviewCandidateCanonicalId` 指向候选。
-- `ActivityVariant` — 同一活动从不同平台/设备拿到的**原始 FIT 文件副本**（按 `fileSha256` 唯一），带质量分、设备信息、轨迹摘要。canonical 1 → N variant。本地文件可按 `FitStoragePolicy` 被 `FitStorageJanitor` 清理（path 置空，元数据保留）。
+- `ActivityVariant` — 同一活动从不同平台/设备拿到的**原始 FIT 文件副本**（按 `fileSha256` 唯一），带质量分、设备信息、轨迹摘要（`trackSummaryJson`）与曲线采样（`profileJson`，见 `TrackCodec`）。canonical 1 → N variant。本地文件可按 `FitStoragePolicy` 被 `FitStorageJanitor` 清理（path 置空，元数据保留）。
 - `PlatformCopy` — 记录「某活动已经存在于某平台账号」，`(canonicalActivityId, platformAccountId)` 与 `(platformAccountId, remoteActivityId)` 双唯一索引。**这是去重和防止同步循环的关键表**。写入统一走 `planPlatformCopyUpsert` / `upsertPlatformCopy`（合成 remoteId → 真实 ID 对齐）。
 - `DeliveryJob` — 上传任务队列（状态机 + 幂等键 + 重试退避）。`idempotencyKey = sha256(variant)+destinationAccountId`。
 - `SyncRule` — 「来源平台 → 目标账号」规则，启用即授权自动投递。
@@ -59,7 +80,7 @@ export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"   # 或对应的 SDK 路径
 
 `ImportService.importFromUri()` 是所有 FIT 进入应用的统一入口（系统分享、云端下载、手动都走它）：copy 到沙箱 → 算 sha256 → 命中已有 variant 直接返回 `DuplicateFile` → `FitEngine.parseFile` 校验(CRC/完整性) → `DedupEngine` 与候选比对 → 写 canonical + variant。
 
-`reparseStoredActivitiesIfNeeded()` 在 App 启动时按 `app_settings.fitParserVersion < CURRENT_PARSER_VERSION(=2)` 决定是否用新解析器重算历史活动的元数据。**改 FitEngine 解析逻辑时**：递增 `ImportService.CURRENT_PARSER_VERSION`，否则旧数据不会被刷新。
+`reparseStoredActivitiesIfNeeded()` 在 App 启动时按 `app_settings.fitParserVersion < CURRENT_PARSER_VERSION(=7)` 决定是否用新解析器重算历史活动的元数据（按 25 条一批，由 `MaintenanceWorker` 续跑）。**改 FitEngine 解析逻辑时**：递增 `ImportService.CURRENT_PARSER_VERSION`，否则旧数据不会被刷新。
 
 ### 去重引擎（DedupEngine）
 
@@ -92,6 +113,7 @@ export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"   # 或对应的 SDK 路径
 
 - **新增平台**：`Platform` 枚举 → `PlatformCapabilityRegistry.capabilities()` → `ConnectorRegistry`（注册 connector 或 ForegroundWebConnector）→ `PlatformWebConfigs`（loginUrl/uploadUrl）。平台展示名在 `Platform.displayName`。
 - **新增 Room 字段/实体**：改 `Entities.kt` → 写 `Migration` 加进 `FitSyncDatabase` → 递增 version → 覆盖测试（参考 `Migration1To2Test`）。
+  若新字段由 FIT 解析产生（如 `denseTrackBase64`），还要递增 `ImportService.CURRENT_PARSER_VERSION`，否则历史数据不会被重算回填（原始 FIT 已被 janitor 清理的副本无法回填，UI 需自带回退）。
 - **改平台 API 解析**：通用 JSON 字段查找在 `JsonPlatformParser`（多候选 key + 嵌套 `data`/`record` 等对象），按需加 key；解析逻辑尽量放这里复用，并补 `JsonPlatformParserTest`。
 - **新增被复用的服务**：在 `FitSyncApp.onCreate()` 构造并暴露，不要在调用处就地实例化。
 - **FIT 命名/存储**：规则在 `FitFileNaming`；文件落在 `context.filesDir/fits`，临时文件在 `cacheDir/fit_import`。

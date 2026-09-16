@@ -51,6 +51,7 @@ class Migration3To4Test {
                 FitSyncDatabase.MIGRATION_4_5,
                 FitSyncDatabase.MIGRATION_5_6,
                 FitSyncDatabase.MIGRATION_6_7,
+                FitSyncDatabase.MIGRATION_7_8,
             )
             .build()
         val activity = database!!.canonicalActivityDao().getById(1)

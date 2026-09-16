@@ -38,7 +38,7 @@ import com.fitsync.app.domain.model.FitStoragePolicy
         ImportJobEntity::class,
         AppSettingsEntity::class,
     ],
-    version = 7,
+    version = 9,
     exportSchema = false,
 )
 @TypeConverters(Converters::class)
@@ -72,6 +72,8 @@ abstract class FitSyncDatabase : RoomDatabase() {
                     MIGRATION_4_5,
                     MIGRATION_5_6,
                     MIGRATION_6_7,
+                    MIGRATION_7_8,
+                    MIGRATION_8_9,
                 )
                 .addCallback(
                     object : Callback() {
@@ -256,6 +258,23 @@ abstract class FitSyncDatabase : RoomDatabase() {
                         "index_delivery_job_destinationAccountId_status_nextRetryAtEpochMs_createdAtEpochMs " +
                         "ON delivery_job(destinationAccountId, status, nextRetryAtEpochMs, createdAtEpochMs)",
                 )
+            }
+        }
+
+        /** 详情页曲线采样：老数据留空，靠 reparse（parserVersion 升级）回填。 */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE activity_variant ADD COLUMN profileJson TEXT")
+            }
+        }
+
+        /**
+         * 地图轨迹：老数据留空，靠 reparse（parserVersion 升级）回填；
+         * 原始 FIT 已被清理的老活动无法重算，UI 回退 21 点摘要轨迹。
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE activity_variant ADD COLUMN denseTrackBase64 TEXT")
             }
         }
     }

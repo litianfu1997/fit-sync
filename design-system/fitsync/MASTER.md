@@ -1,5 +1,9 @@
 # Design System Master File
 
+> **⚠️ 已废弃：本文件是 Web/CSS 语境的早期生成物（`cursor-pointer` / `hover` / `backdrop-filter` / CSS 变量，字体为 Barlow Condensed），
+> 与当前 Compose + 中文优先单字体的实现完全不符，仅作历史参考，不再作为实现依据。**
+> **唯一事实来源是 Kotlin Token 文件：`app/src/main/java/com/fitsync/app/ui/theme/`（Color/Type/Shape/Spacing），人读版本见 `Tokens.md`。**
+
 > **LOGIC:** When building a specific page, first check `design-system/pages/[page-name].md`.
 > If that file exists, its rules **override** this Master file.
 > If not, strictly follow the rules below.

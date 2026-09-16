@@ -323,6 +323,50 @@ class FitEngineTest {
         assertThat(FitEngine.decodeAltitudeMeters(5000)).isWithin(0.01).of(500.0)
     }
 
+    @Test
+    fun denseTrackSample_keepsFullResolutionWhileSummaryStaysSampled() {
+        val recordCount = 100
+        val data = ByteArrayOutputStream().apply {
+            definition(
+                local = 0,
+                global = 20,
+                fields = listOf(Field(253, 4, 0x86), Field(0, 4, 0x85), Field(1, 4, 0x85)),
+            )
+            repeat(recordCount) { index ->
+                data(local = 0) {
+                    writeLe32(1_000 + index)
+                    writeLe32(degreesToSemicircles(30.0 + index * 0.0001))
+                    writeLe32(degreesToSemicircles(120.0 + index * 0.0001))
+                }
+            }
+        }.toByteArray()
+
+        val result = FitEngine().parseBytes(fitFile(data))
+
+        assertThat(result.recordCount).isEqualTo(recordCount)
+        // 摘要轨迹仍然抽稀到 21 点：去重与列表缩略图的行为不能被地图改动
+        assertThat(result.trackSample).hasSize(21)
+        assertThat(result.denseTrackSample).hasSize(recordCount)
+        assertThat(result.denseTrackSample.first().lat).isWithin(1e-6).of(30.0)
+        assertThat(result.denseTrackSample.last().lat)
+            .isWithin(1e-6).of(30.0 + (recordCount - 1) * 0.0001)
+    }
+
+    @Test
+    fun sampleDenseTrack_capsAtLimitAndKeepsBothEnds() {
+        val points = List(10_000) { LatLng(it.toDouble(), -it.toDouble()) }
+
+        val sampled = FitEngine.sampleDenseTrack(points)
+
+        assertThat(sampled).hasSize(FitEngine.DENSE_TRACK_MAX_POINTS)
+        assertThat(sampled.first()).isEqualTo(points.first())
+        assertThat(sampled.last()).isEqualTo(points.last())
+        assertThat(sampled.map { it.lat }).isInOrder()
+    }
+
+    /** degrees → FIT semicircles (sint32) */
+    private fun degreesToSemicircles(degrees: Double): Int = (degrees * (2147483648.0 / 180.0)).toInt()
+
     /** metres → FIT altitude raw (scale 5, offset 500) */
     private fun altitudeRaw(meters: Double): Int = ((meters + 500.0) * 5.0).toInt()
 

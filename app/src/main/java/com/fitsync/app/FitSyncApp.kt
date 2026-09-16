@@ -14,6 +14,7 @@ import com.fitsync.app.data.repo.PlatformAccountRepository
 import com.fitsync.app.connectors.ConnectorRegistry
 import com.fitsync.app.connectors.GarminAuthDiagnostics
 import com.fitsync.app.fit.FitEngine
+import com.fitsync.app.map.OsMapBootstrap
 import com.fitsync.app.notification.SyncNotificationManager
 import com.fitsync.app.security.SecureSessionStore
 import com.fitsync.app.sync.DeliveryPlanner
@@ -38,6 +39,9 @@ class FitSyncApp : Application(), Configuration.Provider {
     val database: FitSyncDatabase by lazy { FitSyncDatabase.getInstance(this) }
     val fitFileStore: FitFileStore by lazy { FitFileStore(this) }
     val fitEngine: FitEngine by lazy { FitEngine() }
+
+    /** 地图（osmdroid）配置与瓦片缓存；首次访问或 App 启动时完成初始化。 */
+    val osMapBootstrap: OsMapBootstrap by lazy { OsMapBootstrap(this) }
     val garminUploadFilePreparer: GarminUploadFilePreparer by lazy {
         GarminUploadFilePreparer(this, fitEngine)
     }
@@ -122,6 +126,8 @@ class FitSyncApp : Application(), Configuration.Provider {
         Trace.beginSection("FitSync:app_onCreate")
         try {
             instance = this
+            // 只做配置赋值与建目录，但必须早于任何 MapView 创建
+            osMapBootstrap.initialize()
             GarminAuthDiagnostics.init(this)
             applicationScope.launch { webSessionManager.clearLegacyStravaApiCredentials() }
         } finally {

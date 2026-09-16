@@ -49,6 +49,7 @@ class Migration1To2Test {
                 FitSyncDatabase.MIGRATION_4_5,
                 FitSyncDatabase.MIGRATION_5_6,
                 FitSyncDatabase.MIGRATION_6_7,
+                FitSyncDatabase.MIGRATION_7_8,
             )
             .build()
         val settings = database!!.appSettingsDao().get()
@@ -90,6 +91,7 @@ class Migration1To2Test {
                 FitSyncDatabase.MIGRATION_4_5,
                 FitSyncDatabase.MIGRATION_5_6,
                 FitSyncDatabase.MIGRATION_6_7,
+                FitSyncDatabase.MIGRATION_7_8,
             )
             .build()
         val db = database!!.openHelper.writableDatabase
