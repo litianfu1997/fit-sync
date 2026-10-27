@@ -1,4 +1,3 @@
-import java.io.FileInputStream
 import java.util.Properties
 
 plugins {
@@ -8,13 +7,16 @@ plugins {
     id("androidx.baselineprofile")
 }
 
-// 从被 gitignore 的 keystore.properties 读取 release 签名口令；文件缺失则跳过（构建 release 时会报缺 keystore）
+// 本机使用被 gitignore 的配置；CI 优先从环境变量读取签名，避免把口令写入仓库或构建参数。
 val keystoreProperties = Properties().apply {
     val file = rootProject.file("keystore.properties")
     if (file.exists()) {
-        load(FileInputStream(file))
+        file.inputStream().use { load(it) }
     }
 }
+
+fun signingProperty(environmentName: String, propertyName: String): String? =
+    providers.environmentVariable(environmentName).orNull ?: keystoreProperties.getProperty(propertyName)
 
 android {
     namespace = "com.fitsync.app"
@@ -24,17 +26,17 @@ android {
         applicationId = "com.fitsync.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = providers.environmentVariable("FITSYNC_VERSION_CODE").orNull?.toInt() ?: 2
+        versionName = providers.environmentVariable("FITSYNC_VERSION_NAME").orNull ?: "0.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
         create("release") {
-            keystoreProperties["storeFile"]?.let { storeFile = rootProject.file(it as String) }
-            storePassword = keystoreProperties["storePassword"] as String?
-            keyAlias = keystoreProperties["keyAlias"] as String?
-            keyPassword = keystoreProperties["keyPassword"] as String?
+            signingProperty("FITSYNC_KEYSTORE_FILE", "storeFile")?.let { storeFile = rootProject.file(it) }
+            storePassword = signingProperty("FITSYNC_KEYSTORE_PASSWORD", "storePassword")
+            keyAlias = signingProperty("FITSYNC_KEY_ALIAS", "keyAlias")
+            keyPassword = signingProperty("FITSYNC_KEY_PASSWORD", "keyPassword")
         }
     }
 

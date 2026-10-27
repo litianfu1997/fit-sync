@@ -1,0 +1,169 @@
+name: 手动构建并发布 APK
+run-name: 发布 APK · ${{ inputs.version_name || '项目版本' }} · 构建 ${{ github.run_number }}
+
+# 仅手动点击 Run workflow 时运行。
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: '版本号（可留空使用项目版本，例如 0.2.1）'
+        required: false
+        type: string
+      prerelease:
+        description: '标记为预发布版本'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-apk-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 测试、签名并发布 APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: 获取选定版本的源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: 检查参数与签名 Secrets
+        env:
+          INPUT_VERSION_NAME: ${{ inputs.version_name }}
+          FITSYNC_KEYSTORE_BASE64: ${{ secrets.FITSYNC_KEYSTORE_BASE64 }}
+          FITSYNC_KEYSTORE_PASSWORD: ${{ secrets.FITSYNC_KEYSTORE_PASSWORD }}
+          FITSYNC_KEY_ALIAS: ${{ secrets.FITSYNC_KEY_ALIAS }}
+          FITSYNC_KEY_PASSWORD: ${{ secrets.FITSYNC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_VERSION_NAME" ]]; then
+            if [[ ! "$INPUT_VERSION_NAME" =~ ^[0-9]+(\.[0-9]+){1,3}(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+              echo "::error::版本号格式无效，请填写如 0.2.1 或 0.2.1-beta.1。"
+              exit 1
+            fi
+            printf 'FITSYNC_VERSION_NAME=%s\n' "$INPUT_VERSION_NAME" >> "$GITHUB_ENV"
+          fi
+          for secret_name in FITSYNC_KEYSTORE_BASE64 FITSYNC_KEYSTORE_PASSWORD FITSYNC_KEY_ALIAS FITSYNC_KEY_PASSWORD; do
+            if [[ -z "${!secret_name}" ]]; then
+              echo "::error::缺少仓库 Secret：$secret_name。请按 docs/github-actions.md 配置。"
+              exit 1
+            fi
+          done
+          version_code=$((100000 + GITHUB_RUN_NUMBER))
+          if (( version_code > 2100000000 )); then
+            echo "::error::构建编号超出 Android versionCode 范围。"
+            exit 1
+          fi
+          printf 'FITSYNC_VERSION_CODE=%s\n' "$version_code" >> "$GITHUB_ENV"
+          umask 077
+          mkdir -p "$RUNNER_TEMP/fitsync-signing"
+          printf '%s' "$FITSYNC_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/fitsync-signing/release.jks"
+          test -s "$RUNNER_TEMP/fitsync-signing/release.jks"
+          printf 'FITSYNC_KEYSTORE_FILE=%s\n' "$RUNNER_TEMP/fitsync-signing/release.jks" >> "$GITHUB_ENV"
+
+      - name: 配置 JDK 21
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 校验 Gradle Wrapper 并缓存依赖
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
+        with:
+          cache-provider: basic
+
+      - name: 准备 Android SDK
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          chmod +x gradlew
+
+      - name: 运行单元测试并构建正式 APK
+        env:
+          FITSYNC_KEYSTORE_PASSWORD: ${{ secrets.FITSYNC_KEYSTORE_PASSWORD }}
+          FITSYNC_KEY_ALIAS: ${{ secrets.FITSYNC_KEY_ALIAS }}
+          FITSYNC_KEY_PASSWORD: ${{ secrets.FITSYNC_KEY_PASSWORD }}
+        run: ./gradlew :app:testReleaseUnitTest :app:assembleRelease --no-daemon --no-configuration-cache --stacktrace
+
+      - name: 校验签名并整理发布文件
+        id: package
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose app/build/outputs/apk/release/app-release.apk
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import shutil
+          from pathlib import Path
+
+          apk_dir = Path("app/build/outputs/apk/release")
+          metadata = json.loads((apk_dir / "output-metadata.json").read_text())
+          elements = metadata["elements"]
+          if len(elements) != 1 or elements[0]["outputFile"] != "app-release.apk":
+              raise SystemExit("APK 输出格式发生变化，请检查打包步骤。")
+          info = elements[0]
+          version = info["versionName"]
+          if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?", version):
+              raise SystemExit("项目版本号格式无效。")
+          if info["versionCode"] != int(os.environ["FITSYNC_VERSION_CODE"]):
+              raise SystemExit("APK 内的 versionCode 与本次构建编号不一致。")
+          build = f'{os.environ["GITHUB_RUN_NUMBER"]}.{os.environ["GITHUB_RUN_ATTEMPT"]}'
+          tag = f"v{version}-build.{build}"
+          dist = Path("dist")
+          dist.mkdir(exist_ok=True)
+          apk = dist / f"FitSync-{version}-build.{build}.apk"
+          shutil.copyfile(apk_dir / info["outputFile"], apk)
+          digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+          (dist / "SHA256SUMS").write_text(f"{digest}  {apk.name}\n", encoding="utf-8")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version_name={version}\nrelease_tag={tag}\napk_path={apk.as_posix()}\n")
+          PY
+
+      - name: 发布到 GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
+          VERSION_NAME: ${{ steps.package.outputs.version_name }}
+          APK_PATH: ${{ steps.package.outputs.apk_path }}
+          IS_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          notes_file="$RUNNER_TEMP/fitsync-release-notes.md"
+          {
+            printf '由 GitHub Actions 手动构建并发布。\n\n'
+            printf -- '- 应用版本：%s\n' "$VERSION_NAME"
+            printf -- '- 安装版本号（versionCode）：%s\n' "$FITSYNC_VERSION_CODE"
+            printf -- '- 源码提交：%s\n' "$GITHUB_SHA"
+            printf -- '- 构建记录：%s/%s/actions/runs/%s\n\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf '适用于 Android 8.0 及以上；已通过 JVM 单元测试与 APK 签名校验。\n\n'
+            printf '下载下方 APK 安装。SHA256SUMS 可用于校验下载文件完整性。\n'
+          } > "$notes_file"
+          release_args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "FitSync $VERSION_NAME · 构建 $GITHUB_RUN_NUMBER" --notes-file "$notes_file" --draft)
+          latest=true
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            release_args+=(--prerelease)
+            latest=false
+          fi
+          # 先上传完整附件，再公开发布；每次运行/重跑使用独立标签，不覆盖已有发布。
+          gh release create "$RELEASE_TAG" "$APK_PATH" dist/SHA256SUMS "${release_args[@]}"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$latest"
+          release_url=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)
+          printf '### APK 已发布\n\n[前往 Releases 下载](%s)\n\n版本：%s · versionCode：%s\n' "$release_url" "$VERSION_NAME" "$FITSYNC_VERSION_CODE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 清理临时签名文件
+        if: always()
+        run: rm -f "$RUNNER_TEMP/fitsync-signing/release.jks"
