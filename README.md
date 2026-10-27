@@ -8,6 +8,8 @@
 </p>
 
 <p align="center">
+  <a href="https://litianfu1997.github.io/fit-sync-app/">项目主页</a> ·
+  <a href="https://github.com/litianfu1997/fit-sync-app/releases/latest">下载 Android 版</a> ·
   <a href="#界面预览">界面预览</a> ·
   <a href="#支持的平台">支持的平台</a> ·
   <a href="#开始使用">开始使用</a> ·
@@ -234,7 +236,7 @@ docs/             平台说明、架构、截图与配图
 
 修改平台协议时，尽量附上不含凭据的响应样例和对应解析测试；修改 Room 实体时补齐迁移，修改 FIT 解析结果时同步更新解析器版本。
 
-- [提交问题](https://github.com/litianfu1997/fit-sync/issues)
+- [提交问题](https://github.com/litianfu1997/fit-sync-app/issues)
 - [平台能力与执行模式](docs/platform-capabilities.md)
 - [架构与数据流](docs/architecture.md)
 - [Strava 网页同步说明](docs/strava-integration-plan.md)

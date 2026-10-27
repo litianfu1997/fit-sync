@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f6f6f1" />
+    <meta name="description" content="FitSync 是一款开源 Android 应用，帮助你在迈金、行者、Garmin Connect 中国站、COROS、iGPSPORT 和 Strava 之间同步原始 FIT 运动记录。" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="FitSync · 运动记录，轻松同步" />
+    <meta property="og:description" content="把分散在不同平台的运动记录，搬到你想用的地方。" />
+    <meta property="og:url" content="https://litianfu1997.github.io/fit-sync-app/" />
+    <meta property="og:locale" content="zh_CN" />
+    <link rel="canonical" href="https://litianfu1997.github.io/fit-sync-app/" />
+    <link rel="icon" href="assets/fitsync-mark.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="site.css" />
+    <script defer src="site.js"></script>
+    <title>FitSync · 运动记录，轻松同步</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+
+    <header class="site-header">
+      <div class="header-inner container">
+        <a class="brand" href="#top" aria-label="FitSync 首页">
+          <img src="assets/fitsync-mark.svg" alt="" width="38" height="38" />
+          <span>FitSync<span class="brand-dot">.</span></span>
+        </a>
+        <nav class="desktop-nav" aria-label="网站导航">
+          <a href="#platforms">支持平台</a>
+          <a href="#features">功能介绍</a>
+          <a href="#how-it-works">使用方法</a>
+          <a href="#privacy">隐私与数据</a>
+        </nav>
+        <div class="header-actions">
+          <a class="header-github" href="https://github.com/litianfu1997/fit-sync-app">GitHub <span aria-hidden="true">↗</span></a>
+          <a class="button button-small button-dark" href="https://github.com/litianfu1997/fit-sync-app/releases/latest">下载应用 <span aria-hidden="true">↗</span></a>
+          <details class="mobile-menu" data-mobile-menu>
+            <summary aria-label="打开网站导航"><span></span><span></span></summary>
+            <nav aria-label="移动端网站导航">
+              <a href="#platforms">支持平台</a>
+              <a href="#features">功能介绍</a>
+              <a href="#how-it-works">使用方法</a>
+              <a href="#privacy">隐私与数据</a>
+              <a href="https://github.com/litianfu1997/fit-sync-app">GitHub ↗</a>
+            </nav>
+          </details>
+        </div>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero container" id="top" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="eyebrow-dot"></span> 一款开源的 Android 运动记录同步工具</p>
+          <h1 id="hero-title">每一次运动，<br /><span>都值得被记录。</span></h1>
+          <p class="hero-description">把散落在不同平台的活动带到一起。<br class="desktop-break" />原始 FIT、同步任务和你的选择，都在自己的手机里。</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="https://github.com/litianfu1997/fit-sync-app/releases/latest">
+              获取 Android 版 <span class="button-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="text-link" href="#how-it-works">看看怎么用 <span aria-hidden="true">↓</span></a>
+          </div>
+          <p class="hero-note">ANDROID 8.0+ <span></span> 免费开源 <span></span> 前往 GitHub Releases 下载</p>
+          <div class="hero-caption"><span>01 / YOUR ACTIVITIES</span><span>一份记录，更多可能。</span></div>
+        </div>
+
+        <figure class="hero-visual" aria-label="FitSync 应用界面预览">
+          <div class="hero-grid" aria-hidden="true"></div>
+          <svg class="hero-route" viewBox="0 0 620 600" fill="none" aria-hidden="true">
+            <path d="M-28 407C105 407 82 167 219 167C335 167 349 368 466 368C538 368 556 272 651 272" />
+            <circle cx="219" cy="167" r="8" />
+            <circle cx="466" cy="368" r="8" />
+          </svg>
+          <div class="visual-label visual-label-top"><span class="label-dot"></span> FIT FILES <strong>原始活动</strong></div>
+          <div class="hero-phone phone-frame">
+            <img src="assets/screenshots/overview.png" width="1080" height="2400" alt="FitSync 概览界面，显示合成的演示活动和同步状态" fetchpriority="high" />
+          </div>
+          <div class="visual-label visual-label-bottom"><span class="label-check" aria-hidden="true">✓</span><div>YOUR DATA<strong>本机管理</strong></div></div>
+          <figcaption>应用界面展示 · 活动与账号状态为演示数据</figcaption>
+        </figure>
+      </section>
+
+      <section class="platforms" id="platforms" aria-labelledby="platforms-title">
+        <div class="container">
+          <div class="platform-heading">
+            <div><p class="eyebrow">SIX PLATFORMS, ONE PLACE</p><h2 id="platforms-title">熟悉的平台，自由连接。</h2></div>
+            <p>把原始 FIT 活动带到你常用的平台。<br />每个平台最多连接一个账号。</p>
+          </div>
+          <ul class="platform-list" aria-label="支持的平台">
+            <li><span class="platform-mark onelap" aria-hidden="true">O</span><span>迈金 <small>ONELAP</small></span></li>
+            <li><span class="platform-mark xingzhe" aria-hidden="true">行</span><span>行者 <small>XINGZHE</small></span></li>
+            <li><span class="platform-mark garmin" aria-hidden="true">G</span><span>Garmin <small>CONNECT</small></span></li>
+            <li><span class="platform-mark coros" aria-hidden="true">C</span><span>COROS <small>高驰</small></span></li>
+            <li><span class="platform-mark igps" aria-hidden="true">i</span><span>iGPSPORT <small>中国站</small></span></li>
+            <li><span class="platform-mark strava" aria-hidden="true">S</span><span>Strava <small>WEB</small></span></li>
+          </ul>
+          <p class="platform-footnote">Garmin Connect、COROS 和 iGPSPORT 当前面向中国站。部分平台适配仍为实验性，登录状态和平台接口变化可能影响同步。 <a href="https://github.com/litianfu1997/fit-sync-app/blob/main/docs/platform-capabilities.md">查看平台能力 ↗</a></p>
+        </div>
+      </section>
+
+      <section class="story section-space" id="features" aria-labelledby="story-title">
+        <div class="container story-heading">
+          <div><p class="eyebrow"><span class="section-number">01 /</span> MADE FOR YOUR MOVEMENT</p><h2 id="story-title">认真运动，<br /><span>其余交给 FitSync。</span></h2></div>
+          <p>无论是整理过去的骑行，还是让今后的活动自动到达目标平台，你都可以自己决定同步的方向。</p>
+        </div>
+        <div class="container feature-list">
+          <article class="feature-item">
+            <span class="feature-number">01</span>
+            <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M6 10h17m-5-5 5 5-5 5M26 22H9m5-5-5 5 5 5"/></svg></div>
+            <h3>想同步时，<br />就同步一次。</h3>
+            <p>选择来源、目标和运动类型，按需要补齐一批活动；这次操作不会改变长期规则。</p>
+          </article>
+          <article class="feature-item">
+            <span class="feature-number">02</span>
+            <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M7 16a9 9 0 0 1 16-5M25 6v5h-5M25 16a9 9 0 0 1-16 5M7 26v-5h5"/></svg></div>
+            <h3>设置好去向，<br />之后自动同步。</h3>
+            <p>按来源开启目标平台的自动化规则；需要时，也可以单独选择补发现有历史活动。</p>
+          </article>
+          <article class="feature-item">
+            <span class="feature-number">03</span>
+            <div class="feature-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><rect x="5" y="7" width="13" height="16" rx="2"/><path d="M14 7V5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-7M9 12h5M9 16h5"/></svg></div>
+            <h3>一场运动，<br />不必重复整理。</h3>
+            <p>根据时间、距离和轨迹等信息识别重复活动，保留不同来源的原始副本；不确定时交给你复核。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="experience section-space" aria-labelledby="experience-title">
+        <div class="container">
+          <div class="experience-heading"><div><p class="eyebrow light-eyebrow"><span class="section-number">02 /</span> BUILT FOR EVERYDAY</p><h2 id="experience-title">打开就清楚，<br /><span>每一步都算数。</span></h2></div><p>同步进度、运动记录和规则设置，<br />都在一个简单的界面里。</p></div>
+          <div class="experience-layout">
+            <div class="screen-tabs" role="tablist" aria-label="切换应用界面预览">
+              <button class="screen-tab is-active" id="tab-overview" type="button" role="tab" aria-selected="true" aria-controls="screen-panel" tabindex="0" data-image="assets/screenshots/overview.png" data-alt="FitSync 概览界面，显示合成的演示活动和同步状态" data-caption="同步状态和最近导入，一眼看明白。"><span class="tab-index">01</span><span class="tab-content"><strong>同步概览</strong><small>最近活动与任务状态</small></span><span class="tab-arrow" aria-hidden="true">↗</span></button>
+              <button class="screen-tab" id="tab-activities" type="button" role="tab" aria-selected="false" aria-controls="screen-panel" tabindex="-1" data-image="assets/screenshots/activities.png" data-alt="FitSync 运动记录界面，显示合成的演示活动" data-caption="运动记录、距离和时长，集中在一个活动库。"><span class="tab-index">02</span><span class="tab-content"><strong>运动记录</strong><small>你的活动，都在这里</small></span><span class="tab-arrow" aria-hidden="true">↗</span></button>
+              <button class="screen-tab" id="tab-manual" type="button" role="tab" aria-selected="false" aria-controls="screen-panel" tabindex="-1" data-image="assets/screenshots/manual-sync.png" data-alt="FitSync 一次性同步界面，选择活动来源和目标" data-caption="选择来源与目标，发起一次按需同步。"><span class="tab-index">03</span><span class="tab-content"><strong>一次性同步</strong><small>自己决定这次怎么同步</small></span><span class="tab-arrow" aria-hidden="true">↗</span></button>
+              <button class="screen-tab" id="tab-automation" type="button" role="tab" aria-selected="false" aria-controls="screen-panel" tabindex="-1" data-image="assets/screenshots/automation.png" data-alt="FitSync 同步自动化界面，展示演示规则" data-caption="为常用路径设置自动同步，历史补发可单独开启。"><span class="tab-index">04</span><span class="tab-content"><strong>同步自动化</strong><small>开启常用路径的规则</small></span><span class="tab-arrow" aria-hidden="true">↗</span></button>
+            </div>
+            <div class="screen-stage" id="screen-panel" role="tabpanel" aria-labelledby="tab-overview" tabindex="0">
+              <div class="screen-stage-grid" aria-hidden="true"></div>
+              <div class="screen-stage-tag">A CLOSER LOOK <span>↗</span></div>
+              <div class="screen-phone phone-frame"><img data-screen-image src="assets/screenshots/overview.png" width="1080" height="2400" alt="FitSync 概览界面，显示合成的演示活动和同步状态" loading="lazy" /></div>
+              <p class="screen-caption" data-screen-caption aria-live="polite">同步状态和最近导入，一眼看明白。</p>
+            </div>
+          </div>
+          <p class="experience-disclaimer">截图来自应用，活动、账号状态与任务均为演示数据。</p>
+        </div>
+      </section>
+
+      <section class="how section-space" id="how-it-works" aria-labelledby="how-title">
+        <div class="container how-layout">
+          <div class="how-intro"><p class="eyebrow"><span class="section-number">03 /</span> GET MOVING</p><h2 id="how-title">三步开始，<br /><span>记录继续向前。</span></h2><p>不需要搭建服务器。安装应用、连接平台，然后选择想要的同步方式。</p><a class="inline-link" href="https://github.com/litianfu1997/fit-sync-app#开始使用">阅读完整使用说明 <span aria-hidden="true">↗</span></a></div>
+          <ol class="steps">
+            <li><span>01</span><div><h3>安装 FitSync</h3><p>在 GitHub Releases 下载 APK，安装到 Android 8.0 及以上设备。</p></div></li>
+            <li><span>02</span><div><h3>连接你的平台</h3><p>在平台账号页面登录，并按平台提示完成必要的验证。</p></div></li>
+            <li><span>03</span><div><h3>选择来源与去向</h3><p>立即同步一次，或开启自动化规则，让后续活动按选择的路径同步。</p></div></li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="privacy-section" id="privacy" aria-labelledby="privacy-title">
+        <div class="container privacy-layout">
+          <div class="privacy-graphic" aria-hidden="true"><div class="privacy-orbit privacy-orbit-one"></div><div class="privacy-orbit privacy-orbit-two"></div><svg viewBox="0 0 72 72"><rect x="23" y="9" width="26" height="54" rx="5"/><path d="M31 17h10M33 54h6"/><path class="privacy-check" d="M28 35l5 5 11-12"/></svg><span>ON YOUR DEVICE</span></div>
+          <div class="privacy-copy"><p class="eyebrow light-eyebrow"><span class="section-number">04 /</span> YOUR DATA, YOUR CHOICE</p><h2 id="privacy-title">你的记录，<br /><span>由你掌握。</span></h2><p>活动库、去重结果、同步任务和 FIT 文件保存在手机的应用沙箱里。同步时，手机直接与选择的平台通信，不需要 FitSync 自建服务器。</p><p class="privacy-detail">地图需要联网加载瓦片。部分平台通过网页会话或账号登录；请妥善保管自己的设备和账号。</p><a class="inline-link light-link" href="https://github.com/litianfu1997/fit-sync-app#隐私与数据">了解隐私与数据 <span aria-hidden="true">↗</span></a></div>
+        </div>
+      </section>
+
+      <section class="faq section-space" aria-labelledby="faq-title">
+        <div class="container faq-layout">
+          <div><p class="eyebrow"><span class="section-number">05 /</span> GOOD TO KNOW</p><h2 id="faq-title">开始前，<br /><span>你可能想知道。</span></h2></div>
+          <div class="faq-list">
+            <details><summary>FitSync 可以搬运哪些文件？<span aria-hidden="true">+</span></summary><p>目前围绕原始 FIT 文件工作。如果平台没有提供原始 FIT，就无法通过该平台自动搬运；TCX、GPX 不会被当作 FIT 导入。</p></details>
+            <details><summary>能自动同步过去的活动吗？<span aria-hidden="true">+</span></summary><p>可以在自动化路径中单独开启“补发现有历史”。默认历史拉取范围为最近 90 天，可在应用设置中调整。</p></details>
+            <details><summary>为什么刚上传还没有显示已同步？<span aria-hidden="true">+</span></summary><p>部分平台需要异步处理文件。FitSync 会等待远端活动确认，然后更新状态；登录失效或需要网页验证时会提示处理。</p></details>
+            <details><summary>需要一直打开应用吗？<span aria-hidden="true">+</span></summary><p>周期同步由 Android WorkManager 调度。实际执行时间受系统和厂商省电策略影响，可在应用的后台运行设置中检查相关限制。</p></details>
+          </div>
+        </div>
+      </section>
+
+      <section class="final-cta" aria-labelledby="cta-title">
+        <div class="container cta-layout"><div><p class="eyebrow light-eyebrow">READY FOR YOUR NEXT RIDE?</p><h2 id="cta-title">让每一段旅程，<br /><span>都在你想要的地方。</span></h2><p>免费开源，面向 Android。现在就开始整理你的运动记录。</p></div><div class="cta-actions"><a class="button button-light" href="https://github.com/litianfu1997/fit-sync-app/releases/latest">获取 Android 版 <span class="button-arrow" aria-hidden="true">↗</span></a><a class="cta-source" href="https://github.com/litianfu1997/fit-sync-app">浏览 GitHub 源码 ↗</a></div></div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container footer-inner"><a class="brand footer-brand" href="#top"><img src="assets/fitsync-mark.svg" alt="" width="35" height="35" /><span>FitSync<span class="brand-dot">.</span></span></a><p>为每一段认真的运动记录。<br /><small>Android 开源项目 · MIT License</small></p><div class="footer-links"><a href="https://github.com/litianfu1997/fit-sync-app">GitHub ↗</a><a href="https://github.com/litianfu1997/fit-sync-app/releases">Releases ↗</a><a href="https://github.com/litianfu1997/fit-sync-app/issues">反馈问题 ↗</a></div></div>
+      <div class="container footer-bottom"><span>© 2026 FitSync contributors</span><span>平台名称及商标归其各自权利人所有。</span></div>
+    </footer>
+  </body>
+</html>
