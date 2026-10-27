@@ -137,7 +137,7 @@ graph LR
 - Android SDK Platform 34、对应 Build Tools；Gradle 8.7 由仓库 Wrapper 提供。
 - Android SDK 路径使用已有的 `ANDROID_HOME` 或本机 `local.properties` 中的 `sdk.dir`，保留有效配置即可。
 
-依赖优先通过阿里云 Maven 镜像解析，并配置 Google / Maven Central 等仓库作为后备。
+本机构建默认优先通过阿里云 Maven 镜像解析，并配置官方仓库作为后备。GitHub Actions 设置 `FITSYNC_USE_MAVEN_MIRRORS=false`，直接使用 Google Maven、Maven Central 和 Gradle Plugin Portal。
 
 ### Debug 构建
 

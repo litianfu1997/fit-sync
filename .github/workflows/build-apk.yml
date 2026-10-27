@@ -14,6 +14,11 @@ on:
         required: true
         default: false
         type: boolean
+      publish_release:
+        description: '发布到 Releases（取消勾选时仅验证构建）'
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -27,6 +32,8 @@ jobs:
     name: 测试、签名并发布 APK
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    env:
+      FITSYNC_USE_MAVEN_MIRRORS: 'false'
     permissions:
       contents: write
     defaults:
@@ -95,7 +102,7 @@ jobs:
           FITSYNC_KEYSTORE_PASSWORD: ${{ secrets.FITSYNC_KEYSTORE_PASSWORD }}
           FITSYNC_KEY_ALIAS: ${{ secrets.FITSYNC_KEY_ALIAS }}
           FITSYNC_KEY_PASSWORD: ${{ secrets.FITSYNC_KEY_PASSWORD }}
-        run: ./gradlew :app:testReleaseUnitTest :app:assembleRelease --no-daemon --no-configuration-cache --stacktrace
+        run: ./gradlew :app:testReleaseUnitTest :app:assembleRelease --no-daemon --no-configuration-cache --stacktrace --info
 
       - name: 校验签名并整理发布文件
         id: package
@@ -134,6 +141,7 @@ jobs:
           PY
 
       - name: 发布到 GitHub Releases
+        if: inputs.publish_release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
@@ -163,6 +171,10 @@ jobs:
           gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest="$latest"
           release_url=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)
           printf '### APK 已发布\n\n[前往 Releases 下载](%s)\n\n版本：%s · versionCode：%s\n' "$release_url" "$VERSION_NAME" "$FITSYNC_VERSION_CODE" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 记录构建验证结果
+        if: ${{ !inputs.publish_release }}
+        run: printf '### 构建验证通过\n\n单元测试、Release 构建、APK 签名和打包检查均已通过。本次选择仅验证，未创建 Release。\n' >> "$GITHUB_STEP_SUMMARY"
 
       - name: 清理临时签名文件
         if: always()

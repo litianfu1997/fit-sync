@@ -4,6 +4,8 @@
 
 每次点击运行后，GitHub 使用 JDK 21 和项目的 Gradle Wrapper 执行 Release 单元测试、压缩构建与签名校验，然后把正式 APK 和 `SHA256SUMS` 发布到本仓库的 **Releases**。运行期间无需连接手机或模拟器。
 
+云端设置 `FITSYNC_USE_MAVEN_MIRRORS=false`，直接从官方 Google Maven、Maven Central 和 Gradle Plugin Portal 解析插件与依赖；KSP 显式映射到 `symbol-processing-gradle-plugin`，不依赖额外的插件 marker。本机未设置该变量时仍优先使用国内镜像。
+
 ## 首次配置
 
 ### 1. 将工作流提交到默认分支
@@ -43,7 +45,7 @@ Base64 只是文件编码，请把它存入 **Secrets**，不要存到 Variables
 1. 打开仓库的 **Actions** 页面。
 2. 左侧选择 **手动构建并发布 APK**。
 3. 点击 **Run workflow**，选择待发布的分支，通常为 `main`。
-4. **版本号**可留空使用项目版本，也可填写 `0.2.1`、`0.3.0-beta.1` 等；需要测试版时勾选 **标记为预发布版本**。
+4. **版本号**可留空使用项目版本，也可填写 `0.2.1`、`0.3.0-beta.1` 等；需要测试版时勾选 **标记为预发布版本**。**发布到 Releases** 默认勾选，取消时只运行测试、构建与校验，不创建发布，也不上传 APK 附件。
 5. 再点击 **Run workflow**，等待任务成功。
 6. 打开仓库 **Releases**，在最新发布的 **Assets** 下下载 `FitSync-…apk`。本次任务的 Summary 也会提供下载链接。
 
@@ -70,5 +72,7 @@ Base64 只是文件编码，请把它存入 **Secrets**，不要存到 Variables
 **发布失败后留下草稿**：工作流会先创建草稿并上传附件，全部成功才公开。可在 Releases 检查该草稿；重跑会使用新的标签，不会覆盖它。
 
 **构建失败**：查看对应步骤的日志。单元测试失败、签名无效或 Gradle 构建失败时，不会进入发布步骤。
+
+**修复配置后怎么重试**：回到工作流主页，选择最新 `main` 再点击 **Run workflow**。旧任务的 **Re-run jobs** 会继续使用旧提交，无法获得之后推送的修复。
 
 参考：[GitHub 手动运行工作流](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)、[GitHub Actions Secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)、[GitHub CLI 发布命令](https://cli.github.com/manual/gh_release_create)。
