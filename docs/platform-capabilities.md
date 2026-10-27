@@ -1,12 +1,12 @@
 # 六平台能力矩阵（纯 Android 本地版）
 
-> 应用不经过自建服务器。用户在 App 内 WebView 自行登录；运行时验证失败时会降级为前台网页或手动分享，不绕过验证码和二次认证。
+> 应用不经过自建服务器。用户在 App 内通过 WebView 或账号密码入口登录；运行时验证失败时会暂停对应操作并提示重新验证，不绕过验证码和二次认证。
 
 | 平台 | 活动发现/原始 FIT | FIT 上传 | 当前执行模式 |
 |------|------------------|----------|--------------|
 | 迈金 ONELAP | 已实现 | 已实现 | 登录有效时后台；令牌失效先刷新，失败后要求重新登录 |
 | 行者 | 已实现：`/api/v1/pgworkout/`、`/api/v1/workout/{id}/fit/` | 已实现：`/api/v1/fit/upload/` | Cookie 后台请求优先，网页上传兜底 |
-| Garmin Connect 中国站 | 已实现：`gc-api/activitylist-service` | 已实现：`gc-api/download-service/files/activity/{id}/fit`、`gc-api/upload-service/upload` | 登录有效时后台双向同步；JWT_WEB/CSRF 失效先静默续期，SSO 也失效才要求重新登录（实验性） |
+| Garmin Connect 中国站 | 已实现：`gc-api/activitylist-service`、`gc-api/download-service/files/activity/{id}/fit` | 已实现：`gc-api/upload-service/upload` | 登录有效时后台双向同步；JWT_WEB/CSRF 失效先静默续期，SSO 也失效才要求重新登录（实验性） |
 | COROS 高驰 | 已实现：`activity/query` + `activity/detail/download` | 已实现：OSS 直传 + `activity/fit/import` | 账号密码 API 登录，后台 list→download→upload（实验性，仅中国站） |
 | iGPSPORT | 已实现：`web-analyze/activity/queryMyActivity` + OSS 公共读直链 | 已实现：OSS 直传 + `uploadByOss` | 账号密码 API 登录，后台 list→download→upload（实验性） |
 | Strava | 网页 `/athlete/training_activities` + `/activities/{id}/export_original` | 网页 `/upload/files` + `/upload/progress.json` | WebView 登录一次后后台双向同步；不使用 API（实验性） |

@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="760" viewBox="0 0 1360 760" role="img" aria-labelledby="title desc">
+  <title id="title">FitSync 工作原理</title>
+  <desc id="desc">平台活动或系统分享的 FIT 进入 Android 应用沙箱，经校验、去重和规则规划生成投递任务。平台返回真实活动后保存副本映射，原文件、活动和任务均存于本机。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#F97316" stroke-width="1.5"/></marker>
+    <marker id="back" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#15803D" stroke-width="1.5"/></marker>
+    <style>
+      text {font-family: "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif}
+      .label {font-size: 23px; font-weight: 700; fill: #111827}
+      .body {font-size: 18px; fill: #475569}
+      .small {font-size: 16px; fill: #64748B}
+      .flow {fill: none; stroke: #F97316; stroke-width: 2.5; marker-end: url(#arrow)}
+      .store {fill: none; stroke: #CBD5E1; stroke-width: 2; stroke-dasharray: 5 6}
+    </style>
+  </defs>
+  <rect width="1360" height="760" rx="24" fill="#F8FAFC"/>
+  <text x="44" y="63" font-size="34" font-weight="750" fill="#111827">一份活动，多个平台副本</text>
+  <text x="44" y="101" font-size="20" fill="#64748B">连接器适配平台差异；活动、原文件与同步任务保存在手机。</text>
+  <rect x="284" y="145" width="820" height="550" rx="24" fill="#FFFFFF" stroke="#FDBA74" stroke-width="1.5" stroke-dasharray="8 6"/>
+  <rect x="308" y="131" width="243" height="30" rx="15" fill="#FFEDD5"/>
+  <text x="429" y="152" font-size="17" fill="#9A3412" text-anchor="middle">Android 应用沙箱</text>
+  <rect x="40" y="215" width="204" height="160" rx="18" fill="#EFF6FF" stroke="#BFDBFE"/>
+  <text x="62" y="252" class="label">来源平台</text>
+  <text x="62" y="289" class="body">迈金 / 行者 / Garmin</text>
+  <text x="62" y="320" class="body">COROS / iGPSPORT</text>
+  <text x="62" y="351" class="body">Strava</text>
+  <rect x="40" y="408" width="204" height="103" rx="18" fill="#FFFFFF" stroke="#CBD5E1"/>
+  <text x="62" y="449" class="label">系统分享</text>
+  <text x="62" y="483" class="body">打开或分享 FIT 文件</text>
+  <rect x="316" y="228" width="225" height="163" rx="18" fill="#FFF7ED" stroke="#FED7AA"/>
+  <text x="337" y="263" font-size="16" font-weight="700" fill="#C2410C">01 / ImportService</text>
+  <text x="337" y="306" class="label">校验与导入</text>
+  <text x="337" y="342" class="body">SHA-256 · CRC</text>
+  <text x="337" y="371" class="body">保存并解析原始 FIT</text>
+  <rect x="576" y="228" width="225" height="163" rx="18" fill="#FFF7ED" stroke="#FED7AA"/>
+  <text x="597" y="263" font-size="16" font-weight="700" fill="#C2410C">02 / DedupEngine</text>
+  <text x="597" y="306" class="label">活动去重</text>
+  <text x="597" y="342" class="body">时间 · 距离 · 轨迹</text>
+  <text x="597" y="371" class="body">自动合并 / 人工复核</text>
+  <rect x="836" y="228" width="225" height="163" rx="18" fill="#FFF7ED" stroke="#FED7AA"/>
+  <text x="857" y="263" font-size="16" font-weight="700" fill="#C2410C">03 / SyncCoordinator</text>
+  <text x="857" y="306" class="label">任务投递</text>
+  <text x="857" y="342" class="body">规则 / 手动选择</text>
+  <text x="857" y="371" class="body">幂等 · 重试 · 续跑</text>
+  <path d="M244 309H310" class="flow"/><path d="M541 309H570" class="flow"/>
+  <path d="M801 309H830" class="flow"/><path d="M1061 309H1136" class="flow"/>
+  <path d="M244 459H266V309H310" class="flow"/>
+  <rect x="1144" y="228" width="176" height="163" rx="18" fill="#111827"/>
+  <text x="1165" y="272" font-size="23" font-weight="700" fill="#FFFFFF">目标平台</text>
+  <text x="1165" y="311" font-size="18" fill="#E2E8F0">接收原始 FIT</text>
+  <text x="1165" y="345" font-size="16" fill="#CBD5E1">处理结果 / 已有活动</text>
+  <path d="M428 391V452M688 391V452M948 391V452" class="store"/>
+  <rect x="316" y="463" width="745" height="176" rx="18" fill="#F1F5F9"/>
+  <text x="339" y="503" font-size="21" font-weight="700" fill="#111827">本地数据底座</text>
+  <text x="1037" y="501" font-size="17" text-anchor="end" fill="#64748B">Room / SQLite + FIT 文件</text>
+  <g font-size="16" font-weight="650" fill="#334155">
+    <text x="339" y="547">CanonicalActivity</text>
+    <text x="524" y="547">ActivityVariant</text>
+    <text x="710" y="547">PlatformCopy</text>
+    <text x="894" y="547">DeliveryJob</text>
+  </g>
+  <g class="body">
+    <text x="339" y="578">一条真实活动</text>
+    <text x="524" y="578">多个原始副本</text>
+    <text x="710" y="578">平台已有记录</text>
+    <text x="894" y="578">投递状态与重试</text>
+  </g>
+  <text x="339" y="615" class="small">原件、摘要、轨迹与曲线都留在应用沙箱；凭据由 WebView / Keystore 保管。</text>
+  <path d="M1300 391V597H1070" fill="none" stroke="#15803D" stroke-width="2.5" marker-end="url(#back)"/>
+  <text x="1137" y="441" font-size="17" fill="#15803D">真实活动 ID</text>
+  <text x="1137" y="470" font-size="17" fill="#15803D">或列表唯一匹配</text>
+  <text x="1137" y="528" font-size="16" fill="#64748B">确认后写入</text>
+  <text x="1137" y="555" font-size="16" fill="#64748B">PlatformCopy</text>
+  <circle cx="49" cy="730" r="4" fill="#F97316"/>
+  <text x="64" y="737" font-size="18" fill="#475569">先检查目标已有记录，再生成投递任务。平台受理上传 ≠ 已确认同步成功。</text>
+</svg>

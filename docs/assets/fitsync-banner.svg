@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="480" viewBox="0 0 1440 480" role="img" aria-labelledby="title desc">
+  <title id="title">FitSync · 运动记录，轻松搬家</title>
+  <desc id="desc">原始 FIT 在六个平台之间同步，导入、去重和任务状态保存在 Android 手机本机。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#F8FAFC"/><stop offset="1" stop-color="#FFF3E8"/></linearGradient>
+    <linearGradient id="phone" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#172337"/><stop offset="1" stop-color="#0F172A"/></linearGradient>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="none" stroke="#F97316" stroke-width="1.6"/></marker>
+    <style>
+      text {font-family: "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif}
+      .chip {fill: #FFFFFF; stroke: #E2E8F0; stroke-width: 1.5}
+      .line {fill: none; stroke: #F97316; stroke-width: 2.2; marker-end: url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1440" height="480" rx="28" fill="url(#bg)"/>
+  <path d="M771 0V480" stroke="#E2E8F0"/>
+  <g transform="translate(64 52)">
+    <rect width="64" height="64" rx="17" fill="#111827"/>
+    <path d="M15 43L27 23L35 32L46 18L51 23L35 41L28 33L20 47Z" fill="#F97316"/>
+    <circle cx="18" cy="44" r="4" fill="#FFFFFF"/><circle cx="47" cy="20" r="4" fill="#22C55E"/>
+  </g>
+  <text x="149" y="99" font-size="43" font-weight="750" fill="#111827">FitSync</text>
+  <text x="64" y="203" font-size="51" font-weight="750" fill="#111827">运动记录，轻松搬家。</text>
+  <text x="64" y="255" font-size="25" fill="#475569">原始 FIT 的跨平台同步工具</text>
+  <g font-size="18" text-anchor="middle">
+    <rect x="64" y="301" width="142" height="43" rx="21" fill="#111827"/><text x="135" y="329" fill="#FFFFFF">Android 8.0+</text>
+    <rect x="220" y="301" width="126" height="43" rx="21" class="chip"/><text x="283" y="329" fill="#334155">原始 FIT</text>
+    <rect x="360" y="301" width="132" height="43" rx="21" class="chip"/><text x="426" y="329" fill="#334155">本机存储</text>
+    <rect x="506" y="301" width="90" height="43" rx="21" fill="#FFEDD5"/><text x="551" y="329" fill="#9A3412">MIT</text>
+  </g>
+  <text x="64" y="410" font-size="20" fill="#475569">迈金 · 行者 · Garmin 中国站 · COROS · iGPSPORT · Strava</text>
+  <g font-size="18" fill="#334155" text-anchor="middle">
+    <rect x="802" y="118" width="143" height="52" rx="14" class="chip"/><circle cx="818" cy="144" r="4" fill="#FC4C02"/><text x="879" y="151">Strava</text>
+    <rect x="802" y="207" width="143" height="52" rx="14" class="chip"/><circle cx="818" cy="233" r="4" fill="#F97316"/><text x="880" y="240">迈金</text>
+    <rect x="802" y="296" width="143" height="52" rx="14" class="chip"/><circle cx="818" cy="322" r="4" fill="#1887C9"/><text x="880" y="329">Garmin</text>
+    <rect x="1245" y="118" width="155" height="52" rx="14" class="chip"/><text x="1322" y="151">COROS</text>
+    <rect x="1245" y="207" width="155" height="52" rx="14" class="chip"/><text x="1322" y="240">iGPSPORT</text>
+    <rect x="1245" y="296" width="155" height="52" rx="14" class="chip"/><text x="1322" y="329">行者</text>
+  </g>
+  <path d="M945 144H969" class="line"/><path d="M945 233H969" class="line"/><path d="M945 322H969" class="line"/>
+  <path d="M1211 144H1239" class="line"/><path d="M1211 233H1239" class="line"/><path d="M1211 322H1239" class="line"/>
+  <rect x="978" y="54" width="230" height="361" rx="32" fill="url(#phone)"/>
+  <rect x="1062" y="67" width="62" height="5" rx="2.5" fill="#475569"/>
+  <text x="1093" y="127" text-anchor="middle" font-size="30" font-weight="700" fill="#FFFFFF">FitSync</text>
+  <g font-size="19" text-anchor="middle" fill="#E2E8F0">
+    <rect x="998" y="157" width="190" height="52" rx="13" fill="#243247"/><text x="1093" y="190">01　导入与校验</text>
+    <rect x="998" y="223" width="190" height="52" rx="13" fill="#243247"/><text x="1093" y="256">02　活动去重</text>
+    <rect x="998" y="289" width="190" height="52" rx="13" fill="#243247"/><text x="1093" y="322">03　投递与确认</text>
+  </g>
+  <circle cx="1038" cy="373" r="4" fill="#4ADE80"/><text x="1053" y="380" font-size="18" fill="#CBD5E1">本机活动库</text>
+  <text x="1102" y="453" font-size="16" text-anchor="middle" fill="#64748B">六个平台均可作为来源或目标</text>
+</svg>
